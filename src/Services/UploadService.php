@@ -118,7 +118,12 @@ final class UploadService
         if (!$in || !$out) throw new RuntimeException('Unable to open upload stream', 500);
         $written = 0;
         try {
-            while (!feof($in)) {
+            // The browser sends exactly chunkBytes per chunk, so $written
+            // reaches $chunkLimit while the stream is not yet at EOF. Testing
+            // $written first keeps the read length positive: fread() with a
+            // length of 0 is a ValueError on PHP 8 and surfaced as HTTP 500 on
+            // every full-size chunk.
+            while ($written < $chunkLimit && !feof($in)) {
                 $buffer = fread($in, min(1024 * 1024, $chunkLimit - $written));
                 if ($buffer === false) throw new RuntimeException('Unable to read upload chunk', 500);
                 if ($buffer === '') break;
@@ -126,6 +131,14 @@ final class UploadService
                 if ($written + $len > $chunkLimit || $written + $len > $remaining) throw new RuntimeException('Chunk is larger than expected', 413);
                 if (fwrite($out, $buffer) !== $len) throw new RuntimeException('Unable to write upload chunk', 500);
                 $written += $len;
+            }
+            // A body longer than the limit must still be rejected rather than
+            // silently truncated at exactly chunkLimit bytes.
+            if ($written >= $chunkLimit && !feof($in)) {
+                $excess = fread($in, 1);
+                if ($excess !== false && $excess !== '') {
+                    throw new RuntimeException('Chunk is larger than expected', 413);
+                }
             }
         } finally {
             fclose($in);
