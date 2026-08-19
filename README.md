@@ -11,7 +11,7 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
 3. Create/import the database with `database/schema.sql`.
 4. Ensure the PHP/web-server user can read/write `storage/` and `storage/.thumbnails/`.
 5. Large uploads use the resumable chunk API, so `upload_max_filesize` and `post_max_size` only need to exceed `UPLOAD_CHUNK_MB` (8 MB by default). A practical PHP configuration is `upload_max_filesize=16M` and `post_max_size=20M`. The application-level per-file limit defaults to 2 GB.
-6. Development: `php -S 127.0.0.1:8000 -t public public/index.php`.
+6. Development: `php -S 127.0.0.1:8000 -t public`.
 
 ## Required PHP extensions
 
@@ -43,7 +43,7 @@ The supplied project contains FTP/SFTP/SMB/HTTP storage-adapter logic. Server re
 
 The application automatically detects its URL base path. It can run at the web root (for example `/`) or in a subdirectory such as `/Cloud-File-Hub-PHP/`. API requests, assets, SPA navigation and generated share links use the detected base path.
 
-For Apache, enable `mod_rewrite` and `AllowOverride All` for the project directory. For PHP's built-in server from the project directory, use `php -S 0.0.0.0:8000 -t public public/index.php` and open `http://localhost:8000/`.
+For Apache, enable `mod_rewrite` and `AllowOverride All` for the project directory. For PHP's built-in server from the project directory, use `php -S 0.0.0.0:8000 -t public` and open `http://localhost:8000/`.
 
 ## Subdirectory installation
 
@@ -61,7 +61,7 @@ php -S 0.0.0.0:8000
 and open `/Cloud-File-Hub-PHP/`. Alternatively, from inside the project use:
 
 ```bash
-php -S 0.0.0.0:8000 -t public public/index.php
+php -S 0.0.0.0:8000 -t public
 ```
 
 and open `/`.

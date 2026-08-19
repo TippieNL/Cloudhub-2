@@ -11,6 +11,31 @@ final class Http {
   if(str_ends_with($dir,'/public'))$dir=substr($dir,0,-7);
   return $dir;
  }
+ /**
+  * URL prefix for the static files under public/assets.
+  *
+  * basePath() deliberately strips a trailing /public so that application
+  * routes stay portable, but the static files really do live inside public/.
+  * Whether the browser must ask for them as /public/assets or as plain
+  * /assets depends on where the document root was pointed, and SCRIPT_NAME
+  * cannot tell those layouts apart: it is '/index.php' either way. The
+  * executing file's location can, so SCRIPT_FILENAME decides.
+  *
+  *   docroot = project root => runs <project>/index.php        => /public/assets
+  *   docroot = public/      => runs <project>/public/index.php => /assets
+  *
+  * Emitting basePath().'/public/assets' unconditionally 404s whenever the
+  * document root is public/, which is the layout the README recommends first.
+  */
+ public static function assetBase(): string {
+  $base=self::basePath();
+  $script=(string)($_SERVER['SCRIPT_FILENAME']??'');
+  if($script==='')return $base.'/public';
+  $dir=str_replace('\\','/',(string)(realpath(dirname($script))?:dirname($script)));
+  $public=str_replace('\\','/',(string)(realpath(dirname(__DIR__,2).'/public')?:dirname(__DIR__,2).'/public'));
+  // The entry point already sits inside public/, so assets are siblings of it.
+  return rtrim($dir,'/')===rtrim($public,'/')?$base:$base.'/public';
+ }
  public static function requestPath(string $basePath=''): string {
   // CloudHub's browser client uses the portable front-controller form:
   // /Cloud-File-Hub-PHP/?route=/api/files/list&path=...

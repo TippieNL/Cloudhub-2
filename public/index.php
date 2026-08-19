@@ -11,7 +11,7 @@ use CloudHub\Services\LoginRateLimiter;
 use CloudHub\Services\Authorization;
 use CloudHub\Services\AuditLog;
 
-$fs = new FileService($config); $uploads = new UploadService($config, $fs); $basePath = Http::basePath(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
+$fs = new FileService($config); $uploads = new UploadService($config, $fs); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
 $frontController = ($basePath === '' ? '/' : $basePath.'/');
 Auth::startSession($config);
 Security::applyHeaders($config);

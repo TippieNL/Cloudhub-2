@@ -6,11 +6,12 @@
  * @var array|null $mediaFile
  * @var array $config
  * @var string $basePath
+ * @var string $assetBase
  * @var string $frontController
  */
 $nonce = htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES, 'UTF-8');
-$base = htmlspecialchars($basePath, ENT_QUOTES, 'UTF-8');
 $front = htmlspecialchars($frontController, ENT_QUOTES, 'UTF-8');
+$assets = htmlspecialchars($assetBase, ENT_QUOTES, 'UTF-8');
 ?>
 <!doctype html>
 <html lang="en">
@@ -18,9 +19,9 @@ $front = htmlspecialchars($frontController, ENT_QUOTES, 'UTF-8');
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title><?= htmlspecialchars($mediaFile['name'] ?? 'Media Player', ENT_QUOTES, 'UTF-8') ?> · Cloud File Hub</title>
-    <link rel="icon" href="<?= $base ?>/public/favicon.png">
-    <link rel="stylesheet" href="<?= $base ?>/public/assets/css/app.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/app.css') ?>">
-    <link rel="stylesheet" href="<?= $base ?>/public/assets/css/player.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/player.css') ?>">
+    <link rel="icon" href="<?= $assets ?>/favicon.png">
+    <link rel="stylesheet" href="<?= $assets ?>/assets/css/app.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/app.css') ?>">
+    <link rel="stylesheet" href="<?= $assets ?>/assets/css/player.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/player.css') ?>">
 
     <style>
         html, body.player-page {
@@ -93,7 +94,7 @@ $front = htmlspecialchars($frontController, ENT_QUOTES, 'UTF-8');
         </main>
     <?php endif; ?>
 
-    <script type="module" nonce="<?= $nonce ?>" src="<?= $base ?>/public/assets/js/player/PlayerUI.js"></script>
+    <script type="module" nonce="<?= $nonce ?>" src="<?= $assets ?>/assets/js/player/PlayerUI.js"></script>
     <script nonce="<?= $nonce ?>">
         window.CLOUDHUB_BASE = <?= json_encode($basePath, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_FRONT = <?= json_encode($frontController, JSON_UNESCAPED_SLASHES) ?>;

@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>File Server</title>
-    <link rel="icon" href="<?= htmlspecialchars($basePath, ENT_QUOTES) ?>/public/favicon.png">
-    <link rel="stylesheet" href="<?= htmlspecialchars($basePath, ENT_QUOTES) ?>/public/assets/css/app.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/app.css') ?>">
-    <link rel="stylesheet" href="<?= htmlspecialchars($basePath, ENT_QUOTES) ?>/public/assets/css/player.css">
+    <link rel="icon" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/favicon.png">
+    <link rel="stylesheet" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/css/app.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/app.css') ?>">
+    <link rel="stylesheet" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/css/player.css">
 </head>
 <body>
     <div id="login" class="overlay">
@@ -168,7 +168,7 @@ if (isset($mediaFile)) {
 
     <div id="toast"></div>
 
-    <script type="module" nonce="<?= htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES) ?>" src="<?= htmlspecialchars($basePath, ENT_QUOTES) ?>/public/assets/js/player/PlayerUI.js"></script>
+    <script type="module" nonce="<?= htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES) ?>" src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/player/PlayerUI.js"></script>
     <script nonce="<?= htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES) ?>">
         window.CLOUDHUB_BASE = <?= json_encode($basePath, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_FRONT = <?= json_encode($frontController, JSON_UNESCAPED_SLASHES) ?>;
@@ -181,6 +181,6 @@ if (isset($mediaFile)) {
             'conflict' => $config['upload_conflict']
         ], JSON_UNESCAPED_SLASHES) ?>;
     </script>
-    <script src="<?= htmlspecialchars($basePath, ENT_QUOTES) ?>/public/assets/js/app.js?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/js/app.js') ?>"></script>
+    <script src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/app.js?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/js/app.js') ?>"></script>
 </body>
 </html>
