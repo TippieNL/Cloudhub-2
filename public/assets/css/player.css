@@ -417,6 +417,15 @@
     display: none !important;
 }
 
+/*
+ * The play/pause, mute and fullscreen buttons each hold two icons and the
+ * player swaps them via the `hidden` attribute. SVG elements do not pick up
+ * the UA [hidden] rule reliably, so state it explicitly here.
+ */
+.cfh-btn svg[hidden] {
+    display: none !important;
+}
+
 .cfh-seekbar-container {
     touch-action: none;
     user-select: none;

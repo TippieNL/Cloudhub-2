@@ -92,7 +92,7 @@ $nonceAttr = !empty($nonce) ? ' nonce="' . htmlspecialchars($nonce, ENT_QUOTES, 
             <div class="cfh-controls-left">
                 <button type="button" class="cfh-btn" id="cfh-btn-play" aria-label="Play">
                     <svg class="cfh-icon-play" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    <svg class="cfh-icon-pause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    <svg class="cfh-icon-pause" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                 </button>
                 <button type="button" class="cfh-btn" id="cfh-btn-prev" aria-label="Previous Media">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
@@ -111,7 +111,7 @@ $nonceAttr = !empty($nonce) ? ' nonce="' . htmlspecialchars($nonce, ENT_QUOTES, 
                 <div class="cfh-volume-group">
                     <button type="button" class="cfh-btn" id="cfh-btn-mute" aria-label="Mute">
                         <svg class="cfh-icon-vol-high" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
-                        <svg class="cfh-icon-vol-mute" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+                        <svg class="cfh-icon-vol-mute" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" hidden><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
                     </button>
                     <div class="cfh-volume-slider-wrapper">
                         <input type="range" class="cfh-volume-slider" id="cfh-volume-slider" min="0" max="1" step="0.05" value="1" aria-label="Volume Slider">
@@ -124,7 +124,7 @@ $nonceAttr = !empty($nonce) ? ' nonce="' . htmlspecialchars($nonce, ENT_QUOTES, 
                 </button>
                 <button type="button" class="cfh-btn" id="cfh-btn-fullscreen" aria-label="Toggle Fullscreen">
                     <svg class="cfh-icon-fs-enter" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
-                    <svg class="cfh-icon-fs-exit" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;"><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/></svg>
+                    <svg class="cfh-icon-fs-exit" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" hidden><path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/></svg>
                 </button>
             </div>
         </div>

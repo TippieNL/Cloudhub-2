@@ -100,10 +100,14 @@ $isAuthEndpoint = str_starts_with($path, '/api/auth/');
 $isProtectedApi = (str_starts_with($path, '/api/')&&!$isAuthEndpoint) || str_starts_with($path, '/webdav');
 if ($isProtectedApi && $method !== 'OPTIONS') {
     Authorization::requireRead();
+    // A few endpoints only read: they use POST because the request carries a
+    // JSON body, not because they mutate anything. They still verify CSRF, but
+    // requiring the write capability locked viewers out of bulk download.
+    $readOnlyPost = ['/api/files/download-zip'];
     if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
         Auth::verifyCsrf();
         if (str_starts_with($path, '/api/servers'))Authorization::requireAdmin();
-        else Authorization::requireWrite();
+        elseif (!in_array($path, $readOnlyPost, true))Authorization::requireWrite();
     }
 }
 if ($path === '/api/files/config') Http::json([

@@ -25,9 +25,12 @@ final class Security {
         $nonce=self::cspNonce();
         header('X-Content-Type-Options: nosniff');
         header('Referrer-Policy: no-referrer');
-        header('X-Frame-Options: DENY');
+        // SAMEORIGIN rather than DENY: the preview dialog renders PDFs in a
+        // same-origin <iframe>, and DENY blocks same-origin framing too, so the
+        // PDF pane was always empty. Cross-origin framing stays blocked.
+        header('X-Frame-Options: SAMEORIGIN');
         header('Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()');
-        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'nonce-".$nonce."'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:");
+        header("Content-Security-Policy: default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self' 'nonce-".$nonce."'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:");
         if(self::isHttps($config)&&($config['hsts_enabled']??false)){
             header('Strict-Transport-Security: max-age='.max(0,(int)($config['hsts_max_age']??31536000)).'; includeSubDomains');
         }
