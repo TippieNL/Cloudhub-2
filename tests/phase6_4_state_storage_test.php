@@ -17,7 +17,9 @@ $env=file_get_contents(dirname(__DIR__).'/.env.example');
 $checks=[
  'query front-controller auth route'=>$path==='/api/auth/status',
  'env defaults to user file store'=>str_contains($env,'ROOT_DIR=storage/files'),
- 'legacy storage compatibility'=>str_contains($cfg,"$normalisedRoot === 'storage'"),
+ // Single quotes: in double quotes PHP interpolated the undefined
+ // $normalisedRoot, so this asserted on " === 'storage'" and passed by luck.
+ 'legacy storage compatibility'=>str_contains($cfg,'$normalisedRoot === \'storage\''),
  'no Android shared-storage session path'=>!str_contains($auth,"storage/.sessions"),
  'no forced session save path'=>!str_contains($auth,"ini_set('session.save_path'"),
 ];

@@ -15,6 +15,17 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
 5. Large uploads use the resumable chunk API, so `upload_max_filesize` and `post_max_size` only need to exceed `UPLOAD_CHUNK_MB` (8 MB by default). A practical PHP configuration is `upload_max_filesize=16M` and `post_max_size=20M`. The application-level per-file limit defaults to 2 GB.
 6. Development: `php -S 127.0.0.1:8000 -t public`.
 
+## Tests
+
+```bash
+php tests/run.php
+```
+
+The suite is plain PHP check scripts — no framework or Composer install is
+needed. A script fails the run if it exits non-zero or emits any
+warning/notice. The database-schema checks read `database/migrate.php` rather
+than connecting, so no MySQL server is required.
+
 ## Required PHP extensions
 
 `pdo`, `pdo_mysql`, `fileinfo`, `json`, `mbstring`; `zip` for multi-file ZIP downloads; `gd` for image thumbnails. OpenSSL is recommended. Remote storage protocols may additionally require `ftp`, `ssh2`, cURL, or an OS SMB client when those adapters are enabled.

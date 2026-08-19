@@ -11,7 +11,11 @@ $c=[
  'login audit'=>str_contains($i,"'auth.login'"),
  'logout audit'=>str_contains($i,"'auth.logout'"),
  'admin event endpoint'=>str_contains($i,"'/api/security/events'"),
- 'HTML not inline preview'=>!str_contains($i,"$mime==='text/html'"),
+ // Single quotes: in double quotes PHP interpolated the undefined $mime, so
+ // this asserted on "==='text/html'" and passed by luck. Inline preview is an
+ // allowlist, so assert text/html is absent from it whatever the spacing.
+ 'HTML not inline preview'=>!preg_match('/\$mime\s*===\s*\'text\/html\'/',$i),
+ 'inline preview is an allowlist'=>str_contains($i,'$inline = str_starts_with($mime,')&&str_contains($i,"\$mime === 'text/plain'"),
  'share sandbox CSP'=>str_contains($i,"sandbox; img-src"),
  'share nosniff'=>str_contains($i,"X-Content-Type-Options: nosniff"),
  'backup deny rule'=>str_contains($h,'bak|old|orig|save|sql|log|ini|dist'),
