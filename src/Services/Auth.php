@@ -5,6 +5,14 @@ use PDO;
 use CloudHub\Helpers\Http;
 
 final class Auth {
+    /**
+     * How long a rotated-away session ID keeps working.
+     *
+     * Long enough for requests already in flight when the rotation happened,
+     * short enough that a stolen predecessor ID is worth little.
+     */
+    private const ROTATION_GRACE_SECONDS = 60;
+
     public static function startSession(array $config): void {
         if(session_status()===PHP_SESSION_ACTIVE)return;
         $secure=Security::isHttps($config);
@@ -25,10 +33,29 @@ final class Auth {
             self::destroySession();session_start();
         }
         $_SESSION['created_at']??=$now;$_SESSION['last_seen_at']=$now;$_SESSION['csrf']??=bin2hex(random_bytes(32));
+        // A session carried forward from a rotation is only valid for the short
+        // grace window below; once it lapses the successor ID is the only one
+        // accepted. Requests still holding the old ID are shown the door here
+        // rather than being silently handed an empty session.
+        if(isset($_SESSION['obsolete_after'])&&$now>(int)$_SESSION['obsolete_after']){
+            self::destroySession();session_start();
+            $_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
+        }
+
         $rotate=max(300,(int)($config['session_rotate_seconds']??900));
         $_SESSION['rotated_at']??=$now;
-        if(isset($_SESSION['user_id'])&&$now-(int)$_SESSION['rotated_at']>=$rotate){
-            session_regenerate_id(true);$_SESSION['rotated_at']=$now;
+        if(isset($_SESSION['user_id'])&&!isset($_SESSION['obsolete_after'])&&$now-(int)$_SESSION['rotated_at']>=$rotate){
+            // Do not delete the old session file: the file list fires many
+            // parallel requests (one per image thumbnail, plus media streams),
+            // and any sibling already queued on the previous ID would find
+            // nothing, start an empty session under use_strict_mode, and get a
+            // surprise 401. Stamp the predecessor with an expiry, keep it
+            // readable for that grace period so in-flight requests still
+            // authenticate, and let the check above retire it afterwards.
+            $_SESSION['obsolete_after']=$now+self::ROTATION_GRACE_SECONDS;
+            session_regenerate_id(false);
+            unset($_SESSION['obsolete_after']);
+            $_SESSION['rotated_at']=$now;
         }
     }
     public static function user(): ?array {return isset($_SESSION['user_id'])?['id'=>(int)$_SESSION['user_id'],'username'=>(string)($_SESSION['username']??''),'role'=>(string)($_SESSION['role']??'viewer')]:null;}
