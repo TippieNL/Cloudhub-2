@@ -172,6 +172,48 @@ function release_session_lock(): void {
     if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
 }
 
+/**
+ * Where a file's cached thumbnail lives.
+ *
+ * Keyed by absolute path and modification time, so editing or replacing a
+ * file yields a new key and the stale thumbnail is simply never read again.
+ */
+function thumbnail_cache_path(string $file): ?string {
+    $mtime = @filemtime($file);
+    if ($mtime === false)return null;
+    $dir = dirname(__DIR__).'/storage/.thumbnails/images';
+    if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir))return null;
+    return $dir.'/'.md5($file.':'.$mtime).'.webp';
+}
+
+const THUMBNAIL_VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts'];
+const THUMBNAIL_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+
+/**
+ * Send a cached thumbnail, answering conditional requests with 304.
+ *
+ * The URL carries the file's modification time, so a cached entry is
+ * immutable for its URL and can be held for a year. The ETag still matters
+ * for a reload, where the browser revalidates regardless.
+ */
+function send_thumbnail(string $cache): never {
+    $etag = '"'.substr(basename($cache, '.webp'), 0, 32).'"';
+    header('Content-Type: image/webp');
+    header('Cache-Control: private,max-age=31536000,immutable');
+    header('X-Content-Type-Options: nosniff');
+    header('ETag: '.$etag);
+
+    $seen = trim((string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? ''));
+    if ($seen !== '' && (str_contains($seen, $etag) || $seen === '*')) {
+        http_response_code(304);
+        exit;
+    }
+
+    header('Content-Length: '.filesize($cache));
+    readfile($cache);
+    exit;
+}
+
 function api_try(callable $fn): never {
     try {
         $r = $fn(); if ($r !== null)Http::json($r);
@@ -305,7 +347,27 @@ if ($path === '/api/files/config') Http::json([
 ]);
 if ($path === '/api/files/list' && $method === 'GET') api_try(function()use($fs) {
     release_session_lock();
-    return $fs->list((string)($_GET['path']??'/'));
+    $entries = $fs->list((string)($_GET['path']??'/'));
+
+    /*
+     * Flag videos that already have a cached frame.
+     *
+     * Without this the browser had to ask for every video thumbnail and treat
+     * the failure as "not cached yet", which logged a failed request and a
+     * console error for each one, and wasted a round trip. One is_file() per
+     * video here replaces all of that.
+     */
+    $root = $fs->root();
+    foreach ($entries as &$entry) {
+        if (!empty($entry['isDirectory']))continue;
+        $ext = strtolower((string)pathinfo((string)$entry['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, THUMBNAIL_VIDEO_EXTENSIONS, true))continue;
+        $cache = thumbnail_cache_path($root.$entry['path']);
+        $entry['hasThumbnail'] = $cache !== null && is_file($cache);
+    }
+    unset($entry);
+
+    return $entries;
 });
 if ($path === '/api/files/download' && $method === 'GET') api_try(function()use($fs) {
     release_session_lock();
@@ -637,48 +699,6 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         ]);
     });
 
-    /**
-     * Where a file's cached thumbnail lives.
-     *
-     * Keyed by absolute path and modification time, so editing or replacing a
-     * file yields a new key and the stale thumbnail is simply never read again.
-     */
-    function thumbnail_cache_path(string $file): ?string {
-        $mtime = @filemtime($file);
-        if ($mtime === false)return null;
-        $dir = dirname(__DIR__).'/storage/.thumbnails/images';
-        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir))return null;
-        return $dir.'/'.md5($file.':'.$mtime).'.webp';
-    }
-
-    const THUMBNAIL_VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts'];
-    const THUMBNAIL_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
-
-    /**
-     * Send a cached thumbnail, answering conditional requests with 304.
-     *
-     * The URL carries the file's modification time, so a cached entry is
-     * immutable for its URL and can be held for a year. The ETag still matters
-     * for a reload, where the browser revalidates regardless.
-     */
-    function send_thumbnail(string $cache): never {
-        $etag = '"'.substr(basename($cache, '.webp'), 0, 32).'"';
-        header('Content-Type: image/webp');
-        header('Cache-Control: private,max-age=31536000,immutable');
-        header('X-Content-Type-Options: nosniff');
-        header('ETag: '.$etag);
-
-        $seen = trim((string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? ''));
-        if ($seen !== '' && (str_contains($seen, $etag) || $seen === '*')) {
-            http_response_code(304);
-            exit;
-        }
-
-        header('Content-Length: '.filesize($cache));
-        readfile($cache);
-        exit;
-    }
-
     if ($path === '/api/thumbnail' && $method === 'GET') api_try(function()use($fs) {
         // Nothing below writes to the session, and a gallery asks for dozens of
         // these at once, so let the other requests through immediately.
@@ -697,8 +717,12 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         if (is_file($cache))send_thumbnail($cache);
 
         if (in_array($ext, THUMBNAIL_VIDEO_EXTENSIONS, true)) {
-            // Not cached yet: the browser decodes a frame and posts it back.
-            throw new RuntimeException('Video thumbnails are generated by the browser; use the media stream endpoint', 415);
+            // Nothing has contributed a frame for this video yet. That is an
+            // ordinary state, not a broken request: the file listing carries a
+            // hasThumbnail flag so the browser knows to decode one instead of
+            // asking for it, and only reaches here if the cache entry vanished
+            // in between.
+            throw new RuntimeException('No thumbnail has been generated for this video yet', 404);
         }
 
         if (!in_array($ext, THUMBNAIL_IMAGE_EXTENSIONS, true)) {

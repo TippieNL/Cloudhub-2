@@ -254,10 +254,10 @@ async function captureVideoFrame(button) {
         return;
     }
 
-    // Then the server's cache. Someone may already have contributed this
-    // frame, in which case it costs one small image request instead of
-    // fetching and decoding the video.
-    if (button.dataset.thumbSrc && await loadCachedVideoThumb(button, image)) return;
+    // Then the server's cache, but only when the listing said there is a frame
+    // to fetch. Asking blindly meant every uncached video produced a failed
+    // request and a console error, plus a wasted round trip.
+    if (button.dataset.hasThumb === '1' && await loadCachedVideoThumb(button, image)) return;
 
     const status = button.querySelector('.video-thumb-status');
     const video = document.createElement('video');
@@ -466,7 +466,7 @@ function renderFiles() {
             // The server serves a cached video frame from the same endpoint as
             // image thumbnails once one has been contributed, so try that first
             // and only fall back to decoding the video in the browser.
-            thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" data-thumb-key="${esc(videoThumbKey(f))}" data-thumb-path="${encoded}" data-thumb-src="${thumbnailUrl}" aria-label="Play ${esc(f.name)}">
+            thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" data-thumb-key="${esc(videoThumbKey(f))}" data-thumb-path="${encoded}" data-thumb-src="${thumbnailUrl}" data-has-thumb="${f.hasThumbnail ? 1 : 0}" aria-label="Play ${esc(f.name)}">
                 <img alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
                 <span class="video-thumb-status" aria-hidden="true">Generating thumbnail…</span>
                 <span class="video-thumb-play" aria-hidden="true">▶</span>

@@ -68,6 +68,11 @@ once for everyone, rather than re-fetched and re-decoded by every visitor on
 every load. Contributed frames are validated as real WebP/JPEG/PNG images,
 bounded to 256 KB and 1280px, and re-encoded to WebP before being stored.
 
+`GET /api/files/list` reports `hasThumbnail` for each video, so the browser
+knows whether to fetch a cached frame or decode one, without having to ask and
+treat the failure as an answer. Requesting a video thumbnail that has not been
+generated yet returns `404`.
+
 Thumbnail URLs carry the file's modification time and are therefore immutable,
 so they are served `Cache-Control: private,max-age=31536000,immutable` with an
 `ETag` for the reload case. Images use native `loading="lazy"` and declare

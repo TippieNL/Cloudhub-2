@@ -60,6 +60,26 @@ $checks['contributing needs no write permission'] =
 $checks['the client posts frames back'] = str_contains($app, "api('/api/thumbnail/video'");
 $checks['the client tries the server cache first'] = str_contains($app, 'function loadCachedVideoThumb(');
 
+// A video with no cached frame yet is an ordinary state, not an error. It used
+// to answer 415, so every uncached video logged a failed request and a console
+// error on first load. The listing now says which videos have one.
+$checks['the listing reports which videos have a cached frame'] =
+    str_contains($index, "\$entry['hasThumbnail'] = \$cache !== null && is_file(\$cache);");
+$checks['the client only asks when a frame exists'] =
+    str_contains($app, "button.dataset.hasThumb === '1'") && str_contains($app, 'data-has-thumb=');
+$checks['an uncached video reports 404, not 415'] =
+    str_contains($index, "'No thumbnail has been generated for this video yet', 404")
+    && !str_contains($index, 'use the media stream endpoint');
+// const is not hoisted: a route that runs and exits earlier in the file would
+// never reach a definition placed further down.
+$checks['thumbnail helpers are defined before any route uses them'] = (function () use ($index): bool {
+    $const = strpos($index, 'const THUMBNAIL_VIDEO_EXTENSIONS');
+    $helper = strpos($index, 'function thumbnail_cache_path');
+    $firstRoute = strpos($index, "if (\$path === '/api/auth/login'");
+    return $const !== false && $helper !== false && $firstRoute !== false
+        && $const < $firstRoute && $helper < $firstRoute;
+})();
+
 // --- 3. caching and re-render --------------------------------------------
 $checks['thumbnails are cached for a year, immutable'] =
     str_contains($index, 'Cache-Control: private,max-age=31536000,immutable');
