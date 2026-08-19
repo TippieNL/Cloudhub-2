@@ -17,8 +17,7 @@ const S = {
     files: [],
     selected: new Set(),
     view: localStorage.getItem('cfh_view') || 'grid',
-    sort: localStorage.getItem('cfh_sort') || 'name-asc',
-    thumbnailUrls: new Set()
+    sort: localStorage.getItem('cfh_sort') || 'name-asc'
 };
 const $ = s => document.querySelector(s);
 const toast = m => {
@@ -174,9 +173,48 @@ function toggleSelection(path, checked) {
  * The browser fetches a short/seekable media stream, decodes one frame with
  * its native video codec and paints that frame into a Canvas.
  */
-function cleanupVideoThumbnailUrls() {
-    for (const url of S.thumbnailUrls) URL.revokeObjectURL(url);
-    S.thumbnailUrls.clear();
+/**
+ * Frames already decoded in this tab, keyed by path and modification time.
+ *
+ * renderFiles() runs again on every search keystroke, sort change and view
+ * toggle. Revoking these each time meant every visible video was decoded from
+ * scratch on each of those, so the cache is kept for the life of the tab and
+ * only entries for files that changed are dropped.
+ */
+const videoThumbCache = new Map();
+
+function videoThumbKey(file) {
+    return `${file.path}|${file.modified || ''}`;
+}
+
+function releaseStaleVideoThumbs(validKeys) {
+    for (const [key, url] of videoThumbCache) {
+        if (validKeys.has(key)) continue;
+        URL.revokeObjectURL(url);
+        videoThumbCache.delete(key);
+    }
+}
+
+/**
+ * Try the server-side thumbnail cache for a video.
+ *
+ * Resolves true when a cached frame was displayed. A 415 simply means nobody
+ * has contributed one yet, so the caller decodes the video instead.
+ */
+function loadCachedVideoThumb(button, image) {
+    return new Promise(resolve => {
+        const probe = new Image();
+        probe.decoding = 'async';
+        probe.onload = () => {
+            if (!document.contains(button)) return resolve(true);
+            image.src = probe.src;
+            image.removeAttribute('hidden');
+            button.querySelector('.video-thumb-status')?.remove();
+            resolve(true);
+        };
+        probe.onerror = () => resolve(false);
+        probe.src = button.dataset.thumbSrc;
+    });
 }
 
 function waitForVideoEvent(video, eventName, timeoutMs = 15000) {
@@ -206,9 +244,26 @@ async function captureVideoFrame(button) {
     const image = button.querySelector('img');
     if (!source || !image || !document.contains(button)) return;
 
+    // Already decoded in this tab: paint it straight in.
+    const cacheKey = button.dataset.thumbKey;
+    const cached = cacheKey && videoThumbCache.get(cacheKey);
+    if (cached) {
+        image.src = cached;
+        image.removeAttribute('hidden');
+        button.querySelector('.video-thumb-status')?.remove();
+        return;
+    }
+
+    // Then the server's cache. Someone may already have contributed this
+    // frame, in which case it costs one small image request instead of
+    // fetching and decoding the video.
+    if (button.dataset.thumbSrc && await loadCachedVideoThumb(button, image)) return;
+
     const status = button.querySelector('.video-thumb-status');
     const video = document.createElement('video');
-    video.preload = 'auto';
+    // 'auto' pulls the whole file down; metadata plus a seek fetches only the
+    // ranges needed to decode the one frame we want.
+    video.preload = 'metadata';
     video.muted = true;
     video.playsInline = true;
     video.controls = false;
@@ -280,16 +335,19 @@ async function captureVideoFrame(button) {
         }));
 
         const objectUrl = URL.createObjectURL(blob);
-        S.thumbnailUrls.add(objectUrl);
+        if (cacheKey) videoThumbCache.set(cacheKey, objectUrl);
         if (!document.contains(button)) {
-            URL.revokeObjectURL(objectUrl);
-            S.thumbnailUrls.delete(objectUrl);
+            if (!cacheKey) URL.revokeObjectURL(objectUrl);
             return;
         }
 
         image.src = objectUrl;
         image.removeAttribute('hidden');
         if (status) status.remove();
+
+        // Hand the frame to the server so nobody -- including this tab on its
+        // next visit -- has to download and decode the video again.
+        persistVideoThumbnail(decodeURIComponent(button.dataset.thumbPath || ''), blob);
     } catch (error) {
         /*
          * Canvas extraction is not available in every Android WebView.
@@ -318,9 +376,28 @@ async function captureVideoFrame(button) {
     }
 }
 
-function initVideoThumbnails() {
-    cleanupVideoThumbnailUrls();
+/**
+ * Send a decoded frame to the server's thumbnail cache.
+ *
+ * Best effort by design: a failure here costs nothing but a regenerated frame
+ * next time, so it must never disturb the gallery.
+ */
+async function persistVideoThumbnail(path, blob) {
+    if (!path || !blob || blob.size > 240000) return;
+    try {
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+        });
+        await api('/api/thumbnail/video', { method: 'POST', body: { path, image: dataUrl } });
+    } catch {
+        // Ignored on purpose.
+    }
+}
 
+function initVideoThumbnails() {
     const buttons = [...document.querySelectorAll('.thumb-preview.video-thumb[data-video-thumb]')];
     if (!buttons.length) return;
 
@@ -366,7 +443,6 @@ function initVideoThumbnails() {
 
 /** Render files in either responsive grid or compact list mode. */
 function renderFiles() {
-    cleanupVideoThumbnailUrls();
     const list = $('#file-list');
     const imageExt = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif']);
     const videoExt = new Set(['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts']);
@@ -383,12 +459,15 @@ function renderFiles() {
             thumb = '<span class="folder-icon">📁</span>';
         } else if (imageExt.has(ext)) {
             thumb = `<button class="thumb-preview" data-preview="${encoded}" aria-label="Preview ${esc(f.name)}">
-                <img src="${thumbnailUrl}" alt="" loading="lazy" decoding="async">
+                <img src="${thumbnailUrl}" alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
             </button>`;
         } else if (videoExt.has(ext)) {
             const streamUrl = appUrl('/api/files/stream?path=' + encodeURIComponent(f.path));
-            thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" aria-label="Play ${esc(f.name)}">
-                <img alt="" loading="lazy" decoding="async">
+            // The server serves a cached video frame from the same endpoint as
+            // image thumbnails once one has been contributed, so try that first
+            // and only fall back to decoding the video in the browser.
+            thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" data-thumb-key="${esc(videoThumbKey(f))}" data-thumb-path="${encoded}" data-thumb-src="${thumbnailUrl}" aria-label="Play ${esc(f.name)}">
+                <img alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
                 <span class="video-thumb-status" aria-hidden="true">Generating thumbnail…</span>
                 <span class="video-thumb-play" aria-hidden="true">▶</span>
             </button>`;
@@ -415,6 +494,10 @@ function renderFiles() {
             }));
         }, { once: true });
     });
+
+    // Frames for files no longer listed can go; the rest stay cached so a
+    // search keystroke or sort change does not re-decode them.
+    releaseStaleVideoThumbs(new Set(S.files.map(videoThumbKey)));
 
     initVideoThumbnails();
 

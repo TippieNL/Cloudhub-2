@@ -34,7 +34,11 @@ $checks['player.css hides svg[hidden] inside buttons'] = str_contains($playerCss
 
 // M4: download-zip is a read-only POST; requiring the write capability gave
 // viewers a 403 on bulk download while single downloads worked.
-$checks['download-zip is exempt from the write check'] = str_contains($index, "\$readOnlyPost = ['/api/files/download-zip']");
+// Assert membership rather than the exact array literal: other read-only POST
+// routes are legitimately added to this list over time.
+preg_match('/\$readOnlyPost = \[(.*?)\];/', $index, $exempt);
+$checks['download-zip is exempt from the write check'] =
+    isset($exempt[1]) && str_contains($exempt[1], "'/api/files/download-zip'");
 $checks['download-zip still verifies CSRF'] =
     (bool)preg_match('/Auth::verifyCsrf\(\);.*?\$readOnlyPost|\$readOnlyPost.*?Auth::verifyCsrf\(\);/s', $index);
 $checks['mutating routes still require write'] = str_contains($index, 'Authorization::requireWrite()');

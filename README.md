@@ -54,6 +54,34 @@ never execute markup on the application's origin. Shared pages are served
 Shared video and audio are streamed with HTTP byte ranges, so a recipient can
 seek without downloading the whole file.
 
+## Thumbnails
+
+Image thumbnails are generated on demand with GD, capped at 300px, encoded as
+WebP and cached under `storage/.thumbnails/images`. The cache key includes the
+source file's modification time, so replacing a file produces a new key and the
+stale entry is simply never read again.
+
+The server has no video decoder. A video's frame is decoded by the first
+browser that sees it and posted back to `POST /api/thumbnail/video`, after
+which it is served from the same cache as any image — so a video is decoded
+once for everyone, rather than re-fetched and re-decoded by every visitor on
+every load. Contributed frames are validated as real WebP/JPEG/PNG images,
+bounded to 256 KB and 1280px, and re-encoded to WebP before being stored.
+
+Thumbnail URLs carry the file's modification time and are therefore immutable,
+so they are served `Cache-Control: private,max-age=31536000,immutable` with an
+`ETag` for the reload case. Images use native `loading="lazy"` and declare
+intrinsic dimensions, and video frames are decoded through an
+`IntersectionObserver` two at a time.
+
+Read-only endpoints release the PHP session lock as soon as authorization has
+been decided. Without that, PHP's exclusive per-session file lock serialises
+every request in a gallery no matter how many workers are free — the single
+largest cost in loading a folder of images.
+
+To clear the cache, delete `storage/.thumbnails/images`; it is rebuilt on
+demand.
+
 ## Tests
 
 ```bash
