@@ -98,3 +98,17 @@
   .thumb-preview.video-thumb{height:80px}
   .file-list-view .thumb-preview.video-thumb{height:44px;width:44px}
 }
+
+/* Share dialog */
+.share-field{display:block;margin:14px 0 0;font-size:13px;color:var(--muted)}
+.share-field select,.share-field input{display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+.share-field input[readonly]{cursor:text;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.share-result{margin-top:2px}
+.share-result .muted{display:block;margin:8px 0 0}
+.share-open-link{display:inline-flex;align-items:center;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:inherit;text-decoration:none;font-size:14px}
+.share-open-link:hover{border-color:var(--primary)}
+.share-open-link[hidden]{display:none}
+#share-dialog{width:min(520px,100%)}
+/* Confirmation raised above other modals: the share dialog can open one, and at
+   equal z-index the share overlay swallowed the clicks meant for it. */
+#confirm-overlay,#input-overlay{z-index:40}

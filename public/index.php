@@ -11,9 +11,18 @@ use CloudHub\Services\LoginRateLimiter;
 use CloudHub\Services\Authorization;
 use CloudHub\Services\AuditLog;
 
-$fs = new FileService($config); $uploads = new UploadService($config, $fs); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
+$fs = new FileService($config); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
 $frontController = ($basePath === '' ? '/' : $basePath.'/');
-Auth::startSession($config);
+
+/**
+ * Public share links are viewed by people who have no account here, and are
+ * routinely fetched by link-preview bots. Starting a session for them would
+ * hand every anonymous viewer a cookie and leave a session file behind on the
+ * server for each visit, so these routes run session-less. They authenticate
+ * on the token alone and never read $_SESSION.
+ */
+$isPublicShare = (bool)preg_match('#^/share/[A-Za-z0-9_-]{20,128}(?:/(?:raw|download))?$#', $path);
+if (!$isPublicShare) Auth::startSession($config);
 Security::applyHeaders($config);
 Security::assertProductionConfig($config);
 header('X-Request-ID: '.Http::requestId());
@@ -25,7 +34,9 @@ function mime_type(string $f): string {
  * Resolve a browser media MIME type reliably on Android/KSWEB.
  *
  * mime_content_type() is not guaranteed to recognise every extension on
- * Android builds, so media streaming must not depend on libmagic alone.
+ * Android builds, so media streaming and share links must not depend on
+ * libmagic alone -- a misdetected image would be offered as a download
+ * instead of being shown.
  */
 function media_mime_type(string $f): string {
     $extensionMime = match (strtolower((string)pathinfo($f, PATHINFO_EXTENSION))) {
@@ -39,6 +50,13 @@ function media_mime_type(string $f): string {
         '3gp' => 'video/3gpp',
         '3g2' => 'video/3gpp2',
         'ts', 'm2ts', 'mts' => 'video/mp2t',
+        'jpg', 'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'bmp' => 'image/bmp',
+        'avif' => 'image/avif',
+        'svg' => 'image/svg+xml',
         'mp3' => 'audio/mpeg',
         'wav' => 'audio/wav',
         'm4a' => 'audio/mp4',
@@ -51,6 +69,91 @@ function media_mime_type(string $f): string {
 
     $mime = mime_type($f);
     return $mime !== '' ? $mime : 'application/octet-stream';
+}
+
+/**
+ * Stream a file to the browser, honouring a single HTTP byte range.
+ *
+ * Media players request ranges to read metadata, start playback quickly and
+ * seek without pulling the whole file, so this is what makes video seeking
+ * work. Only one range is served per request; malformed, multiple or
+ * unsatisfiable ranges get 416. Bytes are copied in bounded buffers, so memory
+ * stays flat no matter how large the file is.
+ *
+ * $disposition is the full Content-Disposition type ("inline" or "attachment");
+ * $extraHeaders are emitted verbatim, which is how callers layer on their own
+ * cache and content-security policy.
+ */
+function serve_file_range(string $file, string $mime, string $disposition, string $method, array $extraHeaders = []): never {
+    $size = filesize($file);
+    if ($size === false)throw new RuntimeException('Unable to determine file size', 500);
+
+    $unsatisfiable = static function() use ($size): never {
+        http_response_code(416);
+        header('Content-Range: bytes */'.$size);
+        header('Accept-Ranges: bytes');
+        exit;
+    };
+
+    $start = 0;
+    $end = max(0, $size-1);
+    $status = 200;
+
+    $range = trim((string)($_SERVER['HTTP_RANGE']??''));
+    if ($range !== '') {
+        if (!preg_match('/^bytes=(\d*)-(\d*)$/', $range, $m))$unsatisfiable();
+        $first = $m[1];
+        $last = $m[2];
+        if ($first === '' && $last === '')$unsatisfiable();
+
+        if ($first === '') {
+            // Suffix range: bytes=-500 requests the final 500 bytes.
+            $suffix = (int)$last;
+            if ($suffix <= 0)$unsatisfiable();
+            $start = $size-min($suffix, $size);
+            $end = $size-1;
+        } else {
+            $start = (int)$first;
+            $end = $last === ''?$size-1:min((int)$last, $size-1);
+            if ($start >= $size || $start > $end)$unsatisfiable();
+        }
+        $status = 206;
+    }
+
+    $length = $size === 0?0:($end-$start+1);
+    http_response_code($status);
+    header('Content-Type: '.$mime);
+    header('Content-Disposition: '.$disposition.'; filename="'.str_replace(['"', "\r", "\n"], '_', basename($file)).'"');
+    header('Accept-Ranges: bytes');
+    header('Content-Length: '.$length);
+    header('X-Content-Type-Options: nosniff');
+    foreach ($extraHeaders as $header)header($header);
+    if ($status === 206)header('Content-Range: bytes '.$start.'-'.$end.'/'.$size);
+
+    if ($method === 'HEAD' || $length === 0)exit;
+
+    @set_time_limit(0);
+    while (ob_get_level() > 0)@ob_end_clean();
+
+    $handle = @fopen($file, 'rb');
+    if ($handle === false)throw new RuntimeException('Unable to open file for streaming', 500);
+    if ($start > 0 && fseek($handle, $start) !== 0) {
+        fclose($handle);
+        throw new RuntimeException('Unable to seek file for streaming', 500);
+    }
+
+    $remaining = $length;
+    $bufferSize = 1024*1024; // 1 MiB server-side streaming buffer.
+    while ($remaining > 0&&!feof($handle)) {
+        if (connection_aborted())break;
+        $data = fread($handle, (int)min($bufferSize, $remaining));
+        if ($data === false || $data === '')break;
+        echo $data;
+        $remaining -= strlen($data);
+        flush();
+    }
+    fclose($handle);
+    exit;
 }
 function api_try(callable $fn): never {
     try {
@@ -71,11 +174,78 @@ function api_try(callable $fn): never {
         error_log('['.Http::requestId().'] '.get_class($e).': '.$e->getMessage()); Http::error(500, 'INTERNAL_ERROR', 'An internal server error occurred');
     }exit;
 }
+/**
+ * Upload staging, built on first use.
+ *
+ * The constructor probes the staging directory with a real create/write/delete,
+ * so building it eagerly made every request -- including anonymous share views
+ * -- perform filesystem writes.
+ */
+function uploads(): UploadService {
+    static $uploads; global $config, $fs;
+    return $uploads ??= new UploadService($config, $fs);
+}
 function db(): PDO {
     static $pdo; if (!$pdo) {
         $c = require dirname(__DIR__).'/config/database.php'; $pdo = new PDO($c['dsn'], $c['user'], $c['pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     }return $pdo;
 }
+/**
+ * Absolute origin (scheme://host) for links handed to other people.
+ *
+ * X-Forwarded-Proto is only believed when TRUST_PROXY is set, matching
+ * Security::isHttps(); otherwise anyone could flip a generated share link to
+ * http:// by sending a header.
+ */
+function public_origin(array $config): string {
+    $scheme = Security::isHttps($config)?'https':'http';
+    $host = (string)($_SERVER['HTTP_HOST']??'');
+    if ($host === '' || !preg_match('/^[A-Za-z0-9.\-]+(?::\d+)?$/', $host)) {
+        $appUrl = trim((string)($config['app_url']??''));
+        if ($appUrl !== '')return rtrim($appUrl, '/');
+        $host = 'localhost';
+    }
+    return $scheme.'://'.$host;
+}
+
+/** Public URL of a share token, e.g. https://host/base/share/TOKEN. */
+function share_url(array $config, string $basePath, string $token): string {
+    return public_origin($config).$basePath.'/share/'.$token;
+}
+
+/**
+ * Resolve a share token to an on-disk file for an anonymous visitor.
+ *
+ * Returns [row, absolute path]. Expiry is enforced here so every share route --
+ * viewer page, raw bytes and download alike -- goes through the same check.
+ */
+function share_resolve(FileService $fs, string $token): array {
+    $stmt = db()->prepare('SELECT token,file_path,created_at,expires_at FROM share_links WHERE token=?');
+    $stmt->execute([$token]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row)throw new RuntimeException('Share link not found or expired', 404);
+    if ($row['expires_at'] && strtotime((string)$row['expires_at']) < time())throw new RuntimeException('Share link has expired', 410);
+    $file = $fs->sanitize((string)$row['file_path']);
+    if (!is_file($file))throw new RuntimeException('The shared file no longer exists', 404);
+    return [$row, $file];
+}
+
+/**
+ * How a shared file should be presented to a logged-out visitor.
+ *
+ * Only these kinds render inline. Anything else -- documents, archives, and in
+ * particular script-capable text such as HTML or SVG -- is downloaded instead,
+ * so a share link can never execute markup on this origin.
+ */
+function share_media_kind(string $file): string {
+    $mime = media_mime_type($file);
+    if ($mime === 'image/svg+xml')return 'other';
+    if (str_starts_with($mime, 'image/'))return 'image';
+    if (str_starts_with($mime, 'video/'))return 'video';
+    if (str_starts_with($mime, 'audio/'))return 'audio';
+    return 'other';
+}
+
 function mask_server(array $s): array {
     foreach (['password', 'privateKey', 'apiKey'] as $k)if (!empty($s['config'][$k]))$s['config'][$k] = '••••••••'; return $s;
 }
@@ -143,91 +313,7 @@ if (($path === '/api/files/stream') && ($method === 'GET' || $method === 'HEAD')
         throw new RuntimeException('This file type does not support media streaming', 415);
     }
 
-    $size = filesize($f);
-    if ($size === false)throw new RuntimeException('Unable to determine file size', 500);
-
-    $start = 0;
-    $end = max(0, $size-1);
-    $status = 200;
-
-    $range = trim((string)($_SERVER['HTTP_RANGE']??''));
-    if ($range !== '') {
-        if (!preg_match('/^bytes=(\d*)-(\d*)$/', $range, $m)) {
-            http_response_code(416);
-            header('Content-Range: bytes */'.$size);
-            header('Accept-Ranges: bytes');
-            exit;
-        }
-
-        $first = $m[1];
-        $last = $m[2];
-
-        if ($first === '' && $last === '') {
-            http_response_code(416);
-            header('Content-Range: bytes */'.$size);
-            header('Accept-Ranges: bytes');
-            exit;
-        }
-
-        if ($first === '') {
-            $suffix = (int)$last;
-            if ($suffix <= 0) {
-                http_response_code(416);
-                header('Content-Range: bytes */'.$size);
-                header('Accept-Ranges: bytes');
-                exit;
-            }
-            $suffix = min($suffix, $size);
-            $start = $size-$suffix;
-            $end = $size-1;
-        } else {
-            $start = (int)$first;
-            $end = $last === ''?$size-1:min((int)$last, $size-1);
-            if ($start >= $size || $start > $end) {
-                http_response_code(416);
-                header('Content-Range: bytes */'.$size);
-                header('Accept-Ranges: bytes');
-                exit;
-            }
-        }
-        $status = 206;
-    }
-
-    $length = $size === 0?0:($end-$start+1);
-    http_response_code($status);
-    header('Content-Type: '.$mime);
-    header('Content-Disposition: inline; filename="'.str_replace(['"', "\r", "\n"], '_', basename($f)).'"');
-    header('Accept-Ranges: bytes');
-    header('Content-Length: '.$length);
-    header('Cache-Control: private,max-age=300');
-    header('X-Content-Type-Options: nosniff');
-    if ($status === 206)header('Content-Range: bytes '.$start.'-'.$end.'/'.$size);
-
-    if ($method === 'HEAD' || $length === 0)exit;
-
-    @set_time_limit(0);
-    while (ob_get_level() > 0)@ob_end_clean();
-
-    $handle = @fopen($f, 'rb');
-    if ($handle === false)throw new RuntimeException('Unable to open media file', 500);
-    if ($start > 0 && fseek($handle, $start) !== 0) {
-        fclose($handle);
-        throw new RuntimeException('Unable to seek media file', 500);
-    }
-
-    $remaining = $length;
-    $bufferSize = 1024*1024;
-    while ($remaining > 0&&!feof($handle)) {
-        if (connection_aborted())break;
-        $read = min($bufferSize, $remaining);
-        $data = fread($handle, $read);
-        if ($data === false || $data === '')break;
-        echo $data;
-        $remaining -= strlen($data);
-        flush();
-    }
-    fclose($handle);
-    exit;
+    serve_file_range($f, $mime, 'inline', $method, ['Cache-Control: private,max-age=300']);
 });
 if (($path === '/api/files/preview') && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($fs, $method) {
     $f = $fs->existing((string)($_GET['path']??''));
@@ -237,99 +323,7 @@ if (($path === '/api/files/preview') && ($method === 'GET' || $method === 'HEAD'
     $inline = str_starts_with($mime, 'image/') || str_starts_with($mime, 'audio/') || $mime === 'application/pdf' || $mime === 'text/plain';
     if (!$inline)throw new RuntimeException('This file type does not support inline preview', 415);
 
-    $size = filesize($f);
-    if ($size === false)throw new RuntimeException('Unable to determine file size', 500);
-
-    $start = 0;
-    $end = max(0, $size-1);
-    $status = 200;
-
-    /*
-  * Large media players use HTTP byte ranges to read metadata, start playback
-  * quickly and seek without downloading the entire file. Only a single range
-  * is served per request; malformed/multiple ranges receive HTTP 416.
-  */
-    $range = trim((string)($_SERVER['HTTP_RANGE']??''));
-    if ($range !== '') {
-        if (!preg_match('/^bytes=(\d*)-(\d*)$/', $range, $m)) {
-            http_response_code(416);
-            header('Content-Range: bytes */'.$size);
-            header('Accept-Ranges: bytes');
-            exit;
-        }
-
-        $first = $m[1];
-        $last = $m[2];
-
-        if ($first === '' && $last === '') {
-            http_response_code(416);
-            header('Content-Range: bytes */'.$size);
-            header('Accept-Ranges: bytes');
-            exit;
-        }
-
-        if ($first === '') {
-            // Suffix range: bytes=-500 requests the final 500 bytes.
-            $suffix = (int)$last;
-            if ($suffix <= 0) {
-                http_response_code(416);
-                header('Content-Range: bytes */'.$size);
-                header('Accept-Ranges: bytes');
-                exit;
-            }
-            $suffix = min($suffix, $size);
-            $start = $size-$suffix;
-            $end = $size-1;
-        } else {
-            $start = (int)$first;
-            $end = $last === ''?$size-1:min((int)$last, $size-1);
-            if ($start >= $size || $start > $end) {
-                http_response_code(416);
-                header('Content-Range: bytes */'.$size);
-                header('Accept-Ranges: bytes');
-                exit;
-            }
-        }
-        $status = 206;
-    }
-
-    $length = $size === 0?0:($end-$start+1);
-    http_response_code($status);
-    header('Content-Type: '.$mime);
-    header('Content-Disposition: inline; filename="'.str_replace(['"', "\r", "\n"], '_', basename($f)).'"');
-    header('Accept-Ranges: bytes');
-    header('Content-Length: '.$length);
-    header('Cache-Control: private,max-age=300');
-    header('X-Content-Type-Options: nosniff');
-    if ($status === 206)header('Content-Range: bytes '.$start.'-'.$end.'/'.$size);
-
-    if ($method === 'HEAD' || $length === 0)exit;
-
-    // Avoid readfile() for large media. Stream only the requested byte interval
-    // in bounded buffers so PHP memory usage stays essentially constant.
-    @set_time_limit(0);
-    while (ob_get_level() > 0)@ob_end_clean();
-
-    $handle = @fopen($f, 'rb');
-    if ($handle === false)throw new RuntimeException('Unable to open preview file', 500);
-    if ($start > 0 && fseek($handle, $start) !== 0) {
-        fclose($handle);
-        throw new RuntimeException('Unable to seek preview file', 500);
-    }
-
-    $remaining = $length;
-    $bufferSize = 1024*1024; // 1 MiB server-side streaming buffer.
-    while ($remaining > 0&&!feof($handle)) {
-        if (connection_aborted())break;
-        $read = min($bufferSize, $remaining);
-        $data = fread($handle, $read);
-        if ($data === false || $data === '')break;
-        echo $data;
-        $remaining -= strlen($data);
-        flush();
-    }
-    fclose($handle);
-    exit;
+    serve_file_range($f, $mime, 'inline', $method, ['Cache-Control: private,max-age=300']);
 });
 if ($path === '/api/files/mkdir' && $method === 'POST') api_try(function()use($fs) {
     global $config; $fs->writable(); $b = Http::body(); $p = $fs->destination((string)($b['path']??'')); if (file_exists($p))throw new RuntimeException('Directory already exists', 409); if (!mkdir($p, 0775, true)&&!is_dir($p))throw new RuntimeException('Unable to create directory', 500); return ['success' => true,
@@ -351,25 +345,25 @@ if ($path === '/api/files/rename' && $method === 'POST') api_try(function()use($
 * PHP's normal multipart/post_max_size limit because each request contains only
 * one small chunk.
 */
-if ($path === '/api/uploads/init' && $method === 'POST') api_try(function()use($uploads, $config) {
+if ($path === '/api/uploads/init' && $method === 'POST') api_try(function()use($config) {
     $b = Http::body();
-    return $uploads->init(
+    return uploads()->init(
         (string)($b['targetPath']??'/'), (string)($b['name']??''), (int)($b['size']??-1),
         (string)($b['uploadId']??''), (string)($b['conflict']??$config['upload_conflict'])
     );
 });
-if ($path === '/api/uploads/status' && $method === 'GET') api_try(fn() => $uploads->status((string)($_GET['id']??'')));
-if ($path === '/api/uploads/chunk' && $method === 'PUT') api_try(function()use($uploads) {
+if ($path === '/api/uploads/status' && $method === 'GET') api_try(fn() => uploads()->status((string)($_GET['id']??'')));
+if ($path === '/api/uploads/chunk' && $method === 'PUT') api_try(function() {
     $id = (string)($_GET['id']??''); $offset = (int)($_SERVER['HTTP_X_UPLOAD_OFFSET']??-1);
-    return $uploads->append($id, $offset, 'php://input');
+    return uploads()->append($id, $offset, 'php://input');
 });
-if ($path === '/api/uploads/complete' && $method === 'POST') api_try(function()use($uploads) {
-    $b = Http::body(); return $uploads->complete((string)($b['id']??''));
+if ($path === '/api/uploads/complete' && $method === 'POST') api_try(function() {
+    $b = Http::body(); return uploads()->complete((string)($b['id']??''));
 });
-if ($path === '/api/uploads/cancel' && $method === 'DELETE') api_try(function()use($uploads) {
-    $b = Http::body(); return $uploads->cancel((string)($b['id']??''));
+if ($path === '/api/uploads/cancel' && $method === 'DELETE') api_try(function() {
+    $b = Http::body(); return uploads()->cancel((string)($b['id']??''));
 });
-if ($path === '/api/uploads/cleanup' && $method === 'POST') api_try(fn() => ['success' => true, 'removed' => $uploads->cleanupAbandoned()]);
+if ($path === '/api/uploads/cleanup' && $method === 'POST') api_try(fn() => ['success' => true, 'removed' => uploads()->cleanupAbandoned()]);
 
 /**
 * Upload one or more files into the requested storage directory.
@@ -433,24 +427,104 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         }$zip->close(); header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="download.zip"'); header('Content-Length: '.filesize($tmp)); readfile($tmp); unlink($tmp); exit;
     });
 
-    if ($path === '/api/shares/create' && $method === 'POST') api_try(function()use($fs, $config, $frontController) {
-        $b = Http::body(16384); $rel = Http::string($b, 'filePath', 1, 4096); $f = $fs->existing($rel); if (!is_file($f))throw new RuntimeException('File not found', 404); $pdo = db(); $s = $pdo->prepare('SELECT token,expires_at FROM share_links WHERE file_path=? AND (expires_at IS NULL OR expires_at>NOW()) LIMIT 1'); $s->execute([$rel]); $r = $s->fetch(PDO::FETCH_ASSOC); if (!$r) {
-            $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '='); $hours = Http::optionalInt($b, 'expiresInHours', 0, 8760, (int)$config['share_expiry_hours']); $exp = $hours > 0?gmdate('Y-m-d H:i:s', time()+$hours*3600):null; $s = $pdo->prepare('INSERT INTO share_links(token,file_path,expires_at) VALUES(?,?,?)'); $s->execute([$token, $rel, $exp]); $r = ['token' => $token,
-                'expires_at' => $exp];
-        }$scheme = ($_SERVER['HTTP_X_FORWARDED_PROTO']??($config['https_enabled']?'https':'http')); $host = $_SERVER['HTTP_HOST']??'localhost'; return ['token' => $r['token'],
-            'url' => $scheme.'://'.$host.$frontController.'?route='.rawurlencode('/share/'.$r['token']),
-            'expiresAt' => $r['expires_at']?gmdate('c', strtotime($r['expires_at'])):null];
+    if ($path === '/api/shares/create' && $method === 'POST') api_try(function()use($fs, $config, $basePath) {
+        $b = Http::body(16384);
+        $rel = Http::string($b, 'filePath', 1, 4096);
+        $f = $fs->existing($rel);
+        if (!is_file($f))throw new RuntimeException('File not found', 404);
+
+        $hours = Http::optionalInt($b, 'expiresInHours', 0, 8760, (int)$config['share_expiry_hours']);
+        $pdo = db();
+
+        // Reuse a live link for the same file so repeated shares stay stable,
+        // unless the caller asked for a different lifetime.
+        $s = $pdo->prepare('SELECT token,expires_at FROM share_links WHERE file_path=? AND (expires_at IS NULL OR expires_at>UTC_TIMESTAMP()) LIMIT 1');
+        $s->execute([$rel]);
+        $r = $s->fetch(PDO::FETCH_ASSOC);
+
+        if (!$r) {
+            $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
+            $exp = $hours > 0?gmdate('Y-m-d H:i:s', time()+$hours*3600):null;
+            $s = $pdo->prepare('INSERT INTO share_links(token,file_path,expires_at) VALUES(?,?,?)');
+            $s->execute([$token, $rel, $exp]);
+            $r = ['token' => $token, 'expires_at' => $exp];
+            AuditLog::write($pdo, 'share.create', 'success', ['path' => $rel, 'expiresInHours' => $hours]);
+        }
+
+        return ['token' => $r['token'],
+            'url' => share_url($config, $basePath, (string)$r['token']),
+            'name' => basename($f),
+            'kind' => share_media_kind($f),
+            'expiresAt' => $r['expires_at']?gmdate('c', strtotime((string)$r['expires_at'])):null];
     });
-    if ($path === '/api/shares/list' && $method === 'GET')Authorization::requireAdmin();
-    if ($path === '/api/shares/list' && $method === 'GET') api_try(function() {
-        $pdo = db(); $pdo->exec('DELETE FROM share_links WHERE expires_at IS NOT NULL AND expires_at<NOW()'); $r = $pdo->query('SELECT token,file_path,created_at,expires_at FROM share_links ORDER BY created_at DESC')->fetchAll(PDO::FETCH_ASSOC); return array_map(fn($x) => ['token' => $x['token'], 'filePath' => $x['file_path'], 'createdAt' => gmdate('c', strtotime($x['created_at'])), 'expiresAt' => $x['expires_at']?gmdate('c', strtotime($x['expires_at'])):null], $r);
+    if ($path === '/api/shares/list' && $method === 'GET') api_try(function()use($config, $basePath, $fs) {
+        Authorization::requireAdmin();
+        $pdo = db();
+        $pdo->exec('DELETE FROM share_links WHERE expires_at IS NOT NULL AND expires_at<UTC_TIMESTAMP()');
+        $rows = $pdo->query('SELECT token,file_path,created_at,expires_at FROM share_links ORDER BY created_at DESC')->fetchAll(PDO::FETCH_ASSOC);
+        return array_map(fn($x) => [
+            'token' => $x['token'],
+            'filePath' => $x['file_path'],
+            'name' => basename((string)$x['file_path']),
+            'url' => share_url($config, $basePath, (string)$x['token']),
+            'createdAt' => gmdate('c', strtotime((string)$x['created_at'])),
+            'expiresAt' => $x['expires_at']?gmdate('c', strtotime((string)$x['expires_at'])):null,
+        ], $rows);
     });
     if ($path === '/api/shares/revoke' && $method === 'DELETE') api_try(function() {
-        $b = Http::body(8192); $token = Http::string($b, 'token', 20, 128); if (!preg_match('/^[A-Za-z0-9_-]+$/', $token))Http::error(422, 'VALIDATION_FAILED', 'token has an invalid format'); $s = db()->prepare('DELETE FROM share_links WHERE token=?'); $s->execute([$token]); if (!$s->rowCount())throw new RuntimeException('Token not found', 404); return ['success' => true,
-            'message' => 'Share link revoked'];
+        $b = Http::body(8192);
+        $token = Http::string($b, 'token', 20, 128);
+        if (!preg_match('/^[A-Za-z0-9_-]+$/', $token))Http::error(422, 'VALIDATION_FAILED', 'token has an invalid format');
+        $s = db()->prepare('DELETE FROM share_links WHERE token=?');
+        $s->execute([$token]);
+        if (!$s->rowCount())throw new RuntimeException('Token not found', 404);
+        AuditLog::write(db(), 'share.revoke', 'success', ['token' => substr($token, 0, 8).'...']);
+        return ['success' => true, 'message' => 'Share link revoked'];
     });
-    if (preg_match('#^/share/([A-Za-z0-9_-]{20,})$#', $path, $m)) api_try(function()use($m, $fs) {
-        $s = db()->prepare('SELECT * FROM share_links WHERE token=?'); $s->execute([$m[1]]); $r = $s->fetch(PDO::FETCH_ASSOC); if (!$r)throw new RuntimeException('Share link not found or expired', 404); if ($r['expires_at'] && strtotime($r['expires_at']) < time())throw new RuntimeException('Share link has expired', 410); $f = $fs->sanitize($r['file_path']); if (!is_file($f))throw new RuntimeException('File no longer exists', 404); $mime = mime_type($f); $inline = str_starts_with($mime, 'image/') || str_starts_with($mime, 'video/') || str_starts_with($mime, 'audio/') || in_array($mime, ['application/pdf', 'text/plain'], true); header('Content-Type: '.$mime); header('Content-Disposition: '.($inline?'inline':'attachment').'; filename="'.str_replace(['"', "\r", "\n"], '_', basename($f)).'"'); header('Cache-Control: no-store'); header('X-Content-Type-Options: nosniff'); header("Content-Security-Policy: default-src 'none'; sandbox; img-src 'self' data:; media-src 'self'; style-src 'none'; script-src 'none'"); readfile($f); exit;
+
+    /**
+     * Public share endpoints. These are deliberately outside the authenticated
+     * API guard: possession of the 256-bit token is the credential, so a
+     * recipient never needs an account.
+     *
+     *   /share/{token}           human-readable viewer page
+     *   /share/{token}/raw       the bytes, inline and range-capable
+     *   /share/{token}/download  the bytes, as an attachment
+     */
+    if (preg_match('#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?$#', $path, $m) && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($m, $fs, $config, $basePath, $assetBase, $method) {
+        [$share, $file] = share_resolve($fs, $m[1]);
+        $variant = $m[2]??'';
+        $kind = share_media_kind($file);
+
+        // Shared links point at private files: keep them out of search results.
+        header('X-Robots-Tag: noindex, nofollow');
+
+        if ($variant === '' && $kind !== 'other') {
+            // Viewer page. Rendered from our own origin, so it gets the normal
+            // application CSP rather than the sandbox applied to the bytes.
+            $shareFile = [
+                'name' => basename($file),
+                'kind' => $kind,
+                'size' => filesize($file)?:0,
+                'mime' => media_mime_type($file),
+                'rawUrl' => $basePath.'/share/'.$share['token'].'/raw',
+                'downloadUrl' => $basePath.'/share/'.$share['token'].'/download',
+                'pageUrl' => share_url($config, $basePath, (string)$share['token']),
+                'expiresAt' => $share['expires_at']?gmdate('c', strtotime((string)$share['expires_at'])):null,
+            ];
+            header('Cache-Control: private,no-store');
+            require dirname(__DIR__).'/views/pages/share.php';
+            exit;
+        }
+
+        // Raw bytes. A sandbox CSP plus nosniff keeps anything script-capable
+        // inert even when a browser is talked into rendering it, and the range
+        // support is what lets a recipient seek within a shared video.
+        $disposition = ($variant === 'raw' && $kind !== 'other')?'inline':'attachment';
+        serve_file_range($file, media_mime_type($file), $disposition, $method, [
+            'Cache-Control: private,max-age=300',
+            "Content-Security-Policy: default-src 'none'; sandbox; img-src 'self' data:; media-src 'self'; style-src 'none'; script-src 'none'",
+        ]);
     });
 
     if ($path === '/api/thumbnail' && $method === 'GET') api_try(function()use($fs, $config) {

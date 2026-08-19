@@ -15,6 +15,39 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
 5. Large uploads use the resumable chunk API, so `upload_max_filesize` and `post_max_size` only need to exceed `UPLOAD_CHUNK_MB` (8 MB by default). A practical PHP configuration is `upload_max_filesize=16M` and `post_max_size=20M`. The application-level per-file limit defaults to 2 GB.
 6. Development: `php -S 127.0.0.1:8000 -t public`.
 
+## Public share links
+
+Any file can be handed out as a URL that works without an account. Images, GIFs,
+video and audio open in a viewer page; everything else downloads.
+
+Three public routes back a token:
+
+| Route | Purpose |
+|---|---|
+| `/share/{token}` | Viewer page for media, direct download otherwise |
+| `/share/{token}/raw` | The bytes, inline and range-capable |
+| `/share/{token}/download` | The bytes, as an attachment |
+
+Possession of the token is the credential, so these routes sit outside the
+authenticated API guard and no session is started for a visitor — a share link
+issues no cookie and leaves no session file behind.
+
+Create, change the lifetime of, and revoke links from the **Share** button on any
+file. Lifetimes range from one hour to never; `SHARE_EXPIRY_HOURS` sets the
+default for new links. Revoking takes effect immediately. Administrators can list
+every live link with `GET /api/shares/list`; creating and revoking a link is
+recorded in the audit trail, readable through `GET /api/security/events`.
+
+**What a share link does not do.** Only image, video and audio types render
+inline. Everything else — documents, archives, and in particular script-capable
+content such as HTML and SVG — is sent as an attachment, and the bytes always
+carry `X-Content-Type-Options: nosniff` and a `sandbox` CSP, so a shared file can
+never execute markup on the application's origin. Shared pages are served
+`X-Robots-Tag: noindex, nofollow`.
+
+Shared video and audio are streamed with HTTP byte ranges, so a recipient can
+seek without downloading the whole file.
+
 ## Tests
 
 ```bash

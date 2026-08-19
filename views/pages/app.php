@@ -128,6 +128,44 @@
                 </div>
             </form>
         </div>
+        <div id="share-overlay" class="modal-overlay" hidden>
+            <div id="share-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="share-title">
+                <div class="modal-heading">
+                    <div>
+                        <h2 id="share-title">Share link</h2>
+                        <p>Anyone with this link can view <strong id="share-file-name">this file</strong> without signing in.</p>
+                    </div>
+                    <button id="share-close" class="icon-button" type="button" aria-label="Close share dialog">&times;</button>
+                </div>
+
+                <label class="share-field">Change expiry
+                    <select id="share-expiry">
+                        <option value="">Keep current</option>
+                        <option value="0">Never</option>
+                        <option value="1">In 1 hour</option>
+                        <option value="24">In 24 hours</option>
+                        <option value="168">In 7 days</option>
+                        <option value="720">In 30 days</option>
+                    </select>
+                </label>
+
+                <div id="share-result" class="share-result" hidden>
+                    <label class="share-field">Shareable URL
+                        <input id="share-url" type="text" readonly spellcheck="false">
+                    </label>
+                    <p id="share-expiry-note" class="muted"></p>
+                </div>
+
+                <div id="share-message" class="status-message" role="status" aria-live="polite" hidden></div>
+
+                <div class="modal-actions">
+                    <button id="share-revoke" class="danger-button" type="button" hidden>Revoke</button>
+                    <a id="share-open" class="share-open-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open</a>
+                    <button id="share-copy" class="primary-button" type="button" disabled>Copy link</button>
+                </div>
+            </div>
+        </div>
+
         <div id="file-context" class="context-menu" hidden role="menu"></div>
 
         <section id="servers-page" hidden>
@@ -173,6 +211,7 @@ if (isset($mediaFile)) {
         window.CLOUDHUB_BASE = <?= json_encode($basePath, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_FRONT = <?= json_encode($frontController, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_ROUTE = <?= json_encode($path, JSON_UNESCAPED_SLASHES) ?>;
+        window.CLOUDHUB_SHARE_EXPIRY_HOURS = <?= (int)$config['share_expiry_hours'] ?>;
         window.CLOUDHUB_UPLOAD_LIMITS = <?= json_encode([
             'maxFiles' => $config['max_upload_files'],
             'maxMb' => $config['max_upload_mb'],

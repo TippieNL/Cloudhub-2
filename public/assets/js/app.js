@@ -540,18 +540,151 @@ async function download(p) {
     URL.revokeObjectURL(u);
 }
 
-async function share(p) {
+/**
+ * Share dialog.
+ *
+ * A share link is a public URL: anyone holding it can view the file without an
+ * account, so the link, its lifetime and the way to revoke it are all shown
+ * explicitly rather than silently copied to the clipboard.
+ */
+const shareUI = {
+    overlay: $('#share-overlay'),
+    name: $('#share-file-name'),
+    expiry: $('#share-expiry'),
+    result: $('#share-result'),
+    url: $('#share-url'),
+    note: $('#share-expiry-note'),
+    message: $('#share-message'),
+    copy: $('#share-copy'),
+    open: $('#share-open'),
+    revoke: $('#share-revoke'),
+    path: null,
+    token: null
+};
+
+function shareStatus(type, text) {
+    shareUI.message.className = `status-message ${type}`;
+    shareUI.message.textContent = text;
+    shareUI.message.hidden = false;
+}
+
+function shareReset() {
+    shareUI.token = null;
+    shareUI.result.hidden = true;
+    shareUI.url.value = '';
+    shareUI.note.textContent = '';
+    shareUI.message.hidden = true;
+    shareUI.copy.disabled = true;
+    shareUI.open.hidden = true;
+    shareUI.revoke.hidden = true;
+}
+
+function closeShare() {
+    shareUI.overlay.hidden = true;
+    shareUI.path = null;
+    shareReset();
+}
+
+function formatExpiry(iso) {
+    if (!iso) return 'This link never expires.';
+    const when = new Date(iso);
+    return Number.isNaN(when.getTime())
+        ? 'This link expires.'
+        : `This link expires on ${when.toLocaleString()}.`;
+}
+
+/**
+ * Create a link, or fetch the one this file already has.
+ *
+ * `hours` omitted means "whatever the server already has, else the configured
+ * default" -- the server reuses any live link for the file, so asking for a
+ * specific lifetime on open would claim a lifetime the link may not have.
+ */
+async function shareCreate(hours) {
+    shareUI.copy.disabled = true;
+    shareStatus('', 'Creating link\u2026');
     try {
+        const body = { filePath: shareUI.path };
+        if (hours !== undefined) body.expiresInHours = hours;
         const d = await (await api('/api/shares/create', {
             method: 'POST',
-            body: { filePath: p }
+            body
         })).json();
-        await navigator.clipboard.writeText(d.url);
-        toast('Share URL copied');
+        shareUI.token = d.token;
+        shareUI.url.value = d.url;
+        shareUI.open.href = d.url;
+        shareUI.note.textContent = formatExpiry(d.expiresAt);
+        shareUI.result.hidden = false;
+        shareUI.open.hidden = false;
+        shareUI.revoke.hidden = false;
+        shareUI.copy.disabled = false;
+        shareUI.message.hidden = true;
     } catch (e) {
-        toast(e.message);
+        shareReset();
+        shareStatus('error', e.message);
     }
 }
+
+async function share(p) {
+    shareUI.path = p;
+    shareReset();
+    shareUI.name.textContent = p.split('/').pop() || p;
+    shareUI.expiry.value = '';
+    shareUI.overlay.hidden = false;
+    await shareCreate();
+}
+
+/**
+ * Changing the lifetime replaces the link: the server reuses any live link for
+ * a file, so the old token has to go before a new lifetime can take effect.
+ * The previous URL stops working, which is the honest outcome to show.
+ */
+shareUI.expiry.addEventListener('change', async () => {
+    if (!shareUI.path || shareUI.expiry.value === '') return;
+    const hours = Number(shareUI.expiry.value) || 0;
+    if (shareUI.token) {
+        try {
+            await api('/api/shares/revoke', { method: 'DELETE', body: { token: shareUI.token } });
+        } catch {}
+        shareUI.token = null;
+    }
+    await shareCreate(hours);
+    shareUI.expiry.value = '';
+});
+
+shareUI.copy.addEventListener('click', async () => {
+    const url = shareUI.url.value;
+    if (!url) return;
+    try {
+        await navigator.clipboard.writeText(url);
+        shareStatus('success', 'Link copied to the clipboard.');
+    } catch {
+        // Clipboard access needs a secure context; selecting the text lets the
+        // user copy it manually over plain http.
+        shareUI.url.select();
+        shareStatus('', 'Press Ctrl/Cmd+C to copy the selected link.');
+    }
+});
+
+shareUI.revoke.addEventListener('click', async () => {
+    if (!shareUI.token) return;
+    if (!await askConfirm('Revoke share link', 'The existing link will stop working immediately. Continue?', 'Revoke')) return;
+    try {
+        await api('/api/shares/revoke', { method: 'DELETE', body: { token: shareUI.token } });
+        shareReset();
+        shareStatus('success', 'Share link revoked.');
+    } catch (e) {
+        shareStatus('error', e.message);
+    }
+});
+
+$('#share-close').addEventListener('click', closeShare);
+shareUI.overlay.addEventListener('click', e => {
+    if (e.target === shareUI.overlay) closeShare();
+});
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !shareUI.overlay.hidden) closeShare();
+});
 
 function askConfirm(title, message, okText = 'Confirm') {
     return new Promise(resolve => {
