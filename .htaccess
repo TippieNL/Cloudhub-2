@@ -2,7 +2,7 @@ DirectoryIndex index.php
 RewriteEngine On
 
 # Never expose application internals.
-RewriteRule ^(?:config|src|views|database|storage|logs)(?:/|$) - [F,L,NC]
+RewriteRule ^(?:config|src|views|database|storage|logs|tests|tools|deploy)(?:/|$) - [F,L,NC]
 RewriteRule ^\.env(?:\..*)?$ - [F,L,NC]
 RewriteRule ^(?:composer\.(?:json|lock)|phpunit\.xml|README\.md|SECURITY\.md)$ - [F,L,NC]
 RewriteRule .*\.(?:bak|old|orig|save|sql|log|ini|dist)$ - [F,L,NC]

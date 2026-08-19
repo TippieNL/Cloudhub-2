@@ -1,18 +1,17 @@
 <?php
 /**
- * Cloud File Hub - Custom Media Player Component
+ * Cloud File Hub - Custom Media Player Component.
+ *
+ * Included only by views/pages/play.php. It renders markup and no scripts of
+ * its own, so it needs no CSP nonce: play.php carries the module tag.
+ *
  * @var array $mediaFile
- * @var string|null $nonce
- * @var string|null $basePath
  */
-$base = rtrim($basePath ?? '', '/');
-$filePath = htmlspecialchars($mediaFile['path'] ?? '', ENT_QUOTES, 'UTF-8');
 $fileName = htmlspecialchars($mediaFile['name'] ?? 'Video Playback', ENT_QUOTES, 'UTF-8');
 $folderPath = htmlspecialchars(dirname($mediaFile['path'] ?? '/'), ENT_QUOTES, 'UTF-8');
 $fileSize = htmlspecialchars($mediaFile['formatted_size'] ?? '', ENT_QUOTES, 'UTF-8');
 $streamUrl = htmlspecialchars($mediaFile['stream_url'] ?? '', ENT_QUOTES, 'UTF-8');
 $spriteUrl = htmlspecialchars($mediaFile['sprite_url'] ?? '', ENT_QUOTES, 'UTF-8');
-$nonceAttr = !empty($nonce) ? ' nonce="' . htmlspecialchars($nonce, ENT_QUOTES, 'UTF-8') . '"' : '';
 ?>
 
 <div id="cfh-player-container" class="cfh-player-container" tabindex="0" role="region" aria-label="Media Player">

@@ -366,7 +366,12 @@ if ($path === '/api/uploads/cancel' && $method === 'DELETE') api_try(function() 
 if ($path === '/api/uploads/cleanup' && $method === 'POST') api_try(fn() => ['success' => true, 'removed' => uploads()->cleanupAbandoned()]);
 
 /**
-* Upload one or more files into the requested storage directory.
+* Upload one or more files into the requested storage directory, in a single
+* multipart request.
+*
+* The browser does not use this route -- the file manager uploads through the
+* resumable chunk protocol above, which is not bound by post_max_size. It is
+* kept for API clients and scripted uploads of small files.
 *
 * Browser-side validation improves feedback, but all limits are repeated here
 * because request data is untrusted. PHP upload error codes are translated into
@@ -374,8 +379,12 @@ if ($path === '/api/uploads/cleanup' && $method === 'POST') api_try(fn() => ['su
 */
 if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($fs, $config) {
     $fs->writable();
+    // existing() already 404s on a path that is not there, so reaching this
+    // check means the path resolved to a file. Reporting that as "unable to
+    // create the upload directory", with a 500, blamed the server for what is
+    // a bad request.
     $target = $fs->existing((string)($_POST['targetPath']??'/'));
-    if (!is_dir($target)) throw new RuntimeException('Unable to create the upload directory', 500);
+    if (!is_dir($target)) throw new RuntimeException('The upload target is not a directory', 400);
 
     $names = $_FILES['files']['name']??[];
     $tmp = $_FILES['files']['tmp_name']??[];
@@ -418,13 +427,91 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             'files' => $saved];
     });
     if ($path === '/api/files/download-zip' && $method === 'POST') api_try(function()use($fs) {
-        if (!class_exists('ZipArchive'))throw new RuntimeException('PHP zip extension is required', 500); $b = Http::body(262144); $files = $b['files']??[]; if (!is_array($files)||!array_is_list($files)||!$files)throw new RuntimeException('No files specified', 400); if (count($files) > 500)Http::error(422, 'VALIDATION_FAILED', 'A maximum of 500 files can be downloaded at once'); foreach ($files as $item)if (!is_string($item) || strlen($item) > 4096)Http::error(422, 'VALIDATION_FAILED', 'Invalid file path in selection'); $tmp = tempnam(sys_get_temp_dir(), 'cfhzip'); $zip = new ZipArchive(); $zip->open($tmp, ZipArchive::OVERWRITE); $add = function($full, $prefix)use(&$add, $zip, $fs) {
+        if (!class_exists('ZipArchive'))throw new RuntimeException('PHP zip extension is required', 500);
+
+        $b = Http::body(262144);
+        $files = $b['files']??[];
+        if (!is_array($files)||!array_is_list($files)||!$files)throw new RuntimeException('No files specified', 400);
+        if (count($files) > 500)Http::error(422, 'VALIDATION_FAILED', 'A maximum of 500 files can be downloaded at once');
+        foreach ($files as $item)if (!is_string($item) || strlen($item) > 4096)Http::error(422, 'VALIDATION_FAILED', 'Invalid file path in selection');
+
+        $tmp = tempnam(sys_get_temp_dir(), 'cfhzip');
+        if ($tmp === false)throw new RuntimeException('Unable to create a temporary archive', 500);
+
+        $zip = new ZipArchive();
+        // tempnam() has already created the file, so OVERWRITE is required.
+        // The result used to go unchecked: a failed open made every later
+        // addFile() a no-op and shipped an empty archive as if it had worked.
+        if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) {
+            @unlink($tmp);
+            throw new RuntimeException('Unable to create the archive', 500);
+        }
+
+        /*
+         * Selections are addressed by full path but enter the archive under
+         * their basename, so picking report.pdf from two different folders
+         * produced one entry and silently dropped a file. Top-level names are
+         * therefore made unique; everything below a unique root is already
+         * unique because a directory cannot hold two entries of one name.
+         */
+        $roots = [];
+        $uniqueRoot = function(string $name)use(&$roots): string {
+            $key = strtolower($name);
+            if (!isset($roots[$key])) {
+                $roots[$key] = true;
+                return $name;
+            }
+            $ext = pathinfo($name, PATHINFO_EXTENSION);
+            $stem = pathinfo($name, PATHINFO_FILENAME);
+            for ($i = 2; $i < 10000; $i++) {
+                $candidate = $stem.' ('.$i.')'.($ext !== ''?'.'.$ext:'');
+                if (!isset($roots[strtolower($candidate)])) {
+                    $roots[strtolower($candidate)] = true;
+                    return $candidate;
+                }
+            }
+            throw new RuntimeException('Unable to name the archive entries uniquely', 500);
+        };
+
+        $add = function(string $full, string $prefix)use(&$add, $zip, $fs): void {
             if (is_dir($full)) {
-                foreach (scandir($full)?:[] as $n)if ($n !== '.' && $n !== '..'&&!$fs->escapingSymlink($full.'/'.$n))$add($full.'/'.$n, $prefix.'/'.$n);
-            } elseif (is_file($full))$zip->addFile($full, ltrim($prefix, '/'));
-        }; foreach ($files as $p) {
-            $f = $fs->existing((string)$p); if (file_exists($f))$add($f, basename($f));
-        }$zip->close(); header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="download.zip"'); header('Content-Length: '.filesize($tmp)); readfile($tmp); unlink($tmp); exit;
+                $entries = array_values(array_filter(scandir($full)?:[], fn($n) => $n !== '.' && $n !== '..'));
+                // An empty directory has no files to imply it, so without this
+                // it disappeared from the archive entirely.
+                if (!$entries) {
+                    $zip->addEmptyDir(ltrim($prefix, '/'));
+                    return;
+                }
+                foreach ($entries as $n) {
+                    if ($fs->escapingSymlink($full.'/'.$n))continue;
+                    $add($full.'/'.$n, $prefix.'/'.$n);
+                }
+                return;
+            }
+            if (is_file($full))$zip->addFile($full, ltrim($prefix, '/'));
+        };
+
+        try {
+            foreach ($files as $p) {
+                $f = $fs->existing((string)$p);
+                if (file_exists($f))$add($f, $uniqueRoot(basename($f)));
+            }
+            if ($zip->numFiles === 0) throw new RuntimeException('None of the selected items could be read', 404);
+            if (!$zip->close())throw new RuntimeException('Unable to finalise the archive', 500);
+        } catch (Throwable $e) {
+            // A rejected path must not leave the staging archive on disk.
+            @$zip->close();
+            @unlink($tmp);
+            throw $e;
+        }
+
+        clearstatcache(true, $tmp);
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="download.zip"');
+        header('Content-Length: '.filesize($tmp));
+        readfile($tmp);
+        unlink($tmp);
+        exit;
     });
 
     if ($path === '/api/shares/create' && $method === 'POST') api_try(function()use($fs, $config, $basePath) {

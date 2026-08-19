@@ -13,7 +13,6 @@ const rememberedPath = (() => {
 })();
 
 const S = {
-    auth: localStorage.getItem('cfh_auth') || '',
     path: rememberedPath,
     files: [],
     selected: new Set(),
@@ -515,9 +514,6 @@ async function openPreview(path) {
     const dl = document.querySelector('[data-preview-download]');
     if (dl) dl.addEventListener('click', () => download(path));
 }
-
-function initCustomPlayers() {}
-
 
 /** Creates the modal shell used by all preview types. */
 function showPreviewDialog(name, body) {

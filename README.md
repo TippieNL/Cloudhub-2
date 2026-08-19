@@ -6,7 +6,13 @@ This project is a Node-free PHP 8.2+ migration of the supplied React/Express/Typ
 
 For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatible videos are decoded by the browser.
 
-1. Point the web server document root at `public/`. Apache needs `mod_rewrite`; nginx should route unknown paths to `public/index.php`.
+1. Point the web server document root at `public/`, and route unknown paths to
+   `public/index.php`. Apache needs `mod_rewrite`; for nginx, adapt
+   `deploy/nginx-security.conf.example`. This layout keeps `.env`, `config/`,
+   `src/`, `database/`, `tools/` and `storage/` outside the web root, which is a
+   stronger guarantee than any deny rule. If you must serve the project directory
+   itself, Apache's bundled `.htaccess` denies those paths — other servers need
+   the equivalent rules configured by hand.
 2. Copy `.env.example` to `.env` and change the database credentials.
 3. Create/import the database with `database/schema.sql`, then create the first
    administrator with `php tools/create-admin.php admin` — the schema seeds no
@@ -87,30 +93,37 @@ The supplied project contains FTP/SFTP/SMB/HTTP storage-adapter logic. Server re
 
 ## Subdirectory installation
 
-The application automatically detects its URL base path. It can run at the web root (for example `/`) or in a subdirectory such as `/Cloud-File-Hub-PHP/`. API requests, assets, SPA navigation and generated share links use the detected base path.
+The application detects its own URL base path, so it runs at the web root (`/`)
+or in a subdirectory such as `/Cloud-File-Hub-PHP/` with no configuration. API
+requests, assets, in-app navigation and generated share links all follow the
+detected base path.
 
-For Apache, enable `mod_rewrite` and `AllowOverride All` for the project directory. For PHP's built-in server from the project directory, use `php -S 0.0.0.0:8000 -t public` and open `http://localhost:8000/`.
+Two entry points exist, and the one that runs decides where static assets are
+requested from (see `Http::assetBase()`):
 
-## Subdirectory installation
+- **`public/index.php`** — used when the document root is `public/`. Preferred:
+  it keeps `.env`, `config/`, `src/`, `database/` and `storage/` outside the web
+  root entirely.
+- **`index.php`** in the project root — used when the project directory itself
+  is the document root, for example a shared host that serves a subdirectory.
 
-The project root now contains `index.php`, so an installation such as
-`http://localhost:8000/Cloud-File-Hub-PHP/` can enter the application directly.
-On Apache, `mod_rewrite` and `.htaccess` overrides must be enabled for clean
-application/API URLs. The web server must permit PHP execution in the project.
+For Apache, enable `mod_rewrite` and `AllowOverride All` so the bundled
+`.htaccess` can route clean URLs and deny the application's internals. For nginx,
+adapt `deploy/nginx-security.conf.example`. Any server must send unknown paths to
+the front controller, otherwise clean URLs — including `/share/<token>` — will
+404.
 
-For PHP's built-in server from the parent directory, use:
+For PHP's built-in server, from inside the project directory:
 
 ```bash
-php -S 0.0.0.0:8000
+php -S 0.0.0.0:8000 -t public      # open http://localhost:8000/
 ```
 
-and open `/Cloud-File-Hub-PHP/`. Alternatively, from inside the project use:
+or, to serve the project from a parent directory as a subdirectory install:
 
 ```bash
-php -S 0.0.0.0:8000 -t public
+php -S 0.0.0.0:8000 router.php     # open http://localhost:8000/
 ```
-
-and open `/`.
 
 ## Login
 
@@ -154,7 +167,10 @@ with `php tools/create-admin.php admin`.
 
 The UI and API now use the root `index.php` front controller with a `route` query parameter. This means a subdirectory install such as `/Cloud-File-Hub-PHP/` works even when URL rewriting is unavailable, including PHP's built-in server started from a parent directory. Apache clean URLs remain supported by `.htaccess`.
 
-From the parent directory you may run `php -S 0.0.0.0:8000` and open `/Cloud-File-Hub-PHP/`. From the project directory, `php -S 0.0.0.0:8000 router.php` is also supported.
+From the project directory, use `php -S 0.0.0.0:8000 router.php`. Prefer it over a
+bare `php -S 0.0.0.0:8000` from the parent directory: the built-in server does not
+read `.htaccess`, so only `router.php` applies the rules that keep `.env`, `config/`,
+`src/` and `database/` from being served.
 
 ## Upload system
 

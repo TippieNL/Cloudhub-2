@@ -6,7 +6,6 @@
     <title>File Server</title>
     <link rel="icon" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/favicon.png">
     <link rel="stylesheet" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/css/app.css?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/css/app.css') ?>">
-    <link rel="stylesheet" href="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/css/player.css">
 </head>
 <body>
     <div id="login" class="overlay">
@@ -198,15 +197,8 @@
         </section>
     </main>
 
-<?php 
-if (isset($mediaFile)) {
-    include __DIR__ . '/player_component.php';
-}
-?>
-
     <div id="toast"></div>
 
-    <script type="module" nonce="<?= htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES) ?>" src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/player/PlayerUI.js"></script>
     <script nonce="<?= htmlspecialchars(\CloudHub\Services\Security::cspNonce(), ENT_QUOTES) ?>">
         window.CLOUDHUB_BASE = <?= json_encode($basePath, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_FRONT = <?= json_encode($frontController, JSON_UNESCAPED_SLASHES) ?>;
