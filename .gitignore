@@ -1,0 +1,17 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime / generated data
+/storage/files/*
+!/storage/files/.gitkeep
+/storage/.thumbnails/
+/logs/*
+!/logs/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

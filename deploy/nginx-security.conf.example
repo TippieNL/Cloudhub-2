@@ -1,0 +1,4 @@
+# Include/adapt in the CloudHub server block.
+location ~ ^/(config|src|routes|storage|tests|deploy)/ { deny all; return 404; }
+location ~* \.(env|ini|log|sql|sqlite|bak)$ { deny all; return 404; }
+# Prefer document root = /path/to/Cloud-File-Hub-PHP/public when deployment allows it.

@@ -1,0 +1,118 @@
+<?php
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/config/bootstrap.php';
+
+$dbConfig = require dirname(__DIR__) . '/config/database.php';
+$pdo = new PDO($dbConfig['dsn'], $dbConfig['user'], $dbConfig['pass'], [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+]);
+
+function tableExists(PDO $pdo, string $table): bool {
+    $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
+    $s->execute([$table]);
+    return (bool)$s->fetchColumn();
+}
+function columnExists(PDO $pdo, string $table, string $column): bool {
+    $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+    $s->execute([$table, $column]);
+    return (bool)$s->fetchColumn();
+}
+function indexExists(PDO $pdo, string $table, string $index): bool {
+    $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?');
+    $s->execute([$table, $index]);
+    return (bool)$s->fetchColumn();
+}
+function addColumn(PDO $pdo, string $table, string $column, string $definition): void {
+    if (!columnExists($pdo, $table, $column)) {
+        $pdo->exec("ALTER TABLE `$table` ADD COLUMN `$column` $definition");
+        echo "Added $table.$column\n";
+    }
+}
+
+// Create missing tables first. Statements are separated deliberately to work on MySQL/MariaDB without a migration framework.
+$pdo->exec("CREATE TABLE IF NOT EXISTS users (
+ id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ username VARCHAR(100) NOT NULL,
+ password_hash VARCHAR(255) NOT NULL,
+ is_active TINYINT(1) NOT NULL DEFAULT 1,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+ last_login_at TIMESTAMP NULL DEFAULT NULL,
+ UNIQUE KEY uq_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS storage_servers (
+ id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ name VARCHAR(190) NOT NULL,
+ type ENUM('local','ftp','sftp','smb','http_api') NOT NULL DEFAULT 'local',
+ is_active TINYINT(1) NOT NULL DEFAULT 1,
+ is_default TINYINT(1) NOT NULL DEFAULT 0,
+ config JSON NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS file_metadata (
+ id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ server_id INT UNSIGNED NOT NULL,
+ file_path TEXT NOT NULL,
+ original_name VARCHAR(255) NOT NULL,
+ size BIGINT UNSIGNED NOT NULL DEFAULT 0,
+ mime_type VARCHAR(190) NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$pdo->exec("CREATE TABLE IF NOT EXISTS share_links (
+ token CHAR(43) NOT NULL PRIMARY KEY,
+ file_path TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP NULL DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// Upgrade legacy tables in place. No existing columns or rows are removed.
+addColumn($pdo, 'users', 'is_active', 'TINYINT(1) NOT NULL DEFAULT 1');
+addColumn($pdo, 'users', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+addColumn($pdo, 'users', 'updated_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+addColumn($pdo, 'users', 'last_login_at', 'TIMESTAMP NULL DEFAULT NULL');
+
+addColumn($pdo, 'storage_servers', 'is_active', 'TINYINT(1) NOT NULL DEFAULT 1');
+addColumn($pdo, 'storage_servers', 'is_default', 'TINYINT(1) NOT NULL DEFAULT 0');
+addColumn($pdo, 'storage_servers', 'config', 'JSON NULL');
+addColumn($pdo, 'storage_servers', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+addColumn($pdo, 'storage_servers', 'updated_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+$pdo->exec("UPDATE storage_servers SET config = JSON_OBJECT() WHERE config IS NULL");
+
+addColumn($pdo, 'file_metadata', 'size', 'BIGINT UNSIGNED NOT NULL DEFAULT 0');
+addColumn($pdo, 'file_metadata', 'mime_type', 'VARCHAR(190) NULL');
+addColumn($pdo, 'file_metadata', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+
+addColumn($pdo, 'share_links', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+addColumn($pdo, 'share_links', 'expires_at', 'TIMESTAMP NULL DEFAULT NULL');
+
+if (!indexExists($pdo, 'storage_servers', 'idx_storage_active')) $pdo->exec('ALTER TABLE storage_servers ADD INDEX idx_storage_active (is_active)');
+if (!indexExists($pdo, 'storage_servers', 'idx_storage_default')) $pdo->exec('ALTER TABLE storage_servers ADD INDEX idx_storage_default (is_default)');
+if (!indexExists($pdo, 'share_links', 'idx_share_expires')) $pdo->exec('ALTER TABLE share_links ADD INDEX idx_share_expires (expires_at)');
+if (!indexExists($pdo, 'file_metadata', 'idx_file_server')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server (server_id)');
+if (!indexExists($pdo, 'file_metadata', 'idx_file_server_path')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server_path (server_id, file_path(190))');
+
+// Seed only when absent. Hash corresponds to initial password: change-me.
+$adminHash = '$2y$12$SNhLoCpIv2tLf6z9VGB/3.CkBsMrj5M.Hydbe1JFEiG2ljEaFxb5O';
+$s = $pdo->prepare('SELECT id FROM users WHERE username = ? LIMIT 1');
+$s->execute(['admin']);
+if (!$s->fetchColumn()) {
+    $s = $pdo->prepare('INSERT INTO users (username, password_hash, is_active) VALUES (?, ?, 1)');
+    $s->execute(['admin', $adminHash]);
+    echo "Created initial admin user.\n";
+}
+
+// A fresh install should have usable local storage. Existing server rows are left untouched.
+$count = (int)$pdo->query('SELECT COUNT(*) FROM storage_servers')->fetchColumn();
+if ($count === 0) {
+    $s = $pdo->prepare('INSERT INTO storage_servers (name, type, is_active, is_default, config) VALUES (?, ?, 1, 1, ?)');
+    $s->execute(['Local Storage', 'local', json_encode(['path' => 'storage/files'], JSON_UNESCAPED_SLASHES)]);
+    echo "Created default local storage server.\n";
+}
+
+echo "Cloud File Hub database migration complete.\n";
