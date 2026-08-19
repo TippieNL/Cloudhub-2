@@ -8,7 +8,9 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
 
 1. Point the web server document root at `public/`. Apache needs `mod_rewrite`; nginx should route unknown paths to `public/index.php`.
 2. Copy `.env.example` to `.env` and change the database credentials.
-3. Create/import the database with `database/schema.sql`.
+3. Create/import the database with `database/schema.sql`, then create the first
+   administrator with `php tools/create-admin.php admin` — the schema seeds no
+   account (see **Login**).
 4. Ensure the PHP/web-server user can read/write `storage/` and `storage/.thumbnails/`.
 5. Large uploads use the resumable chunk API, so `upload_max_filesize` and `post_max_size` only need to exceed `UPLOAD_CHUNK_MB` (8 MB by default). A practical PHP configuration is `upload_max_filesize=16M` and `post_max_size=20M`. The application-level per-file limit defaults to 2 GB.
 6. Development: `php -S 127.0.0.1:8000 -t public`.
@@ -67,12 +69,22 @@ php -S 0.0.0.0:8000 -t public
 and open `/`.
 
 ## Login
-Authentication is database-backed and uses PHP sessions. The schema seeds one initial account:
 
-- Username: `admin`
-- Password: `change-me`
+Authentication is database-backed and uses PHP sessions. **No account is created
+for you.** Since Phase 4 the schema deliberately seeds no user, so create the
+first administrator yourself:
 
-Change this password before exposing the application publicly. Passwords are stored using PHP-compatible password hashes. The browser no longer receives a `WWW-Authenticate` header, so native Basic Auth popups are not used.
+```bash
+php tools/create-admin.php admin
+```
+
+The tool prompts for a password (minimum 12 characters), stores an Argon2id hash
+where available, and gives the account the `admin` role. Run it again with the
+same username to reset that password.
+
+Passwords are stored using PHP-compatible password hashes and are re-hashed to
+the preferred algorithm on the next successful login. The browser no longer
+receives a `WWW-Authenticate` header, so native Basic Auth popups are not used.
 
 ## Upgrading an older Cloud File Hub database (v5)
 
@@ -82,9 +94,16 @@ Do not re-import `schema.sql` over an existing installation. Copy your existing 
 php database/migrate.php
 ```
 
-The migration creates missing tables/columns/indexes without deleting existing rows. It also creates the initial `admin` account only when that username does not already exist, and creates a local storage server only when there are no storage-server rows.
+The migration creates missing tables/columns/indexes without deleting existing
+rows, and creates a local storage server only when there are no storage-server
+rows. It covers every schema change through Phase 8 — including the
+`login_attempts` and `security_events` tables and the `users.role` column — so
+the files in `database/migrations/` do not need to be applied separately. An
+existing account named `admin` is promoted to the `admin` role the first time
+the role column is added.
 
-Initial credentials on a fresh database are `admin` / `change-me`. Change the password after setup.
+The migration creates no user accounts. If the database has none, create one
+with `php tools/create-admin.php admin`.
 
 
 ## Portable routing fix (v6)
@@ -287,9 +306,8 @@ HMAC-pseudonymised throttle keys, periodic authenticated session-ID rotation,
 Argon2id preference/automatic password rehashing, and removes the predefined
 admin account from fresh-install schema.
 
-Existing installations must apply
-`database/migrations/20260725_phase4_auth_hardening.sql`.
-Fresh administrators can be created with `php tools/create-admin.php admin`.
+Existing installations pick this up from `php database/migrate.php`.
+Administrators are created with `php tools/create-admin.php admin`.
 
 
 ## v12 Phase 5 — API hardening
@@ -302,8 +320,8 @@ predictable API route handling.
 ## v12 Phase 6 — Authorization hardening
 
 Adds viewer/editor/admin roles, capability enforcement and per-user resumable
-upload-session ownership. Existing installations must run
-`database/migrations/20260725_phase6_authorization.sql`.
+upload-session ownership. Existing installations pick this up from
+`php database/migrate.php`.
 
 
 ## v12 Phase 6.1 — basePath hotfix
@@ -329,5 +347,4 @@ to media, PDF and plain text. Public share responses add `nosniff` and a
 restrictive sandbox CSP. Apache rules additionally deny common backup, SQL,
 log, INI and development/documentation artefacts.
 
-Existing installations must run
-`database/migrations/20260725_phase7_8_security.sql`.
+Existing installations pick this up from `php database/migrate.php`.
