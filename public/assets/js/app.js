@@ -7,9 +7,14 @@ const appUrl = p => {
     const query = q >= 0 ? raw.slice(q + 1) : '';
     return `${FRONT}?route=${encodeURIComponent(route)}${query ? '&' + query : ''}`;
 };
+/** Per-tab memory of the open folder, so returning from the player lands back there. */
+const rememberedPath = (() => {
+    try { return sessionStorage.getItem('cfh_path') || '/'; } catch { return '/'; }
+})();
+
 const S = {
     auth: localStorage.getItem('cfh_auth') || '',
-    path: '/',
+    path: rememberedPath,
     files: [],
     selected: new Set(),
     view: localStorage.getItem('cfh_view') || 'grid',
@@ -116,9 +121,22 @@ function crumbs() {
 }
 
 async function loadFiles(p = S.path) {
-    S.path = p;
     S.selected.clear();
-    S.files = await (await api(`/api/files/list?path=${encodeURIComponent(p)}`)).json();
+    let response;
+    try {
+        response = await api(`/api/files/list?path=${encodeURIComponent(p)}`);
+    } catch (e) {
+        // A remembered folder can be renamed or deleted between visits. Falling
+        // back to the root beats leaving the file list empty; anything else
+        // (no session, server error) is the caller's to handle.
+        if (p === '/' || e.status === 401) throw e;
+        toast('That folder is no longer available');
+        p = '/';
+        response = await api('/api/files/list?path=%2F');
+    }
+    S.path = p;
+    try { sessionStorage.setItem('cfh_path', p); } catch {}
+    S.files = await response.json();
     crumbs();
     renderFiles();
 }

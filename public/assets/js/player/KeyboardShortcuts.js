@@ -15,6 +15,12 @@ export class KeyboardShortcuts {
     handle(event) {
         if (event.defaultPrevented || this.isTypingTarget(event.target)) return;
 
+        // Never swallow browser or OS shortcuts. Alt+Left/Right are Back and
+        // Forward on Windows and Linux, Cmd+Left/Right on macOS; the player was
+        // calling preventDefault() on the bare key regardless of modifiers, so
+        // the keyboard Back shortcut seeked the video instead of navigating.
+        if (event.altKey || event.ctrlKey || event.metaKey) return;
+
         // Do not hijack shortcuts when another media element is active.
         const playerContainer = this.playerUI.container;
         if (!playerContainer || !playerContainer.isConnected) return;

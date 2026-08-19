@@ -355,23 +355,40 @@ export class PlayerUI {
         }
     }
 
+    /**
+     * Leave the player the way the browser's own Back button would.
+     *
+     * This used to gate history.back() on a same-origin document.referrer, but
+     * the application sends `Referrer-Policy: no-referrer`, so the referrer is
+     * always empty and that branch could never run. Every press fell through to
+     * a fresh navigation, which *pushed* a history entry instead of popping
+     * one: the folder the user was browsing was lost, and pressing the
+     * browser's Back button afterwards landed them straight back on the player,
+     * playing again, with no way out of the loop.
+     */
     goBack() {
         const front = window.CLOUDHUB_FRONT || '/';
-        const referrer = document.referrer;
 
-        try {
-            const referrerUrl = referrer ? new URL(referrer, window.location.href) : null;
-            const sameOrigin = referrerUrl?.origin === window.location.origin;
+        if (window.history.length > 1) {
+            let leaving = false;
+            const onLeave = () => { leaving = true; };
+            window.addEventListener('pagehide', onLeave, { once: true });
 
-            if (sameOrigin && window.history.length > 1) {
-                window.history.back();
-                return;
-            }
-        } catch {
-            // Fall back to the application root.
+            window.history.back();
+
+            // history.back() is asynchronous, and does nothing at all when the
+            // previous entry is no longer available. If we are still here
+            // shortly afterwards, navigate instead -- with replace(), so the
+            // player is never left stacked behind the page we land on.
+            window.setTimeout(() => {
+                window.removeEventListener('pagehide', onLeave);
+                if (!leaving) window.location.replace(front);
+            }, 500);
+            return;
         }
 
-        window.location.assign(front);
+        // Opened directly, e.g. in a new tab: there is nothing to go back to.
+        window.location.replace(front);
     }
 
     toggleMenu(menuName) {
