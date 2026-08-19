@@ -40,7 +40,7 @@ final class UploadService
             if ($name === '.' || $name === '..') continue;
             $dir = $this->stagingRoot.'/'.$name;
             if (!is_dir($dir) || (filemtime($dir) ?: time()) >= $cutoff) continue;
-            $this->files->deleteTree($dir);
+            $this->deleteStagingTree($dir);
             $removed++;
         }
         return $removed;
@@ -76,7 +76,7 @@ final class UploadService
                 if ($e->getCode() === 409) throw $e;
                 // A prior interrupted metadata write must not permanently block
                 // the same file. Remove the damaged session and recreate it.
-                $this->files->deleteTree($dir);
+                $this->deleteStagingTree($dir);
             }
         }
 
@@ -175,7 +175,7 @@ final class UploadService
     {
         $dir = $this->sessionDir($id);
         if(is_file($dir.'/meta.json')){$meta=$this->readMeta($id);$this->assertOwner($meta);}
-        if (is_dir($dir)) $this->files->deleteTree($dir);
+        if (is_dir($dir)) $this->deleteStagingTree($dir);
         return ['success'=>true];
     }
 
@@ -274,6 +274,46 @@ final class UploadService
 
         if (!@unlink($probe)) {
             throw new RuntimeException(ucfirst($label).' cannot delete temporary files', 500);
+        }
+    }
+
+    /**
+     * Recursively remove a staging path, refusing anything outside the staging
+     * root.
+     *
+     * FileService::deleteTree() cannot be used here: its containment check is
+     * anchored to ROOT_DIR (storage/files) while staging lives in
+     * storage/uploads, so every call raised "Path escapes the configured
+     * storage root". That made cancel() always fail, and made init() fail for
+     * everyone once any session aged past UPLOAD_ABANDON_HOURS, because init()
+     * calls cleanupAbandoned() first.
+     */
+    private function deleteStagingTree(string $path): void
+    {
+        $normalised = rtrim(str_replace('\\', '/', $path), '/');
+        $root = rtrim(str_replace('\\', '/', $this->stagingRoot), '/');
+        if ($normalised === $root || !str_starts_with($normalised, $root.'/')) {
+            throw new RuntimeException('Path escapes the upload staging root', 403);
+        }
+
+        // Symlinks are unlinked, never followed, so a staged link cannot be
+        // used to delete files elsewhere on the filesystem.
+        if (is_link($normalised)) {
+            if (!unlink($normalised)) throw new RuntimeException('Unable to remove upload staging link', 500);
+            return;
+        }
+
+        if (is_dir($normalised)) {
+            foreach (scandir($normalised) ?: [] as $entry) {
+                if ($entry === '.' || $entry === '..') continue;
+                $this->deleteStagingTree($normalised.'/'.$entry);
+            }
+            if (!rmdir($normalised)) throw new RuntimeException('Unable to remove upload staging directory', 500);
+            return;
+        }
+
+        if (file_exists($normalised) && !unlink($normalised)) {
+            throw new RuntimeException('Unable to remove upload staging file', 500);
         }
     }
 
