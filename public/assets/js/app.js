@@ -453,7 +453,10 @@ function renderFiles() {
     list.innerHTML = sortedFiles().map(f => {
         const encoded = encodeURIComponent(f.path);
         const ext = (f.name.includes('.') ? f.name.split('.').pop() : '').toLowerCase();
-        const preview = f.isDirectory ? '' : `<button data-preview="${encoded}">Play</button>`;
+        // "Play" on a text file reads like a bug. Label the action for what it
+        // actually does with this file.
+        const playable = videoExt.has(ext) || audioExt.has(ext);
+        const preview = f.isDirectory ? '' : `<button data-preview="${encoded}">${playable ? 'Play' : 'Preview'}</button>`;
         const thumbnailUrl = appUrl('/api/thumbnail?path=' + encodeURIComponent(f.path) + '&v=' + encodeURIComponent(f.modified || ''));
         let thumb = '<span class="file-icon">📄</span>';
 

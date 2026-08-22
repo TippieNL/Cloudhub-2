@@ -26,8 +26,8 @@
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
             <a id="nav-users" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fusers" data-route="/users" hidden>Users</a>
         </nav>
-        <div>
-            <button id="theme">◐</button>
+        <div class="header-actions">
+            <button id="theme" aria-label="Toggle dark mode">◐</button>
             <button id="change-password" type="button">Password</button>
             <button id="logout">Log out</button>
         </div>
