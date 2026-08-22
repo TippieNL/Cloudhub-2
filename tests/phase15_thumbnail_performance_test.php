@@ -56,7 +56,7 @@ $checks['contributed frames are size-bounded'] =
 $checks['contributed frames are normalised to WebP'] =
     str_contains($index, 'if ($info[2] !== IMAGETYPE_WEBP)') && str_contains($index, 'imagewebp($decoded, null, 75)');
 $checks['contributing needs no write permission'] =
-    str_contains($index, "\$readOnlyPost = ['/api/files/download-zip', '/api/thumbnail/video'];");
+    str_contains($index, "'/api/thumbnail/video'") && str_contains($index, '$writeExemptPost');
 $checks['the client posts frames back'] = str_contains($app, "api('/api/thumbnail/video'");
 $checks['the client tries the server cache first'] = str_contains($app, 'function loadCachedVideoThumb(');
 

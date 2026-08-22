@@ -36,11 +36,11 @@ $checks['player.css hides svg[hidden] inside buttons'] = str_contains($playerCss
 // viewers a 403 on bulk download while single downloads worked.
 // Assert membership rather than the exact array literal: other read-only POST
 // routes are legitimately added to this list over time.
-preg_match('/\$readOnlyPost = \[(.*?)\];/', $index, $exempt);
+preg_match('/\$writeExemptPost = \[(.*?)\];/', $index, $exempt);
 $checks['download-zip is exempt from the write check'] =
     isset($exempt[1]) && str_contains($exempt[1], "'/api/files/download-zip'");
 $checks['download-zip still verifies CSRF'] =
-    (bool)preg_match('/Auth::verifyCsrf\(\);.*?\$readOnlyPost|\$readOnlyPost.*?Auth::verifyCsrf\(\);/s', $index);
+    (bool)preg_match('/Auth::verifyCsrf\(\);.*?\$writeExemptPost|\$writeExemptPost.*?Auth::verifyCsrf\(\);/s', $index);
 $checks['mutating routes still require write'] = str_contains($index, 'Authorization::requireWrite()');
 $checks['server routes still require admin'] = str_contains($index, "str_starts_with(\$path, '/api/servers'))Authorization::requireAdmin()");
 

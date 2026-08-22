@@ -4,6 +4,7 @@ require dirname(__DIR__).'/config/bootstrap.php';
 use CloudHub\Helpers\Http;
 use CloudHub\Services\FileService;
 use CloudHub\Repositories\ServerRepository;
+use CloudHub\Repositories\UserRepository;
 use CloudHub\Services\Auth;
 use CloudHub\Services\UploadService;
 use CloudHub\Services\Security;
@@ -155,6 +156,9 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
     fclose($handle);
     exit;
 }
+/** Minimum password length, matching tools/create-admin.php. */
+const USER_PASSWORD_MIN_LENGTH = 12;
+
 /**
  * Release the session lock once authorization has been decided.
  *
@@ -329,14 +333,24 @@ $isAuthEndpoint = str_starts_with($path, '/api/auth/');
 $isProtectedApi = (str_starts_with($path, '/api/')&&!$isAuthEndpoint) || str_starts_with($path, '/webdav');
 if ($isProtectedApi && $method !== 'OPTIONS') {
     Authorization::requireRead();
-    // A few endpoints only read: they use POST because the request carries a
-    // JSON body, not because they mutate anything. They still verify CSRF, but
-    // requiring the write capability locked viewers out of bulk download.
-    $readOnlyPost = ['/api/files/download-zip', '/api/thumbnail/video'];
+    /*
+     * These POST routes do not write to the file store, so the write
+     * capability does not apply to them. They still verify CSRF, and each
+     * carries its own authorization:
+     *
+     *   download-zip     reads only; it POSTs because it takes a JSON body,
+     *                    and demanding write locked viewers out of bulk download
+     *   thumbnail/video  contributes a derived frame for a file the caller can
+     *                    already watch
+     *   users/me/password  changes the caller's own password, proven by
+     *                    supplying the current one -- a viewer must be able to
+     *                    rotate their own credentials
+     */
+    $writeExemptPost = ['/api/files/download-zip', '/api/thumbnail/video', '/api/users/me/password'];
     if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
         Auth::verifyCsrf();
         if (str_starts_with($path, '/api/servers'))Authorization::requireAdmin();
-        elseif (!in_array($path, $readOnlyPost, true))Authorization::requireWrite();
+        elseif (!in_array($path, $writeExemptPost, true))Authorization::requireWrite();
     }
 }
 if ($path === '/api/files/config') Http::json([
@@ -838,6 +852,107 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         return ['success' => true, 'stored' => true];
     });
 
+    /**
+     * Account management.
+     *
+     * The roles in Authorization have always been enforced, but nothing could
+     * create an account with one: tools/create-admin.php only ever made
+     * administrators, so viewer and editor were unreachable in practice.
+     *
+     * Every route here is administrator-only. The guard above has already
+     * verified CSRF for the mutating methods.
+     */
+    if ($path === '/api/users/me/password' && $method === 'POST') api_try(function() {
+        Authorization::requireRead();
+        $b = Http::body(16384);
+        $current = Http::string($b, 'currentPassword', 1, 4096);
+        $next = Http::string($b, 'newPassword', USER_PASSWORD_MIN_LENGTH, 4096);
+
+        $id = (int)($_SESSION['user_id'] ?? 0);
+        $users = new UserRepository(db());
+        // Knowing the current password is what stops a borrowed session from
+        // taking the account over.
+        if ($id <= 0 || !$users->verifyPassword($id, $current)) {
+            AuditLog::write(db(), 'user.password', 'failure');
+            throw new RuntimeException('The current password is incorrect', 403);
+        }
+
+        $users->update($id, ['password' => $next]);
+        AuditLog::write(db(), 'user.password', 'success');
+        return ['success' => true, 'message' => 'Password changed'];
+    });
+
+    if ($path === '/api/users' && $method === 'GET') api_try(function() {
+        Authorization::requireAdmin();
+        return (new UserRepository(db()))->all();
+    });
+
+    if ($path === '/api/users' && $method === 'POST') api_try(function() {
+        Authorization::requireAdmin();
+        $b = Http::body(16384);
+        $username = Http::string($b, 'username', 1, 100);
+        if (!preg_match('/^[A-Za-z0-9._@-]+$/', $username)) {
+            Http::error(422, 'VALIDATION_FAILED', 'A username may contain letters, digits and . _ @ - only');
+        }
+        $password = Http::string($b, 'password', USER_PASSWORD_MIN_LENGTH, 4096);
+        $role = UserRepository::normaliseRole(Http::string($b, 'role', 1, 20));
+
+        $created = (new UserRepository(db()))->create($username, $password, $role);
+        AuditLog::write(db(), 'user.create', 'success', ['username' => $username, 'role' => $role]);
+        return $created;
+    });
+
+    if (preg_match('#^/api/users/(\d+)$#', $path, $m) && in_array($method, ['GET', 'PATCH', 'DELETE'], true)) api_try(function()use($m, $method) {
+        Authorization::requireAdmin();
+
+        $id = (int)$m[1];
+        $self = (int)($_SESSION['user_id'] ?? 0);
+        $users = new UserRepository(db());
+
+        $target = $users->get($id);
+        if ($target === null)throw new RuntimeException('Account not found', 404);
+
+        if ($method === 'GET')return $target;
+
+        if ($method === 'DELETE') {
+            // An administrator who deletes themselves, or the last remaining
+            // administrator, locks everyone out of the settings for good.
+            if ($id === $self)throw new RuntimeException('You cannot delete your own account', 409);
+            if ($target['role'] === Authorization::ADMIN && $users->activeAdminCount($id) === 0) {
+                throw new RuntimeException('This is the last administrator; promote another account first', 409);
+            }
+            $users->delete($id);
+            AuditLog::write(db(), 'user.delete', 'success', ['username' => $target['username']]);
+            return ['success' => true, 'message' => 'Account deleted'];
+        }
+
+        $b = Http::body(16384);
+        $changes = [];
+        if (array_key_exists('role', $b))$changes['role'] = UserRepository::normaliseRole(Http::string($b, 'role', 1, 20));
+        if (array_key_exists('isActive', $b))$changes['isActive'] = (bool)$b['isActive'];
+        if (array_key_exists('password', $b))$changes['password'] = Http::string($b, 'password', USER_PASSWORD_MIN_LENGTH, 4096);
+        if (!$changes)throw new RuntimeException('No changes were supplied', 400);
+
+        $losesAdmin = (array_key_exists('role', $changes) && $changes['role'] !== Authorization::ADMIN)
+            || (array_key_exists('isActive', $changes) && $changes['isActive'] === false);
+
+        if ($id === $self && $losesAdmin) {
+            throw new RuntimeException('You cannot remove your own administrator access', 409);
+        }
+        if ($losesAdmin && $target['role'] === Authorization::ADMIN && $users->activeAdminCount($id) === 0) {
+            throw new RuntimeException('This is the last administrator; promote another account first', 409);
+        }
+
+        $updated = $users->update($id, $changes);
+        AuditLog::write(db(), 'user.update', 'success', [
+            'username' => $target['username'],
+            'role' => $updated['role'],
+            'isActive' => $updated['isActive'],
+            'passwordReset' => array_key_exists('password', $changes),
+        ]);
+        return $updated;
+    });
+
     if ($path === '/api/security/events' && $method === 'GET') api_try(function() {
         Authorization::requireAdmin();
         $limit = max(1, min(200, (int)($_GET['limit']??100)));
@@ -873,7 +988,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         http_response_code(204); header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS'); exit;
     }
     if (str_starts_with($path, '/api/'))Http::error(404, 'NOT_FOUND', 'API endpoint not found');
-    if ($path === '/' || $path === '/servers' || $path === '/browse') {
+    if ($path === '/' || $path === '/servers' || $path === '/browse' || $path === '/users') {
         require dirname(__DIR__).'/views/pages/app.php'; exit;
     }
 /**

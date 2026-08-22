@@ -13,6 +13,13 @@ final class Auth {
      */
     private const ROTATION_GRACE_SECONDS = 60;
 
+    /**
+     * How long a cached role/enabled flag is trusted before it is re-read.
+     *
+     * The trade-off is staleness against a database query per request.
+     */
+    private const ACCOUNT_RECHECK_SECONDS = 60;
+
     public static function startSession(array $config): void {
         if(session_status()===PHP_SESSION_ACTIVE)return;
         $secure=Security::isHttps($config);
@@ -57,7 +64,67 @@ final class Auth {
             unset($_SESSION['obsolete_after']);
             $_SESSION['rotated_at']=$now;
         }
+
+        self::revalidateAccount($now);
     }
+
+    /**
+     * Re-read the signed-in account, at most once a minute.
+     *
+     * The role is cached in the session at login, so without this an account
+     * that an administrator disables or demotes keeps its old access until the
+     * person happens to sign out.
+     *
+     * Checking on every request would mean a database query per request --
+     * including the forty-odd thumbnail requests a gallery fires, which
+     * otherwise touch no database at all. Throttling bounds the stale window to
+     * ACCOUNT_RECHECK_SECONDS at roughly one query per user per minute.
+     *
+     * Best effort: if the database is unreachable the session is left alone
+     * rather than signing everybody out.
+     */
+    private static function revalidateAccount(int $now): void {
+        if(!isset($_SESSION['user_id']))return;
+        $last=(int)($_SESSION['account_checked_at']??0);
+        if($last!==0&&$now-$last<self::ACCOUNT_RECHECK_SECONDS)return;
+
+        try{
+            $config=require dirname(__DIR__,2).'/config/database.php';
+            $pdo=new PDO($config['dsn'],$config['user'],$config['pass'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+            $status=(new \CloudHub\Repositories\UserRepository($pdo))->status((int)$_SESSION['user_id']);
+        }catch(\Throwable $e){
+            error_log('[auth] account revalidation skipped: '.$e->getMessage());
+            return;
+        }
+
+        // Deleted or disabled: end the session now rather than at next sign-in.
+        if($status===null||!$status['isActive']){
+            self::destroySession();
+            session_start();
+            $_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
+            return;
+        }
+
+        $_SESSION['role']=$status['role'];
+        $_SESSION['account_checked_at']=$now;
+    }
+    /**
+     * The password algorithm this build prefers.
+     *
+     * Argon2id where the runtime provides it, otherwise whatever PHP considers
+     * current. Kept in one place so account creation, admin password resets and
+     * the rehash-on-login path cannot drift apart.
+     */
+    public static function passwordAlgorithm(): string|int {
+        return defined('PASSWORD_ARGON2ID') ? PASSWORD_ARGON2ID : PASSWORD_DEFAULT;
+    }
+
+    public static function hashPassword(string $password): string {
+        $hash = password_hash($password, self::passwordAlgorithm());
+        if (!is_string($hash) || $hash === '') throw new \RuntimeException('Unable to hash the password', 500);
+        return $hash;
+    }
+
     public static function user(): ?array {return isset($_SESSION['user_id'])?['id'=>(int)$_SESSION['user_id'],'username'=>(string)($_SESSION['username']??''),'role'=>(string)($_SESSION['role']??'viewer')]:null;}
     public static function requireUser(): void {if(!self::user())Http::error(401,'UNAUTHORIZED','Authentication required');}
     public static function verifyCsrf(): void {Security::verifyCsrfRequest();}
@@ -74,10 +141,9 @@ final class Auth {
         }
         $user=$stmt->fetch(PDO::FETCH_ASSOC);
         if(!$user||!(bool)$user['is_active']||!password_verify($password,(string)$user['password_hash']))return false;
-        session_regenerate_id(true);$now=time();$_SESSION['user_id']=(int)$user['id'];$_SESSION['username']=(string)$user['username'];$_SESSION['role']=(string)($user['role']??'viewer');$_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['rotated_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
-        $algo=defined('PASSWORD_ARGON2ID')?PASSWORD_ARGON2ID:PASSWORD_DEFAULT;
-        if(password_needs_rehash((string)$user['password_hash'],$algo)){
-            $hash=password_hash($password,$algo);if(is_string($hash)){$q=$pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');$q->execute([$hash,(int)$user['id']]);}
+        session_regenerate_id(true);$now=time();$_SESSION['user_id']=(int)$user['id'];$_SESSION['username']=(string)$user['username'];$_SESSION['role']=(string)($user['role']??'viewer');$_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['rotated_at']=$now;$_SESSION['account_checked_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
+        if(password_needs_rehash((string)$user['password_hash'],self::passwordAlgorithm())){
+            $hash=self::hashPassword($password);$q=$pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');$q->execute([$hash,(int)$user['id']]);
         }
         $pdo->prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?')->execute([(int)$user['id']]);return true;
     }

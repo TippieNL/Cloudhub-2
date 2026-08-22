@@ -68,6 +68,8 @@ async function login(u, p) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw Error(d.error?.message || 'Sign in failed');
     S.csrf = d.csrfToken || '';
+    S.role = d.user?.role || 'viewer';
+    $('#nav-users').hidden = S.role !== 'admin';
     $('#login').style.display = 'none';
     await route();
 }
@@ -1285,6 +1287,163 @@ async function servers() {
     }));
 }
 
+/**
+ * Users panel.
+ *
+ * The roles have always been enforced server-side, but nothing could create an
+ * account with one -- the CLI only ever made administrators. This is the
+ * management surface for them. Every guard here is duplicated on the server;
+ * hiding a control is a convenience, not the check.
+ */
+const ROLE_LABELS = { viewer: 'Viewer', editor: 'Editor', admin: 'Administrator' };
+
+function userFormMessage(type, text) {
+    const box = $('#user-form-message');
+    box.className = `status-message ${type}`;
+    box.textContent = text;
+    box.hidden = false;
+}
+
+function resetUserForm() {
+    $('#user-form').reset();
+    $('#user-form').hidden = true;
+    $('#user-form').dataset.editing = '';
+    $('#user-form-title').textContent = 'New user';
+    $('#user-password').placeholder = 'Password (minimum 12 characters)';
+    $('#user-username').disabled = false;
+    $('#user-form-message').hidden = true;
+}
+
+function openUserForm(user) {
+    resetUserForm();
+    const form = $('#user-form');
+    form.hidden = false;
+    if (!user) {
+        $('#user-username').focus();
+        return;
+    }
+    form.dataset.editing = String(user.id);
+    $('#user-form-title').textContent = `Edit ${user.username}`;
+    // The username is the account's identity; changing it is a different
+    // operation than editing the account, so it is not offered here.
+    $('#user-username').value = user.username;
+    $('#user-username').disabled = true;
+    $('#user-password').placeholder = 'New password (leave blank to keep current)';
+    $('#user-role').value = user.role;
+    $('#user-active').checked = user.isActive;
+}
+
+async function users() {
+    let list;
+    try {
+        list = await (await api('/api/users')).json();
+    } catch (e) {
+        $('#user-list').innerHTML = `<div class="status-message error">${esc(e.message)}</div>`;
+        return;
+    }
+
+    const when = iso => {
+        if (!iso) return 'never';
+        const d = new Date(iso);
+        return Number.isNaN(d.getTime()) ? 'unknown' : d.toLocaleDateString();
+    };
+
+    $('#user-list').innerHTML = list.map(u => `<div class="server">
+        <strong>${esc(u.username)}</strong>
+        <small>${esc(ROLE_LABELS[u.role] || u.role)}${u.isActive ? '' : ' · disabled'} · last signed in ${esc(when(u.lastLoginAt))}</small>
+        <div class="actions">
+            <button data-uedit="${u.id}">Edit</button>
+            <button data-utoggle="${u.id}">${u.isActive ? 'Disable' : 'Enable'}</button>
+            <button data-udel="${u.id}" class="danger-text">Delete</button>
+        </div>
+    </div>`).join('');
+
+    const byId = id => list.find(u => String(u.id) === String(id));
+
+    document.querySelectorAll('[data-uedit]').forEach(b => b.addEventListener('click', () => openUserForm(byId(b.dataset.uedit))));
+
+    document.querySelectorAll('[data-utoggle]').forEach(b => b.addEventListener('click', async () => {
+        const u = byId(b.dataset.utoggle);
+        if (!u) return;
+        try {
+            await api(`/api/users/${u.id}`, { method: 'PATCH', body: { isActive: !u.isActive } });
+            await users();
+        } catch (e) { toast(e.message); }
+    }));
+
+    document.querySelectorAll('[data-udel]').forEach(b => b.addEventListener('click', async () => {
+        const u = byId(b.dataset.udel);
+        if (!u) return;
+        if (!await askConfirm('Delete account', `Delete "${u.username}"? Files they uploaded are not removed.`, 'Delete')) return;
+        try {
+            await api(`/api/users/${u.id}`, { method: 'DELETE' });
+            await users();
+        } catch (e) { toast(e.message); }
+    }));
+}
+
+$('#add-user').addEventListener('click', () => openUserForm(null));
+$('#cancel-user').addEventListener('click', resetUserForm);
+
+$('#user-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const editing = $('#user-form').dataset.editing;
+    const password = $('#user-password').value;
+    const role = $('#user-role').value;
+    const isActive = $('#user-active').checked;
+
+    try {
+        if (editing) {
+            const body = { role, isActive };
+            if (password) body.password = password;
+            await api(`/api/users/${editing}`, { method: 'PATCH', body });
+        } else {
+            await api('/api/users', {
+                method: 'POST',
+                body: { username: $('#user-username').value.trim(), password, role }
+            });
+        }
+        resetUserForm();
+        await users();
+    } catch (e) {
+        userFormMessage('error', e.message);
+    }
+});
+
+/** Self-service password change, available to every signed-in account. */
+function openPasswordDialog() {
+    $('#password-dialog').reset();
+    $('#password-message').hidden = true;
+    $('#password-overlay').hidden = false;
+    $('#password-current').focus();
+}
+function closePasswordDialog() { $('#password-overlay').hidden = true; }
+
+$('#change-password').addEventListener('click', openPasswordDialog);
+$('#password-close').addEventListener('click', closePasswordDialog);
+$('#password-cancel').addEventListener('click', closePasswordDialog);
+$('#password-overlay').addEventListener('click', e => {
+    if (e.target === $('#password-overlay')) closePasswordDialog();
+});
+$('#password-dialog').addEventListener('submit', async e => {
+    e.preventDefault();
+    const box = $('#password-message');
+    try {
+        await api('/api/users/me/password', {
+            method: 'POST',
+            body: { currentPassword: $('#password-current').value, newPassword: $('#password-new').value }
+        });
+        box.className = 'status-message success';
+        box.textContent = 'Password changed.';
+        box.hidden = false;
+        setTimeout(closePasswordDialog, 1200);
+    } catch (err) {
+        box.className = 'status-message error';
+        box.textContent = err.message;
+        box.hidden = false;
+    }
+});
+
 $('#add-server').addEventListener('click', () => $('#server-form').hidden = false);
 $('#cancel-server').addEventListener('click', () => $('#server-form').hidden = true);
 $('#server-form').addEventListener('submit', async e => {
@@ -1311,9 +1470,12 @@ $('#server-form').addEventListener('submit', async e => {
 
 async function route() {
     const p = window.CLOUDHUB_ROUTE || new URLSearchParams(location.search).get('route') || '/';
-    ['files', 'servers', 'browse'].forEach(x => $(`#${x}-page`).hidden = true);
+    ['files', 'servers', 'browse', 'users'].forEach(x => $(`#${x}-page`).hidden = true);
     document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', (a.dataset.route || '/') === p));
-    if (p === '/servers') {
+    if (p === '/users') {
+        $('#users-page').hidden = false;
+        await users();
+    } else if (p === '/servers') {
         $('#servers-page').hidden = false;
         await servers();
     } else if (p === '/browse') {
@@ -1332,6 +1494,9 @@ async function route() {
         const d = await r.json();
         if (d.authenticated) {
             S.csrf = d.csrfToken || '';
+            S.role = d.user?.role || 'viewer';
+            // Convenience only: /api/users is administrator-gated server-side.
+            $('#nav-users').hidden = S.role !== 'admin';
             $('#login').style.display = 'none';
             await route();
         } else {

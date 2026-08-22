@@ -170,7 +170,36 @@ php tools/create-admin.php admin
 
 The tool prompts for a password (minimum 12 characters), stores an Argon2id hash
 where available, and gives the account the `admin` role. Run it again with the
-same username to reset that password.
+same username to reset that password. A role can be passed as a second
+argument — `php tools/create-admin.php alice editor` — which is how non-admin
+accounts were created before the Users screen existed.
+
+## Accounts and roles
+
+Administrators manage accounts from the **Users** screen: create and delete
+them, set the role, enable and disable them, and reset a password. Every
+signed-in user can change their own password from the **Password** button,
+which requires their current one.
+
+| Role | Can |
+|---|---|
+| `viewer` | Browse, preview, download (including bulk ZIP) and create share links |
+| `editor` | Also upload, rename, move and delete |
+| `admin` | Also manage storage servers and accounts, and read the audit trail |
+
+The API behind the screen is `/api/users` (administrator-only) plus
+`POST /api/users/me/password` (any signed-in user). Password hashes are never
+returned by any of them.
+
+Guards that cannot be bypassed by editing the page: you cannot delete your own
+account, you cannot remove your own administrator access, and the last enabled
+administrator cannot be disabled, demoted or deleted — otherwise nobody could
+reach these settings again.
+
+Role and enabled changes reach a signed-in user's existing session within a
+minute; disabling an account ends its session rather than waiting for a sign
+out. The check is throttled to roughly one query per user per minute so that a
+gallery's worth of thumbnail requests does not each incur one.
 
 Passwords are stored using PHP-compatible password hashes and are re-hashed to
 the preferred algorithm on the next successful login. The browser no longer

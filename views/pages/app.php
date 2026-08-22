@@ -24,9 +24,11 @@
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>" data-route="/">Files</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fservers" data-route="/servers">Servers</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
+            <a id="nav-users" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fusers" data-route="/users" hidden>Users</a>
         </nav>
         <div>
             <button id="theme">◐</button>
+            <button id="change-password" type="button">Password</button>
             <button id="logout">Log out</button>
         </div>
     </header>
@@ -165,6 +167,28 @@
             </div>
         </div>
 
+        <div id="password-overlay" class="modal-overlay" hidden>
+            <form id="password-dialog" class="confirm-dialog">
+                <div class="modal-heading">
+                    <div>
+                        <h2>Change your password</h2>
+                        <p>Signing in elsewhere is unaffected until those sessions expire.</p>
+                    </div>
+                    <button id="password-close" class="icon-button" type="button" aria-label="Close">&times;</button>
+                </div>
+                <label class="share-field">Current password
+                    <input id="password-current" type="password" autocomplete="current-password" required>
+                </label>
+                <label class="share-field">New password
+                    <input id="password-new" type="password" autocomplete="new-password" minlength="12" required>
+                </label>
+                <div id="password-message" class="status-message" role="status" aria-live="polite" hidden></div>
+                <div class="modal-actions">
+                    <button id="password-cancel" type="button">Cancel</button>
+                    <button class="primary-button" type="submit">Change password</button>
+                </div>
+            </form>
+        </div>
         <div id="file-context" class="context-menu" hidden role="menu"></div>
 
         <section id="servers-page" hidden>
@@ -188,6 +212,28 @@
                 <label><input type="checkbox" name="isDefault"> Default</label>
                 <button>Save</button>
                 <button type="button" id="cancel-server">Cancel</button>
+            </form>
+        </section>
+        <section id="users-page" hidden>
+            <div class="toolbar">
+                <h2>Users</h2>
+                <button id="add-user" type="button">Add user</button>
+            </div>
+            <p class="muted">Viewers can browse and download. Editors can also upload, rename and delete. Administrators additionally manage storage servers and accounts.</p>
+            <div id="user-list"></div>
+            <form id="user-form" class="panel" hidden>
+                <h3 id="user-form-title">New user</h3>
+                <input id="user-username" name="username" placeholder="Username" autocomplete="off" required>
+                <input id="user-password" name="password" type="password" placeholder="Password (minimum 12 characters)" autocomplete="new-password">
+                <select id="user-role" name="role">
+                    <option value="viewer">Viewer — browse and download</option>
+                    <option value="editor">Editor — also upload and delete</option>
+                    <option value="admin">Administrator — full access</option>
+                </select>
+                <label><input id="user-active" type="checkbox" name="isActive" checked> Account enabled</label>
+                <div id="user-form-message" class="status-message" role="status" aria-live="polite" hidden></div>
+                <button id="user-save">Save</button>
+                <button type="button" id="cancel-user">Cancel</button>
             </form>
         </section>
         <section id="browse-page" hidden>
