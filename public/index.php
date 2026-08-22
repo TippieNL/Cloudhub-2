@@ -429,8 +429,127 @@ if ($path === '/api/files/mkdir' && $method === 'POST') api_try(function()use($f
         'message' => 'Directory created'];
 });
 if ($path === '/api/files/delete' && $method === 'DELETE') api_try(function()use($fs, $config) {
-    $fs->writable(); if (!$config['allow_delete'])throw new RuntimeException('Delete is not allowed', 403); $b = Http::body(); $p = $fs->existing((string)($b['path']??'')); if (!file_exists($p))throw new RuntimeException('File or directory not found', 404); $fs->deleteTree($p); return ['success' => true,
-        'message' => 'Deleted successfully'];
+    $fs->writable();
+    if (!$config['allow_delete'])throw new RuntimeException('Delete is not allowed', 403);
+    $b = Http::body();
+    $p = $fs->existing((string)($b['path']??''));
+    if (!file_exists($p))throw new RuntimeException('File or directory not found', 404);
+
+    // Permanent deletion is one keystroke away and irreversible, so unless the
+    // deployment has opted out the item goes to the trash instead. The reply
+    // says which happened, so the UI never claims the wrong thing.
+    if (!$config['trash_enabled']) {
+        $fs->deleteTree($p);
+        AuditLog::write(db(), 'file.delete', 'success', ['path' => $fs->relative($p)]);
+        return ['success' => true, 'trashed' => false, 'message' => 'Deleted permanently'];
+    }
+    $meta = $fs->trash($p, Auth::user()['username'] ?? null);
+    $fs->trashPurgeExpired((int)$config['trash_retention_days']);
+    AuditLog::write(db(), 'file.trash', 'success', ['path' => $meta['originalPath'], 'id' => $meta['id']]);
+    return ['success' => true, 'trashed' => true, 'id' => $meta['id'], 'message' => 'Moved to trash'];
+});
+/**
+* Move and copy.
+*
+* Both take a list of source paths and one destination folder, because these
+* are selection operations: the interesting case is twenty files at once. A
+* failure on one item does not abandon the rest -- every source is attempted
+* and the failures come back named, so the caller can report exactly what did
+* not make it rather than a single misleading "failed".
+*/
+$relocate = function(callable $apply, string $verb)use($fs, $config): array {
+    $fs->writable();
+    $b = Http::body(65536);
+    $paths = array_values(array_filter((array)($b['paths']??[]), 'is_string'));
+    if (!$paths)throw new RuntimeException('No items were given to '.$verb, 400);
+    if (count($paths) > 500)throw new RuntimeException('Too many items in one request', 413);
+
+    $destination = $fs->existing((string)($b['destination']??'/'));
+    if (!is_dir($destination))throw new RuntimeException('The destination is not a folder', 400);
+
+    $done = 0; $failed = [];
+    foreach ($paths as $rel) {
+        try {
+            $source = $fs->existing($rel);
+            $target = rtrim($destination, '/').'/'.basename($source);
+
+            // Copying into the same folder is a legitimate way to duplicate
+            // something; moving into it is a no-op worth reporting.
+            if ($verb === 'move' && dirname($source) === rtrim($destination, '/'))throw new RuntimeException('It is already in that folder', 409);
+            // Moving or copying a folder into itself would either lose the
+            // folder or recurse forever, depending on the operation.
+            if (is_dir($source) && str_starts_with($destination.'/', $source.'/'))throw new RuntimeException('A folder cannot be moved into itself', 409);
+            if (file_exists($target)) {
+                if (!$config['allow_overwrite'])throw new RuntimeException('An item with that name is already there', 409);
+                $target = $fs->freeName($target);
+            }
+
+            $apply($source, $target);
+            $done++;
+        }catch(RuntimeException $e) {
+            $failed[] = ['path' => $rel, 'message' => $e->getMessage()];
+        }
+    }
+    AuditLog::write(db(), 'file.'.$verb, $failed?'partial':'success',
+        ['destination' => $fs->relative($destination), 'completed' => $done, 'failed' => count($failed)]);
+    return ['success' => $failed === [], 'completed' => $done, 'failed' => $failed];
+};
+if ($path === '/api/files/move' && $method === 'POST') api_try(function()use($relocate) {
+    return $relocate(function(string $src, string $dst) {
+        if (!rename($src, $dst))throw new RuntimeException('The move failed', 500);
+    }, 'move');
+});
+if ($path === '/api/files/copy' && $method === 'POST') api_try(function()use($relocate, $fs) {
+    return $relocate(fn(string $src, string $dst) => $fs->copyTree($src, $dst), 'copy');
+});
+/**
+* Recursive search.
+*
+* The client-side filter only ever saw the folder already on screen, so a file
+* one folder over looked like it did not exist. This walks the tree under a
+* starting folder, under both a result cap and a node-visit cap so a deep tree
+* cannot turn one keystroke into an unbounded walk.
+*/
+if ($path === '/api/files/search' && $method === 'GET') api_try(function()use($fs) {
+    release_session_lock();
+    $q = trim((string)($_GET['q']??''));
+    if (mb_strlen($q) < 2)throw new RuntimeException('Enter at least two characters to search', 400);
+    if (mb_strlen($q) > 255)throw new RuntimeException('That search term is too long', 400);
+    $limit = max(1, min(500, (int)($_GET['limit']??200)));
+
+    $found = $fs->search((string)($_GET['path']??'/'), $q, $limit);
+    return ['query' => $q, 'results' => $found['results'], 'truncated' => $found['truncated'], 'scanned' => $found['scanned']];
+});
+/**
+* Trash.
+*
+* Listing is a read: anyone who could see a file before it was deleted can see
+* that it is in the trash. Restoring and purging change the file store, so the
+* generic write check above already applies to them.
+*/
+if ($path === '/api/trash' && $method === 'GET') api_try(function()use($fs, $config) {
+    release_session_lock();
+    return ['enabled' => (bool)$config['trash_enabled'], 'retentionDays' => (int)$config['trash_retention_days'],
+        'entries' => $fs->trashList()];
+});
+if ($path === '/api/trash/restore' && $method === 'POST') api_try(function()use($fs) {
+    $fs->writable();
+    $b = Http::body();
+    $restored = $fs->restore(Http::string($b, 'id', 1, 64));
+    AuditLog::write(db(), 'file.restore', 'success', ['path' => $restored['path']]);
+    return ['success' => true, 'path' => $restored['path'],
+        'message' => $restored['renamed']
+            ? 'Restored as "'.basename($restored['path']).'" because the original name was taken'
+            : 'Restored to '.$restored['path']];
+});
+if ($path === '/api/trash/purge' && $method === 'POST') api_try(function()use($fs) {
+    $fs->writable();
+    $b = Http::body();
+    $all = !empty($b['all']);
+    $n = $fs->trashPurge($all?null:Http::string($b, 'id', 1, 64));
+    AuditLog::write(db(), 'file.purge', 'success', ['entries' => $n, 'all' => $all]);
+    return ['success' => true, 'purged' => $n,
+        'message' => $n === 1?'Permanently deleted 1 item':'Permanently deleted '.$n.' items'];
 });
 if ($path === '/api/files/rename' && $method === 'POST') api_try(function()use($fs, $config) {
     $fs->writable(); $b = Http::body(); $a = $fs->existing((string)($b['oldPath']??'')); $z = $fs->destination((string)($b['newPath']??'')); if (!file_exists($a))throw new RuntimeException('Source not found', 404); if (file_exists($z)&&!$config['allow_overwrite'])throw new RuntimeException('Destination already exists', 409); if (!rename($a, $z))throw new RuntimeException('Rename failed', 500); return ['success' => true,
@@ -988,7 +1107,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         http_response_code(204); header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS'); exit;
     }
     if (str_starts_with($path, '/api/'))Http::error(404, 'NOT_FOUND', 'API endpoint not found');
-    if ($path === '/' || $path === '/servers' || $path === '/browse' || $path === '/users') {
+    if (in_array($path, ['/', '/servers', '/browse', '/users', '/trash'], true)) {
         require dirname(__DIR__).'/views/pages/app.php'; exit;
     }
 /**

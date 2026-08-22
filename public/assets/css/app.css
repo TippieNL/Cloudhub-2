@@ -144,3 +144,29 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 /* Confirmation raised above other modals: the share dialog can open one, and at
    equal z-index the share overlay swallowed the clicks meant for it. */
 #confirm-overlay,#input-overlay{z-index:40}
+
+
+/* File management: search scope, destination picker, trash ---------------- */
+.search-scope{display:flex;gap:0}
+.search-scope button{border-radius:0;white-space:nowrap}
+.search-scope button:first-child{border-radius:7px 0 0 7px}
+.search-scope button:last-child{border-radius:0 7px 7px 0;margin-left:-1px}
+.search-scope button.active{background:color-mix(in srgb,var(--primary) 18%,var(--card));border-color:var(--primary);z-index:1}
+#search-status{margin:10px 0 0}
+
+/* The picker scrolls inside the dialog so a folder with hundreds of
+   subfolders cannot push the confirm button off the bottom of the screen. */
+.picker-list{margin:12px 0;max-height:min(320px,45vh);overflow:auto;border:1px solid var(--border);border-radius:9px;padding:6px}
+.picker-list p{margin:8px 10px}
+.picker-row{display:block;width:100%;text-align:left;border:0;background:transparent;padding:10px;border-radius:7px}
+.picker-row:hover{background:color-mix(in srgb,var(--primary) 12%,transparent)}
+#picker-crumbs{padding-bottom:4px}
+
+#trash-list .server strong{display:block}
+#trash-list .server .muted{display:block;margin-top:3px}
+#trash-list .actions{margin-top:9px}
+
+@media(max-width:650px){
+  .file-controls .search-scope{grid-column:1/-1}
+  .search-scope button{flex:1}
+}

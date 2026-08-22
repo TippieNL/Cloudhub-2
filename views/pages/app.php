@@ -23,6 +23,7 @@
         <nav>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>" data-route="/">Files</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fservers" data-route="/servers">Servers</a>
+            <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Ftrash" data-route="/trash">Trash</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
             <a id="nav-users" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fusers" data-route="/users" hidden>Users</a>
         </nav>
@@ -46,6 +47,10 @@
             </div>
             <div class="file-controls">
                 <input id="search" type="search" placeholder="Search files">
+                <div class="search-scope" role="group" aria-label="Search scope">
+                    <button id="scope-folder" type="button" class="active">This folder</button>
+                    <button id="scope-all" type="button">All folders</button>
+                </div>
                 <select id="sort-files" aria-label="Sort files">
                     <option value="name-asc">Name A–Z</option>
                     <option value="name-desc">Name Z–A</option>
@@ -64,8 +69,11 @@
                 <button id="select-all" type="button">Select all</button>
                 <button id="clear-selection" type="button">Clear</button>
                 <button id="selection-download" type="button">Download</button>
+                <button id="selection-move" type="button">Move</button>
+                <button id="selection-copy" type="button">Copy</button>
                 <button id="selection-delete" type="button">Delete</button>
             </div>
+            <p id="search-status" class="muted" role="status" aria-live="polite" hidden></p>
             <div id="file-list" class="file-grid" aria-live="polite"></div>
         </section>
 
@@ -189,6 +197,23 @@
                 </div>
             </form>
         </div>
+        <div id="picker-overlay" class="modal-overlay" hidden>
+            <div id="picker-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+                <div class="modal-heading">
+                    <div>
+                        <h2 id="picker-title">Choose a folder</h2>
+                        <p id="picker-summary">Select where the items should go.</p>
+                    </div>
+                    <button id="picker-close" class="icon-button" type="button" aria-label="Close">&times;</button>
+                </div>
+                <div id="picker-crumbs" class="breadcrumbs" aria-label="Destination folder"></div>
+                <div id="picker-list" class="picker-list" aria-live="polite"></div>
+                <div class="modal-actions">
+                    <button id="picker-cancel" type="button">Cancel</button>
+                    <button id="picker-ok" class="primary-button" type="button">Move here</button>
+                </div>
+            </div>
+        </div>
         <div id="file-context" class="context-menu" hidden role="menu"></div>
 
         <section id="servers-page" hidden>
@@ -235,6 +260,14 @@
                 <button id="user-save">Save</button>
                 <button type="button" id="cancel-user">Cancel</button>
             </form>
+        </section>
+        <section id="trash-page" hidden>
+            <div class="toolbar">
+                <h2>Trash</h2>
+                <button id="empty-trash" type="button" class="danger-button" hidden>Empty trash</button>
+            </div>
+            <p id="trash-note" class="muted"></p>
+            <div id="trash-list"></div>
         </section>
         <section id="browse-page" hidden>
             <h2>Remote server browser</h2>

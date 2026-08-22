@@ -82,7 +82,12 @@ $checks['a database outage does not sign everyone out'] =
 $checks['a Users panel exists'] = str_contains($view, 'id="users-page"') && str_contains($app, 'async function users()');
 $checks['the Users nav entry is admin-only'] =
     str_contains($view, 'id="nav-users"') && str_contains($app, "\$('#nav-users').hidden = S.role !== 'admin';");
-$checks['/users is a page route'] = str_contains($index, "\$path === '/users'") && str_contains($app, "if (p === '/users')");
+// Assert membership, not the shape of the condition: the page-route list has
+// since become an in_array() and gains entries as pages are added.
+$checks['/users is a page route'] =
+    (bool)preg_match("/in_array\(\\\$path, \[(.*?)\], true\)/", $index, $pages)
+    && str_contains($pages[1], "'/users'")
+    && str_contains($app, "(p === '/users')");
 $checks['every user can change their password'] =
     str_contains($view, 'id="password-overlay"') && str_contains($app, "api('/api/users/me/password'");
 

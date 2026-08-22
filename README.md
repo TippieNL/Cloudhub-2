@@ -174,6 +174,49 @@ same username to reset that password. A role can be passed as a second
 argument — `php tools/create-admin.php alice editor` — which is how non-admin
 accounts were created before the Users screen existed.
 
+## Moving, copying and searching
+
+Select one or more items and use **Move** or **Copy**, or pick *Move to…* /
+*Copy to…* from a file's ⋮ menu. Either way the destination is chosen by
+browsing folders rather than typing a path.
+
+`POST /api/files/move` and `POST /api/files/copy` take a list of source paths
+and one destination folder. A failure on one item does not abandon the rest:
+every source is attempted and the failures come back named, so twenty files
+selected at once cannot report a bare success over a partial result. Neither
+route overwrites silently — with `ALLOW_OVERWRITE=false` a name clash is a
+409, otherwise the arriving item is given a `(2)` suffix. A folder cannot be
+moved into itself, and moving an item into the folder it is already in is
+refused; copying into the same folder is allowed, because that is how you
+duplicate something.
+
+The search box has two modes. **This folder** filters the listing already on
+screen, so it stays instant. **All folders** calls `GET /api/files/search`,
+which walks the tree below the folder you are in. That walk is bounded twice
+over — by the number of results and by the number of entries examined — and
+says so when it stops early, rather than silently returning a short list.
+
+## Trash
+
+Deleting moves an item to a trash inside the storage root; the **Trash**
+screen restores it or removes it for good. This is on by default; set
+`TRASH_ENABLED=false` to delete permanently instead, and
+`TRASH_RETENTION_DAYS` (default 30, `0` to disable expiry) to say how long
+items are kept. Expired entries are dropped as later deletions happen.
+
+The trash keeps one directory per deletion, holding the item under its own
+name plus a small metadata file recording where it came from, who deleted it
+and when. Restore never overwrites: if something has since taken the original
+name the item is restored beside it with a suffix, and a parent folder that
+was deleted too is recreated.
+
+The trash lives at `.trash` inside the storage root, so moving a file into it
+is always a same-filesystem rename — instant, and impossible to half-finish.
+That directory is reserved: it is never listed, never searched, and cannot be
+addressed through any file route, so the trash cannot be browsed or emptied
+except through `/api/trash`. Listing the trash needs only read access;
+restoring and purging need write access, like any other change to the store.
+
 ## Accounts and roles
 
 Administrators manage accounts from the **Users** screen: create and delete

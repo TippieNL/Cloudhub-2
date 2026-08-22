@@ -17,7 +17,12 @@ const S = {
     files: [],
     selected: new Set(),
     view: localStorage.getItem('cfh_view') || 'grid',
-    sort: localStorage.getItem('cfh_sort') || 'name-asc'
+    sort: localStorage.getItem('cfh_sort') || 'name-asc',
+    // 'folder' filters what is already on screen; 'all' asks the server to
+    // walk the tree. Results live separately from S.files so leaving a search
+    // restores the folder listing without another request.
+    scope: 'folder',
+    results: null
 };
 const $ = s => document.querySelector(s);
 const toast = m => {
@@ -122,6 +127,7 @@ function crumbs() {
 
 async function loadFiles(p = S.path) {
     S.selected.clear();
+    S.results = null;
     let response;
     try {
         response = await api(`/api/files/list?path=${encodeURIComponent(p)}`);
@@ -138,12 +144,26 @@ async function loadFiles(p = S.path) {
     try { sessionStorage.setItem('cfh_path', p); } catch {}
     S.files = await response.json();
     crumbs();
+    renderSearchStatus();
     renderFiles();
 }
 
+/** Human label for the folder holding a path, for search results spanning folders. */
+function parentLabel(path) {
+    const parent = path.substring(0, path.lastIndexOf('/'));
+    return parent === '' ? 'Root' : parent;
+}
+
+/** Whatever the grid is currently showing: a folder listing or search results. */
+function currentEntries() {
+    return S.results ? S.results.entries : S.files;
+}
+
 function sortedFiles() {
+    // Server results are already filtered by the query; re-filtering them
+    // locally would drop matches that live under a matching folder name.
     const q = $('#search').value.trim().toLowerCase();
-    const files = S.files.filter(f => f.name.toLowerCase().includes(q));
+    const files = S.results ? [...S.results.entries] : S.files.filter(f => f.name.toLowerCase().includes(q));
     const [key, dir] = S.sort.split('-');
     const factor = dir === 'asc' ? 1 : -1;
     return files.sort((a, b) => {
@@ -483,7 +503,7 @@ function renderFiles() {
         return `<article class="file" data-path="${encoded}" tabindex="0">
         <div class="file-select"><input type="checkbox" data-sel="${encoded}" aria-label="Select ${esc(f.name)}"></div>
         <div class="thumb">${thumb}</div>
-        <div class="file-info"><div class="name">${esc(f.name)}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}</div></div>
+        <div class="file-info"><div class="name">${esc(f.name)}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}${S.results ? ` · in ${esc(parentLabel(f.path))}` : ''}</div></div>
         <div class="actions">${f.isDirectory ? `<button data-open="${encoded}">Open</button>` : `${preview}<button data-down="${encoded}">Download</button><button data-share="${encoded}">Share</button>`}<button data-menu="${encoded}" aria-label="More actions">⋮</button></div>
         </article>`;
     }).join('');
@@ -502,7 +522,7 @@ function renderFiles() {
 
     // Frames for files no longer listed can go; the rest stay cached so a
     // search keystroke or sort change does not re-decode them.
-    releaseStaleVideoThumbs(new Set(S.files.map(videoThumbKey)));
+    releaseStaleVideoThumbs(new Set(currentEntries().map(videoThumbKey)));
 
     initVideoThumbnails();
 
@@ -546,7 +566,7 @@ function renderFiles() {
         });
         card.addEventListener('dblclick', () => {
             const p = decodeURIComponent(card.dataset.path);
-            const f = S.files.find(x => x.path === p);
+            const f = currentEntries().find(x => x.path === p);
             f?.isDirectory ? loadFiles(p) : openPreview(p);
         });
     });
@@ -845,16 +865,36 @@ function askInput(title, label, value = '') {
 
 async function del(p) {
     const name = p.split('/').pop();
-    if (!await askConfirm('Delete item', `Delete "${name}"? This cannot be undone.`, 'Delete')) return;
+    // The wording depends on where the item actually goes, which the server
+    // decides. Ask it once and remember, rather than promising either.
+    const trashed = await trashEnabled();
+    const warning = trashed ? 'It can be restored from the trash.' : 'This cannot be undone.';
+    if (!await askConfirm('Delete item', `Delete "${name}"? ${warning}`, 'Delete')) return;
     try {
-        await api('/api/files/delete', {
-            method: 'DELETE',
-            body: { path: p }
-        });
+        const d = await (await api('/api/files/delete', { method: 'DELETE', body: { path: p } })).json();
+        toast(d.message);
         await loadFiles();
     } catch (e) {
         toast(e.message);
     }
+}
+
+/**
+ * Whether this installation moves deletions to the trash.
+ *
+ * Cached for the life of the tab: it comes from configuration, so it cannot
+ * change between two clicks, and a delete should not cost two round trips.
+ */
+let trashEnabledCache = null;
+async function trashEnabled() {
+    if (trashEnabledCache !== null) return trashEnabledCache;
+    try {
+        const d = await (await api('/api/trash')).json();
+        trashEnabledCache = !!d.enabled;
+    } catch {
+        trashEnabledCache = false;
+    }
+    return trashEnabledCache;
 }
 
 async function ren(p) {
@@ -890,7 +930,8 @@ async function makeFolder() {
 async function deleteSelected() {
     const files = [...S.selected];
     if (!files.length) return;
-    if (!await askConfirm('Delete selected', `Delete ${files.length} selected item${files.length === 1 ? '' : 's'}? This cannot be undone.`, 'Delete')) return;
+    const warning = await trashEnabled() ? 'They can be restored from the trash.' : 'This cannot be undone.';
+    if (!await askConfirm('Delete selected', `Delete ${files.length} selected item${files.length === 1 ? '' : 's'}? ${warning}`, 'Delete')) return;
     let failed = 0;
     for (const path of files) {
         try {
@@ -903,14 +944,15 @@ async function deleteSelected() {
         }
     }
     await loadFiles();
-    toast(failed ? `${failed} item(s) could not be deleted` : 'Selected items deleted');
+    toast(failed ? `${failed} item(s) could not be deleted`
+        : await trashEnabled() ? 'Selected items moved to trash' : 'Selected items deleted');
 }
 
 function showContextMenu(path, x, y) {
-    const f = S.files.find(item => item.path === path);
+    const f = currentEntries().find(item => item.path === path);
     const menu = $('#file-context');
     if (!f) return;
-    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="delete" class="danger-text">Delete</button>`;
+    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button><button data-cmd="delete" class="danger-text">Delete</button>`;
     menu.hidden = false;
     menu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(y, window.innerHeight - 240)}px`;
@@ -922,6 +964,8 @@ function showContextMenu(path, x, y) {
         if (c === 'download') download(path);
         if (c === 'share') share(path);
         if (c === 'rename') ren(path);
+        if (c === 'move') relocate([path], 'move');
+        if (c === 'copy') relocate([path], 'copy');
         if (c === 'delete') del(path);
     }));
 }
@@ -929,9 +973,166 @@ function showContextMenu(path, x, y) {
 document.addEventListener('click', e => {
     if (!e.target.closest('#file-context') && !e.target.closest('[data-menu]')) $('#file-context').hidden = true;
 });
+/* ---- Search -------------------------------------------------------------
+ *
+ * Two modes behind one field. "This folder" filters the listing already in
+ * memory, so it stays instant. "All folders" asks the server to walk the tree,
+ * which is a request per query and therefore debounced.
+ */
+let searchTimer = 0;
+let searchRun = 0;
+
+function renderSearchStatus() {
+    const box = $('#search-status');
+    if (!S.results) { box.hidden = true; return; }
+    const n = S.results.entries.length;
+    box.textContent = n === 0
+        ? `No matches for "${S.results.query}" anywhere under ${S.path === '/' ? 'Root' : S.path}`
+        : `${n} match${n === 1 ? '' : 'es'} for "${S.results.query}"${S.results.truncated ? ' (showing the first ' + n + '; narrow the search for the rest)' : ''}`;
+    box.hidden = false;
+}
+
+async function runSearch() {
+    const q = $('#search').value.trim();
+    if (S.scope !== 'all' || q.length < 2) {
+        // Falling back to the local filter: drop any results still on screen
+        // so the grid matches the mode the toggle is showing.
+        if (S.results) { S.results = null; S.selected.clear(); }
+        renderSearchStatus();
+        renderFiles();
+        return;
+    }
+    const run = ++searchRun;
+    try {
+        const d = await (await api(`/api/files/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(S.path)}`)).json();
+        // A slower earlier request must not overwrite a newer one's results.
+        if (run !== searchRun) return;
+        S.results = { query: d.query, entries: d.results, truncated: d.truncated };
+        S.selected.clear();
+    } catch (e) {
+        if (run !== searchRun) return;
+        toast(e.message);
+        return;
+    }
+    renderSearchStatus();
+    renderFiles();
+}
+
+function setScope(scope) {
+    S.scope = scope;
+    $('#scope-folder').classList.toggle('active', scope === 'folder');
+    $('#scope-all').classList.toggle('active', scope === 'all');
+    runSearch();
+}
+
+$('#scope-folder').addEventListener('click', () => setScope('folder'));
+$('#scope-all').addEventListener('click', () => setScope('all'));
+
+/* ---- Destination picker -------------------------------------------------
+ *
+ * Move and copy need a folder, and folders are a tree, so the picker browses
+ * one instead of asking the user to type a path. It lists directories only --
+ * a file is never a valid destination.
+ */
+const picker = { resolve: null, path: '/' };
+
+function pickFolder(summary, okLabel) {
+    return new Promise(resolve => {
+        picker.resolve = resolve;
+        picker.path = S.path;
+        $('#picker-summary').textContent = summary;
+        $('#picker-ok').textContent = okLabel;
+        $('#picker-overlay').hidden = false;
+        renderPicker();
+    });
+}
+
+function finishPick(value) {
+    $('#picker-overlay').hidden = true;
+    const done = picker.resolve;
+    picker.resolve = null;
+    if (done) done(value);
+}
+
+async function renderPicker() {
+    const crumbBox = $('#picker-crumbs');
+    const parts = picker.path.split('/').filter(Boolean);
+    let cur = '';
+    const items = ['<button data-p="/">Root</button>'];
+    for (const part of parts) {
+        cur += '/' + part;
+        items.push(`<span aria-hidden="true">›</span><button data-p="${esc(cur)}">${esc(part)}</button>`);
+    }
+    crumbBox.innerHTML = items.join('');
+    crumbBox.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        picker.path = b.dataset.p;
+        renderPicker();
+    }));
+
+    const list = $('#picker-list');
+    list.innerHTML = '<p class="muted">Loading…</p>';
+    let entries;
+    try {
+        entries = await (await api(`/api/files/list?path=${encodeURIComponent(picker.path)}`)).json();
+    } catch (e) {
+        list.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        return;
+    }
+    const folders = entries.filter(f => f.isDirectory);
+    list.innerHTML = folders.length
+        ? folders.map(f => `<button type="button" class="picker-row" data-p="${esc(f.path)}">📁 ${esc(f.name)}</button>`).join('')
+        : '<p class="muted">No folders here. The items will go into this folder.</p>';
+    list.querySelectorAll('.picker-row').forEach(b => b.addEventListener('click', () => {
+        picker.path = b.dataset.p;
+        renderPicker();
+    }));
+}
+
+$('#picker-ok').addEventListener('click', () => finishPick(picker.path));
+$('#picker-cancel').addEventListener('click', () => finishPick(null));
+$('#picker-close').addEventListener('click', () => finishPick(null));
+
+/* ---- Move and copy ------------------------------------------------------ */
+
+async function relocate(paths, verb) {
+    if (!paths.length) return;
+    const noun = paths.length === 1 ? `"${paths[0].split('/').pop()}"` : `${paths.length} items`;
+    const destination = await pickFolder(
+        `${verb === 'move' ? 'Move' : 'Copy'} ${noun} into which folder?`,
+        verb === 'move' ? 'Move here' : 'Copy here');
+    if (destination === null) return;
+    try {
+        const d = await (await api(`/api/files/${verb}`, { method: 'POST', body: { paths, destination } })).json();
+        // Per-item failures come back named, so say which ones rather than
+        // reporting a bare success over a partial result.
+        if (d.failed.length) {
+            toast(`${d.completed} done, ${d.failed.length} failed: ${d.failed[0].message}`);
+        } else {
+            toast(`${d.completed} item${d.completed === 1 ? '' : 's'} ${verb === 'move' ? 'moved' : 'copied'}`);
+        }
+    } catch (e) {
+        toast(e.message);
+        return;
+    }
+    S.results = null;
+    $('#search').value = '';
+    await loadFiles();
+}
+
+const relocateSelected = verb => relocate([...S.selected], verb);
+$('#selection-move').addEventListener('click', () => relocateSelected('move'));
+$('#selection-copy').addEventListener('click', () => relocateSelected('copy'));
+
 $('#mkdir').addEventListener('click', makeFolder);
 $('#refresh').addEventListener('click', () => loadFiles());
-$('#search').addEventListener('input', renderFiles);
+$('#search').addEventListener('input', () => {
+    if (S.scope === 'all') {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(runSearch, 250);
+        return;
+    }
+    renderFiles();
+});
 $('#sort-files').value = S.sort;
 $('#sort-files').addEventListener('change', e => {
     S.sort = e.target.value;
@@ -1471,11 +1672,84 @@ $('#server-form').addEventListener('submit', async e => {
     }
 });
 
+/* ---- Trash --------------------------------------------------------------
+ *
+ * Deleting moves an item here; this screen is the other half of that promise.
+ * Restore and purge need the write capability, so a viewer sees the list
+ * without the buttons rather than buttons that always fail.
+ */
+async function loadTrash() {
+    const box = $('#trash-list');
+    const note = $('#trash-note');
+    let d;
+    try {
+        d = await (await api('/api/trash')).json();
+    } catch (e) {
+        box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        return;
+    }
+    trashEnabledCache = !!d.enabled;
+
+    note.textContent = !d.enabled
+        ? 'This server deletes files permanently; nothing is kept here.'
+        : d.retentionDays > 0
+            ? `Deleted items are kept for ${d.retentionDays} days, then removed automatically.`
+            : 'Deleted items are kept until someone empties the trash.';
+
+    const canWrite = S.role === 'editor' || S.role === 'admin';
+    $('#empty-trash').hidden = !canWrite || !d.entries.length;
+
+    box.innerHTML = d.entries.length
+        ? d.entries.map(e => `<div class="server">
+            <strong>${esc(e.name)}</strong>
+            <span class="muted">${e.isDirectory ? `Folder · ${e.files} file${e.files === 1 ? '' : 's'}` : fmt(e.bytes)} · from ${esc(parentLabel(e.originalPath))} · deleted ${new Date(e.deletedAt).toLocaleString()}${e.deletedBy ? ' by ' + esc(e.deletedBy) : ''}</span>
+            ${canWrite ? `<div class="actions">
+                <button data-restore="${esc(e.id)}">Restore</button>
+                <button data-purge="${esc(e.id)}" class="danger-text">Delete permanently</button>
+            </div>` : ''}
+        </div>`).join('')
+        : '<p class="muted">The trash is empty.</p>';
+
+    box.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
+        try {
+            const r = await (await api('/api/trash/restore', { method: 'POST', body: { id: b.dataset.restore } })).json();
+            toast(r.message);
+        } catch (e) {
+            toast(e.message);
+        }
+        loadTrash();
+    }));
+    box.querySelectorAll('[data-purge]').forEach(b => b.addEventListener('click', async () => {
+        if (!await askConfirm('Delete permanently', 'This item cannot be recovered afterwards.', 'Delete')) return;
+        try {
+            const r = await (await api('/api/trash/purge', { method: 'POST', body: { id: b.dataset.purge } })).json();
+            toast(r.message);
+        } catch (e) {
+            toast(e.message);
+        }
+        loadTrash();
+    }));
+}
+
+$('#empty-trash').addEventListener('click', async () => {
+    if (!await askConfirm('Empty trash', 'Everything in the trash is deleted permanently.', 'Empty trash')) return;
+    try {
+        const r = await (await api('/api/trash/purge', { method: 'POST', body: { all: true } })).json();
+        toast(r.message);
+    } catch (e) {
+        toast(e.message);
+    }
+    loadTrash();
+});
+
 async function route() {
     const p = window.CLOUDHUB_ROUTE || new URLSearchParams(location.search).get('route') || '/';
-    ['files', 'servers', 'browse', 'users'].forEach(x => $(`#${x}-page`).hidden = true);
+    ['files', 'servers', 'browse', 'users', 'trash'].forEach(x => $(`#${x}-page`).hidden = true);
     document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', (a.dataset.route || '/') === p));
-    if (p === '/users') {
+    if (p === '/trash') {
+        $('#trash-page').hidden = false;
+        await loadTrash();
+    } else if (p === '/users') {
         $('#users-page').hidden = false;
         await users();
     } else if (p === '/servers') {

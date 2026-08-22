@@ -16,6 +16,7 @@ if (!is_dir($root)) mkdir($root, 0775, true);
 return [
  'app_env'=>(string)env('APP_ENV','production'), 'app_url'=>(string)env('APP_URL',''), 'root_dir'=>$root,
  'read_only'=>env_bool('READ_ONLY'), 'allow_delete'=>env_bool('ALLOW_DELETE',true), 'allow_overwrite'=>env_bool('ALLOW_OVERWRITE',true),
+ 'trash_enabled'=>env_bool('TRASH_ENABLED',true), 'trash_retention_days'=>(int)env('TRASH_RETENTION_DAYS',30),
  'https_enabled'=>env_bool('HTTPS_ENABLED'), 'require_https'=>env_bool('REQUIRE_HTTPS',false),
  'trust_proxy'=>env_bool('TRUST_PROXY',false), 'hsts_enabled'=>env_bool('HSTS_ENABLED',false), 'hsts_max_age'=>(int)env('HSTS_MAX_AGE',31536000),
  'session_idle_seconds'=>(int)env('SESSION_IDLE_SECONDS',3600), 'session_absolute_seconds'=>(int)env('SESSION_ABSOLUTE_SECONDS',43200),
