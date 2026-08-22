@@ -67,6 +67,34 @@ $checks['muted help text is allowed to wrap'] =
 $checks['the size column still stays on one line'] =
     (bool)preg_match('/\.upload-file-size\{[^}]*white-space:nowrap/', $css);
 
+// --- thumbnails -----------------------------------------------------------
+// Every thumbnail carried width="300" height="300" in the markup while the CSS
+// set both max-width and max-height, so the used size came from those
+// attributes clamped by the two maxima: a 4:1 panorama and a 1:2.65 portrait
+// both rendered at exactly 163x80, stretched.
+$checks['thumbnails are not forced into a shared box'] =
+    !(bool)preg_match('/\.file img\{[^}]*max-height:80px/', $css);
+$checks['thumbnails keep their proportions'] =
+    (bool)preg_match('/\.file \.thumb img\{[^}]*object-fit:cover/', $css);
+$checks['the tile still reserves its space before the image loads'] =
+    (bool)preg_match('/\.file \.thumb\{[^}]*height:88px/', $css)
+    && str_contains($css, '.file-grid .thumb{height:auto;aspect-ratio:4/3}');
+$checks['a phone gets a bigger tile than the old 80px band'] =
+    str_contains($css, 'aspect-ratio:4/3');
+// A glyph is a symbol, not a picture: stretching one across the tile looks
+// like a rendering fault rather than a design.
+$checks['icons are sized instead of left at body text size'] =
+    str_contains($css, '.folder-icon,.file-icon{font-size:44px;line-height:1}')
+    && str_contains($css, '.file-grid .folder-icon,.file-grid .file-icon{font-size:58px}');
+$checks['an icon tile is not given a picture background'] =
+    str_contains($css, '.file .thumb:has(.folder-icon),.file .thumb:has(.file-icon){background:transparent}');
+$checks['video and image tiles are the same size'] =
+    str_contains($css, '.thumb-preview.video-thumb{height:100%;border-radius:8px}')
+    && !(bool)preg_match('/\.thumb-preview\.video-thumb\{[^}]*height:80px/', $css);
+$checks['the list view is corrected too'] =
+    str_contains($css, '.file-list-view .thumb{height:44px;border-radius:6px;background:transparent}')
+    && str_contains($css, '.file-list-view .file{gap:10px}');
+
 // --- the action label -----------------------------------------------------
 $checks['the preview action is labelled for the file'] =
     str_contains($app, "playable ? 'Play' : 'Preview'");

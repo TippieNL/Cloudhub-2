@@ -8,7 +8,7 @@
  */
 [hidden]{display:none!important}
 
-:root{font-family:system-ui,sans-serif;color-scheme:light;--bg:#f7f7f8;--fg:#18181b;--card:#fff;--border:#ddd;--muted:#666;--primary:#1479c9}html.dark{color-scheme:dark;--bg:#151515;--fg:#f3f3f3;--card:#1d1d1d;--border:#333;--muted:#aaa;--primary:#3296e6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg)}header{min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:0 18px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:5}nav{display:flex;gap:6px}/* Pushed right so that when the header wraps at tablet widths the account group lands at the end of its row rather than under the brand. */.header-actions{display:flex;gap:6px;align-items:center;margin-left:auto}a,button{color:inherit}nav a{padding:8px 12px;border-radius:7px;text-decoration:none}nav a.active{background:color-mix(in srgb,var(--primary) 18%,transparent)}button,input,select,textarea{font:inherit;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--fg);padding:9px 11px}button{cursor:pointer}button:hover{border-color:var(--primary)}main{padding:20px;max-width:1400px;margin:auto}.toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:14px}.file{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;min-height:120px}.file .thumb{height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden}.file img{max-width:100%;max-height:80px;border-radius:5px}.name{word-break:break-word;font-weight:600}.meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.actions button{padding:5px 7px;font-size:12px}#search{width:min(420px,100%)}.overlay{position:fixed;inset:0;background:var(--bg);z-index:20;display:flex;align-items:center;justify-content:center}.dialog,.panel{background:var(--card);border:1px solid var(--border);padding:22px;border-radius:12px;width:min(430px,92vw)}.dialog label{display:block;margin:12px 0}.dialog input{width:100%;margin-top:5px}.error{color:#d33}.server{padding:14px;border:1px solid var(--border);background:var(--card);border-radius:9px;margin:8px 0}.panel{margin-top:15px}.panel>*{display:block;width:100%;margin:8px 0}#toast{position:fixed;right:20px;bottom:20px;background:#222;color:#fff;padding:10px 14px;border-radius:8px;display:none}@media(max-width:650px){main{padding:12px}.file-grid{grid-template-columns:1fr 1fr}
+:root{font-family:system-ui,sans-serif;color-scheme:light;--bg:#f7f7f8;--fg:#18181b;--card:#fff;--border:#ddd;--muted:#666;--primary:#1479c9}html.dark{color-scheme:dark;--bg:#151515;--fg:#f3f3f3;--card:#1d1d1d;--border:#333;--muted:#aaa;--primary:#3296e6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg)}header{min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:0 18px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:5}nav{display:flex;gap:6px}/* Pushed right so that when the header wraps at tablet widths the account group lands at the end of its row rather than under the brand. */.header-actions{display:flex;gap:6px;align-items:center;margin-left:auto}a,button{color:inherit}nav a{padding:8px 12px;border-radius:7px;text-decoration:none}nav a.active{background:color-mix(in srgb,var(--primary) 18%,transparent)}button,input,select,textarea{font:inherit;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--fg);padding:9px 11px}button{cursor:pointer}button:hover{border-color:var(--primary)}main{padding:20px;max-width:1400px;margin:auto}.toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:14px}.file{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;min-height:120px}.file .thumb{display:flex;align-items:center;justify-content:center;overflow:hidden}.name{word-break:break-word;font-weight:600}.meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.actions button{padding:5px 7px;font-size:12px}#search{width:min(420px,100%)}.overlay{position:fixed;inset:0;background:var(--bg);z-index:20;display:flex;align-items:center;justify-content:center}.dialog,.panel{background:var(--card);border:1px solid var(--border);padding:22px;border-radius:12px;width:min(430px,92vw)}.dialog label{display:block;margin:12px 0}.dialog input{width:100%;margin-top:5px}.error{color:#d33}.server{padding:14px;border:1px solid var(--border);background:var(--card);border-radius:9px;margin:8px 0}.panel{margin-top:15px}.panel>*{display:block;width:100%;margin:8px 0}#toast{position:fixed;right:20px;bottom:20px;background:#222;color:#fff;padding:10px 14px;border-radius:8px;display:none}@media(max-width:650px){main{padding:12px}.file-grid{grid-template-columns:1fr 1fr}
 /* Two rows: identity and account controls above, section nav below. Everything
    stays visible and tappable instead of spilling out of a fixed-height bar. */
 header{display:grid;grid-template-columns:auto 1fr;grid-template-areas:"brand actions" "nav nav";align-items:center;row-gap:8px;column-gap:8px;padding:8px 10px;min-height:0}
@@ -58,7 +58,7 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 .upload-conflict select{width:100%;padding:10px;border:1px solid var(--border,#ccc);border-radius:8px;background:inherit;color:inherit}
 
 /* v11 modern file management UX */
-.file-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:12px}.toolbar-actions,.file-controls,.view-switch,.selection-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.breadcrumbs{display:flex;gap:6px;align-items:center;min-width:0;overflow:auto}.breadcrumbs button{border:0;background:transparent;padding:6px 4px;font-weight:600}.file-controls{margin-bottom:12px}.file-controls #search{flex:1;min-width:180px}.view-switch{margin-left:auto}.view-switch button.active{background:color-mix(in srgb,var(--primary) 18%,var(--card));border-color:var(--primary)}.selection-bar{position:sticky;top:66px;z-index:4;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin:10px 0;box-shadow:0 6px 24px rgb(0 0 0 / .08)}.file{position:relative;transition:border-color .15s,box-shadow .15s,transform .15s}.file:hover{border-color:color-mix(in srgb,var(--primary) 55%,var(--border));box-shadow:0 6px 20px rgb(0 0 0 / .08)}.file.selected{border-color:var(--primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 20%,transparent)}.file-select{position:absolute;top:10px;left:10px;z-index:2}.file-select input{width:18px;height:18px;padding:0}.folder-icon{font-size:42px}.file-info{min-width:0}.file-list-view{display:flex;flex-direction:column;gap:5px;margin-top:14px}.file-list-view .file{display:grid;grid-template-columns:34px 52px minmax(0,1fr) auto;align-items:center;min-height:62px;padding:8px 10px}.file-list-view .file-select{position:static}.file-list-view .thumb{height:44px}.file-list-view .thumb img{max-height:44px}.file-list-view .actions{margin:0;justify-content:flex-end}.file-list-view .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.upload-dropzone{transition:border-color .15s,background .15s,transform .15s}.upload-dropzone.dragging{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,var(--card));transform:scale(1.01)}.upload-queue{display:grid;gap:8px;margin:10px 0}.queue-item{border:1px solid var(--border);border-radius:9px;padding:9px}.queue-line{display:flex;justify-content:space-between;gap:12px}.queue-item progress{width:100%;height:8px}.queue-status{font-size:12px;color:var(--muted);margin-top:4px}.confirm-dialog{width:min(440px,100%);background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px}.confirm-dialog h2{margin-top:0}.confirm-dialog label,.confirm-dialog input{display:block;width:100%}.confirm-dialog input{margin-top:7px}.danger-button{background:#b42318;color:#fff;border-color:#b42318}.danger-text{color:#d33}.context-menu{position:fixed;z-index:60;width:180px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 14px 40px rgb(0 0 0 / .22)}.context-menu[hidden]{display:none}.context-menu button{display:block;width:100%;border:0;text-align:left;background:transparent;padding:9px 10px}.context-menu button:hover{background:color-mix(in srgb,var(--primary) 12%,transparent)}
+.file-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:12px}.toolbar-actions,.file-controls,.view-switch,.selection-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.breadcrumbs{display:flex;gap:6px;align-items:center;min-width:0;overflow:auto}.breadcrumbs button{border:0;background:transparent;padding:6px 4px;font-weight:600}.file-controls{margin-bottom:12px}.file-controls #search{flex:1;min-width:180px}.view-switch{margin-left:auto}.view-switch button.active{background:color-mix(in srgb,var(--primary) 18%,var(--card));border-color:var(--primary)}.selection-bar{position:sticky;top:66px;z-index:4;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin:10px 0;box-shadow:0 6px 24px rgb(0 0 0 / .08)}.file{position:relative;transition:border-color .15s,box-shadow .15s,transform .15s}.file:hover{border-color:color-mix(in srgb,var(--primary) 55%,var(--border));box-shadow:0 6px 20px rgb(0 0 0 / .08)}.file.selected{border-color:var(--primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 20%,transparent)}.file-select{position:absolute;top:10px;left:10px;z-index:2}.file-select input{width:18px;height:18px;padding:0}.folder-icon{font-size:42px}.file-info{min-width:0}.file-list-view{display:flex;flex-direction:column;gap:5px;margin-top:14px}.file-list-view .file{display:grid;grid-template-columns:34px 52px minmax(0,1fr) auto;align-items:center;min-height:62px;padding:8px 10px}.file-list-view .file-select{position:static}.file-list-view .actions{margin:0;justify-content:flex-end}.file-list-view .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.upload-dropzone{transition:border-color .15s,background .15s,transform .15s}.upload-dropzone.dragging{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,var(--card));transform:scale(1.01)}.upload-queue{display:grid;gap:8px;margin:10px 0}.queue-item{border:1px solid var(--border);border-radius:9px;padding:9px}.queue-line{display:flex;justify-content:space-between;gap:12px}.queue-item progress{width:100%;height:8px}.queue-status{font-size:12px;color:var(--muted);margin-top:4px}.confirm-dialog{width:min(440px,100%);background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px}.confirm-dialog h2{margin-top:0}.confirm-dialog label,.confirm-dialog input{display:block;width:100%}.confirm-dialog input{margin-top:7px}.danger-button{background:#b42318;color:#fff;border-color:#b42318}.danger-text{color:#d33}.context-menu{position:fixed;z-index:60;width:180px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 14px 40px rgb(0 0 0 / .22)}.context-menu[hidden]{display:none}.context-menu button{display:block;width:100%;border:0;text-align:left;background:transparent;padding:9px 10px}.context-menu button:hover{background:color-mix(in srgb,var(--primary) 12%,transparent)}
 @media(max-width:650px){.file-toolbar{align-items:stretch}
 .toolbar-actions{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .toolbar-actions>button{padding:0 10px}
@@ -93,7 +93,6 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 .thumb-preview.video-thumb{
   position:relative;
   width:100%;
-  height:80px;
   overflow:hidden;
   border-radius:7px;
   background:#111;
@@ -127,7 +126,6 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 }
 .file-list-view .thumb-preview.video-thumb{height:44px;width:52px}
 @media(max-width:650px){
-  .thumb-preview.video-thumb{height:80px}
   .file-list-view .thumb-preview.video-thumb{height:44px;width:44px}
 }
 
@@ -187,3 +185,42 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 .usage-table{width:100%;border-collapse:collapse;table-layout:fixed}
 .usage-table th{text-align:left;font-weight:500;padding:5px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .usage-table td{text-align:right;padding:5px 0;color:var(--muted);white-space:nowrap;width:40%}
+
+/* Grid thumbnails ---------------------------------------------------------
+ *
+ * The tile is a fixed box and the image fills it. Previously the markup gave
+ * every thumbnail width="300" height="300" while the CSS set both max-width
+ * and max-height, so the used size came from those attributes clamped by the
+ * two maxima -- every image rendered at exactly the same 163x80, whatever its
+ * real shape. A 4:1 panorama and a 1:2.65 portrait came out identically, both
+ * stretched. object-fit:cover inside a ratio box crops instead of distorting,
+ * and the fixed ratio still reserves the space so nothing shifts on load.
+ *
+ * On a phone the card is nearly 190px wide, so an 80px band wasted most of it.
+ * The tile takes the full card width at 4:3, which is about 55% more picture,
+ * and the icons for files without one grow to match. */
+.file .thumb{height:88px;border-radius:8px;background:color-mix(in srgb,var(--fg) 5%,transparent)}
+.file .thumb .thumb-preview{width:100%;height:100%}
+.file .thumb img{width:100%;height:100%;max-width:none;max-height:none;object-fit:cover;border-radius:8px}
+.folder-icon,.file-icon{font-size:44px;line-height:1}
+/* A folder or a document is a symbol, not a picture: leave it centred at its
+   own size rather than stretching a glyph across the tile. */
+.file .thumb:has(.folder-icon),.file .thumb:has(.file-icon){background:transparent}
+
+.thumb-preview.video-thumb{height:100%;border-radius:8px}
+
+/* The list view has the same distortion for the same reason, at 44px. Its
+   columns had no gap, which did not show while thumbnails were letterboxed
+   with whitespace around them; a full-bleed tile sits flush against the name
+   without one. */
+.file-list-view .file{gap:10px}
+.file-list-view .thumb{height:44px;border-radius:6px;background:transparent}
+.file-list-view .thumb img{border-radius:6px}
+.file-list-view .folder-icon,.file-list-view .file-icon{font-size:26px}
+
+@media(max-width:650px){
+  .file{padding:10px}
+  .file-grid .thumb{height:auto;aspect-ratio:4/3}
+  .file-grid .folder-icon,.file-grid .file-icon{font-size:58px}
+  .thumb-preview.video-thumb{height:100%}
+}
