@@ -8,7 +8,7 @@
  */
 [hidden]{display:none!important}
 
-:root{font-family:system-ui,sans-serif;color-scheme:light;--bg:#f7f7f8;--fg:#18181b;--card:#fff;--border:#ddd;--muted:#666;--primary:#1479c9}html.dark{color-scheme:dark;--bg:#151515;--fg:#f3f3f3;--card:#1d1d1d;--border:#333;--muted:#aaa;--primary:#3296e6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg)}header{min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:0 18px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:5}nav{display:flex;gap:6px}a,button{color:inherit}nav a{padding:8px 12px;border-radius:7px;text-decoration:none}nav a.active{background:color-mix(in srgb,var(--primary) 18%,transparent)}button,input,select,textarea{font:inherit;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--fg);padding:9px 11px}button{cursor:pointer}button:hover{border-color:var(--primary)}main{padding:20px;max-width:1400px;margin:auto}.toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:14px}.file{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;min-height:120px}.file .thumb{height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden}.file img{max-width:100%;max-height:80px;border-radius:5px}.name{word-break:break-word;font-weight:600}.meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.actions button{padding:5px 7px;font-size:12px}#search{width:min(420px,100%)}.overlay{position:fixed;inset:0;background:var(--bg);z-index:20;display:flex;align-items:center;justify-content:center}.dialog,.panel{background:var(--card);border:1px solid var(--border);padding:22px;border-radius:12px;width:min(430px,92vw)}.dialog label{display:block;margin:12px 0}.dialog input{width:100%;margin-top:5px}.error{color:#d33}.server{padding:14px;border:1px solid var(--border);background:var(--card);border-radius:9px;margin:8px 0}.panel{margin-top:15px}.panel>*{display:block;width:100%;margin:8px 0}#toast{position:fixed;right:20px;bottom:20px;background:#222;color:#fff;padding:10px 14px;border-radius:8px;display:none}@media(max-width:650px){main{padding:12px}.file-grid{grid-template-columns:1fr 1fr}
+:root{font-family:system-ui,sans-serif;color-scheme:light;--bg:#f7f7f8;--fg:#18181b;--card:#fff;--border:#ddd;--muted:#666;--primary:#1479c9}html.dark{color-scheme:dark;--bg:#151515;--fg:#f3f3f3;--card:#1d1d1d;--border:#333;--muted:#aaa;--primary:#3296e6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg)}header{min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:0 18px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:5}nav{display:flex;gap:6px}/* Pushed right so that when the header wraps at tablet widths the account group lands at the end of its row rather than under the brand. */.header-actions{display:flex;gap:6px;align-items:center;margin-left:auto}a,button{color:inherit}nav a{padding:8px 12px;border-radius:7px;text-decoration:none}nav a.active{background:color-mix(in srgb,var(--primary) 18%,transparent)}button,input,select,textarea{font:inherit;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--fg);padding:9px 11px}button{cursor:pointer}button:hover{border-color:var(--primary)}main{padding:20px;max-width:1400px;margin:auto}.toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:14px}.file{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;min-height:120px}.file .thumb{height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden}.file img{max-width:100%;max-height:80px;border-radius:5px}.name{word-break:break-word;font-weight:600}.meta{color:var(--muted);font-size:12px}.actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.actions button{padding:5px 7px;font-size:12px}#search{width:min(420px,100%)}.overlay{position:fixed;inset:0;background:var(--bg);z-index:20;display:flex;align-items:center;justify-content:center}.dialog,.panel{background:var(--card);border:1px solid var(--border);padding:22px;border-radius:12px;width:min(430px,92vw)}.dialog label{display:block;margin:12px 0}.dialog input{width:100%;margin-top:5px}.error{color:#d33}.server{padding:14px;border:1px solid var(--border);background:var(--card);border-radius:9px;margin:8px 0}.panel{margin-top:15px}.panel>*{display:block;width:100%;margin:8px 0}#toast{position:fixed;right:20px;bottom:20px;background:#222;color:#fff;padding:10px 14px;border-radius:8px;display:none}@media(max-width:650px){main{padding:12px}.file-grid{grid-template-columns:1fr 1fr}
 /* Two rows: identity and account controls above, section nav below. Everything
    stays visible and tappable instead of spilling out of a fixed-height bar. */
 header{display:grid;grid-template-columns:auto 1fr;grid-template-areas:"brand actions" "nav nav";align-items:center;row-gap:8px;column-gap:8px;padding:8px 10px;min-height:0}
@@ -16,7 +16,7 @@ header>strong{grid-area:brand;font-size:15px}
 header>nav{grid-area:nav;display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;overscroll-behavior-x:contain}
 header>nav::-webkit-scrollbar{display:none}
 header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
-.header-actions{grid-area:actions;display:flex;gap:6px;justify-content:flex-end;align-items:center}
+.header-actions{grid-area:actions;display:flex;gap:6px;justify-content:flex-end;align-items:center;margin-left:0}
 .header-actions button{min-height:38px;padding:0 12px;white-space:nowrap}
 #theme{padding:0 10px}}
 
@@ -170,3 +170,20 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
   .file-controls .search-scope{grid-column:1/-1}
   .search-scope button{flex:1}
 }
+
+/* Storage dashboard ------------------------------------------------------- */
+.usage-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:12px 0}
+.usage-figure{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.usage-value{font-size:24px;font-weight:700;line-height:1.1}
+.usage-bar{height:12px;border-radius:99px;background:color-mix(in srgb,var(--fg) 12%,transparent);overflow:hidden}
+.usage-bar span{display:block;height:100%;background:var(--primary)}
+.usage-bar.warning span{background:#c9860f}
+.usage-bar.critical span{background:#b42318}
+.usage-columns{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:16px}
+.usage-block{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}
+.usage-block h3{margin:0 0 8px}
+/* Paths can be long; the table scrolls inside its card rather than widening
+   the page, and the label column keeps its own ellipsis. */
+.usage-table{width:100%;border-collapse:collapse;table-layout:fixed}
+.usage-table th{text-align:left;font-weight:500;padding:5px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.usage-table td{text-align:right;padding:5px 0;color:var(--muted);white-space:nowrap;width:40%}

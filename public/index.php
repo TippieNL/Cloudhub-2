@@ -5,6 +5,7 @@ use CloudHub\Helpers\Http;
 use CloudHub\Services\FileService;
 use CloudHub\Repositories\ServerRepository;
 use CloudHub\Repositories\UserRepository;
+use CloudHub\Repositories\StorageLedger;
 use CloudHub\Services\Auth;
 use CloudHub\Services\UploadService;
 use CloudHub\Services\Security;
@@ -232,7 +233,19 @@ function api_try(callable $fn): never {
             415 => 'UNSUPPORTED_MEDIA_TYPE',
             419 => 'CSRF_FAILED',
             422 => 'VALIDATION_FAILED',
-            429 => 'RATE_LIMITED']; $msg = $status >= 500?'An internal server error occurred':$e->getMessage(); if ($status >= 500)error_log('['.Http::requestId().'] '.$e->getMessage()); Http::error($status, $codes[$status]??'INTERNAL_ERROR', $msg);
+            429 => 'RATE_LIMITED',
+            507 => 'INSUFFICIENT_STORAGE'];
+        /*
+         * 5xx messages are hidden because they can carry internal detail, but a
+         * status that appears in this map was chosen deliberately and its
+         * message is written for the user. 507 ("you are over quota") is
+         * useless as "an internal server error occurred" -- the caller cannot
+         * act on what they are not told.
+         */
+        $known = isset($codes[$status]);
+        $msg = ($status >= 500 && !$known)?'An internal server error occurred':$e->getMessage();
+        if ($status >= 500)error_log('['.Http::requestId().'] '.$e->getMessage());
+        Http::error($status, $codes[$status]??'INTERNAL_ERROR', $msg);
     }catch(Throwable $e) {
         error_log('['.Http::requestId().'] '.get_class($e).': '.$e->getMessage()); Http::error(500, 'INTERNAL_ERROR', 'An internal server error occurred');
     }exit;
@@ -247,6 +260,80 @@ function api_try(callable $fn): never {
 function uploads(): UploadService {
     static $uploads; global $config, $fs;
     return $uploads ??= new UploadService($config, $fs);
+}
+/**
+* The upload ledger, sharing the request's database connection.
+*/
+function ledger(): StorageLedger {
+    static $ledger = null;
+    return $ledger ??= new StorageLedger(db());
+}
+/**
+* Measured storage use, cached.
+*
+* Measuring means walking the whole store, which is far too expensive to do on
+* every upload. The result is written to a small cache file and reused for
+* usage_cache_seconds; $force recomputes it for the "Recalculate" button.
+*
+* The cache lives outside the storage root so it is neither listed, searched,
+* nor counted in the figure it holds.
+*/
+function storage_report(FileService $fs, array $config, bool $force = false): array {
+    $cache = dirname(__DIR__).'/storage/.cache/usage.json';
+    $ttl = max(0, (int)$config['usage_cache_seconds']);
+
+    if (!$force && $ttl > 0 && is_file($cache) && time() - (int)filemtime($cache) < $ttl) {
+        $cached = json_decode((string)file_get_contents($cache), true);
+        if (is_array($cached) && isset($cached['bytes'])) {
+            $cached['cached'] = true;
+            return $cached;
+        }
+    }
+
+    $report = $fs->storageReport();
+    $report['cached'] = false;
+    if (!is_dir(dirname($cache)))@mkdir(dirname($cache), 0775, true);
+    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES));
+    return $report;
+}
+/**
+* Refuse an upload that would breach the whole-store limit or the caller's own
+* quota, before a single byte is staged.
+*
+* Both limits are opt-in (0 means unlimited) and both fail open: if the figure
+* cannot be obtained the upload proceeds, because blocking a legitimate upload
+* over a bookkeeping problem is worse than letting one through.
+*/
+function human_bytes(int $n): string {
+    // Limits are configured in GB but can be set low; "0 GB of 0 GB used" is
+    // not an answer, so the unit follows the number.
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $i = 0;
+    $v = (float)$n;
+    while ($v >= 1024 && $i < count($units) - 1) { $v /= 1024; $i++; }
+    return ($v >= 100 || $i === 0?round($v):round($v, 1)).' '.$units[$i];
+}
+function assert_upload_fits(FileService $fs, array $config, int $size): void {
+    $limit = (int)round((float)$config['storage_limit_gb'] * 1073741824);
+    if ($limit > 0) {
+        $report = storage_report($fs, $config);
+        $used = (int)($report['bytes'] ?? 0);
+        if ($used + $size > $limit) {
+            throw new RuntimeException('The file store is full ('.
+                human_bytes($used).' of '.human_bytes($limit).' used)', 507);
+        }
+    }
+
+    $quota = (int)round((float)$config['user_quota_gb'] * 1073741824);
+    $user = Auth::user();
+    if ($quota > 0 && $user !== null) {
+        ledger()->sweep($fs);
+        $used = ledger()->usage($user['id']);
+        if ($used + $size > $quota) {
+            throw new RuntimeException('You have used '.human_bytes($used).
+                ' of your '.human_bytes($quota).' quota', 507);
+        }
+    }
 }
 function db(): PDO {
     static $pdo; if (!$pdo) {
@@ -439,11 +526,14 @@ if ($path === '/api/files/delete' && $method === 'DELETE') api_try(function()use
     // deployment has opted out the item goes to the trash instead. The reply
     // says which happened, so the UI never claims the wrong thing.
     if (!$config['trash_enabled']) {
+        $rel = $fs->relative($p);
         $fs->deleteTree($p);
-        AuditLog::write(db(), 'file.delete', 'success', ['path' => $fs->relative($p)]);
+        ledger()->forget($rel);
+        AuditLog::write(db(), 'file.delete', 'success', ['path' => $rel]);
         return ['success' => true, 'trashed' => false, 'message' => 'Deleted permanently'];
     }
     $meta = $fs->trash($p, Auth::user()['username'] ?? null);
+    ledger()->forget($meta['originalPath']);
     $fs->trashPurgeExpired((int)$config['trash_retention_days']);
     AuditLog::write(db(), 'file.trash', 'success', ['path' => $meta['originalPath'], 'id' => $meta['id']]);
     return ['success' => true, 'trashed' => true, 'id' => $meta['id'], 'message' => 'Moved to trash'];
@@ -485,6 +575,17 @@ $relocate = function(callable $apply, string $verb)use($fs, $config): array {
             }
 
             $apply($source, $target);
+            // A move carries its attribution with it. A copy creates new bytes,
+            // so it is charged to whoever made it -- otherwise a quota is
+            // avoided by uploading one file and copying it a hundred times.
+            if ($verb === 'move') {
+                ledger()->relocate($fs->relative($source), $fs->relative($target));
+            } else {
+                foreach ($fs->copiedFiles($target) as $copied) {
+                    ledger()->record($fs->relative($copied), basename($copied),
+                        (int)(filesize($copied)?:0), null, Auth::user()['id'] ?? null);
+                }
+            }
             $done++;
         }catch(RuntimeException $e) {
             $failed[] = ['path' => $rel, 'message' => $e->getMessage()];
@@ -527,6 +628,44 @@ if ($path === '/api/files/search' && $method === 'GET') api_try(function()use($f
 * that it is in the trash. Restoring and purging change the file store, so the
 * generic write check above already applies to them.
 */
+/**
+* Storage usage, for the administrator dashboard.
+*
+* Administrator-only: it names the largest files in the store and how much
+* every account has uploaded, which is more than a viewer needs to know.
+*
+* Measuring walks the whole tree, so the result is cached; ?refresh=1 forces a
+* fresh measurement for the Recalculate button.
+*/
+if ($path === '/api/storage/usage' && $method === 'GET') api_try(function()use($fs, $config) {
+    Authorization::requireAdmin();
+    release_session_lock();
+
+    $report = storage_report($fs, $config, !empty($_GET['refresh']));
+
+    // Drop ledger rows whose file has since gone by a route CloudHub does not
+    // see. Without this the per-account figures below drift upwards forever on
+    // an installation that has no quota configured, because nothing else calls
+    // the sweep.
+    ledger()->sweep($fs);
+
+    // Usage per account, with names resolved here rather than in the ledger so
+    // that it stays a pure accounting table.
+    $names = [];
+    foreach ((new UserRepository(db()))->all() as $u)$names[(int)$u['id']] = $u['username'];
+    $byUser = array_map(fn(array $r) => [
+        'userId' => $r['userId'],
+        'username' => $r['userId'] === null?null:($names[$r['userId']] ?? 'deleted account'),
+        'bytes' => $r['bytes'], 'files' => $r['files'],
+    ], ledger()->usageByUser());
+
+    return $report + [
+        'storageLimitBytes' => (int)round((float)$config['storage_limit_gb'] * 1073741824),
+        'userQuotaBytes' => (int)round((float)$config['user_quota_gb'] * 1073741824),
+        'cacheSeconds' => (int)$config['usage_cache_seconds'],
+        'byUser' => $byUser,
+    ];
+});
 if ($path === '/api/trash' && $method === 'GET') api_try(function()use($fs, $config) {
     release_session_lock();
     return ['enabled' => (bool)$config['trash_enabled'], 'retentionDays' => (int)$config['trash_retention_days'],
@@ -536,6 +675,9 @@ if ($path === '/api/trash/restore' && $method === 'POST') api_try(function()use(
     $fs->writable();
     $b = Http::body();
     $restored = $fs->restore(Http::string($b, 'id', 1, 64));
+    // The file is back on disk but its ledger row went when it was trashed;
+    // the periodic sweep leaves the rest consistent.
+    ledger()->sweep($fs);
     AuditLog::write(db(), 'file.restore', 'success', ['path' => $restored['path']]);
     return ['success' => true, 'path' => $restored['path'],
         'message' => $restored['renamed']
@@ -552,7 +694,11 @@ if ($path === '/api/trash/purge' && $method === 'POST') api_try(function()use($f
         'message' => $n === 1?'Permanently deleted 1 item':'Permanently deleted '.$n.' items'];
 });
 if ($path === '/api/files/rename' && $method === 'POST') api_try(function()use($fs, $config) {
-    $fs->writable(); $b = Http::body(); $a = $fs->existing((string)($b['oldPath']??'')); $z = $fs->destination((string)($b['newPath']??'')); if (!file_exists($a))throw new RuntimeException('Source not found', 404); if (file_exists($z)&&!$config['allow_overwrite'])throw new RuntimeException('Destination already exists', 409); if (!rename($a, $z))throw new RuntimeException('Rename failed', 500); return ['success' => true,
+    $fs->writable(); $b = Http::body(); $a = $fs->existing((string)($b['oldPath']??'')); $z = $fs->destination((string)($b['newPath']??'')); if (!file_exists($a))throw new RuntimeException('Source not found', 404); if (file_exists($z)&&!$config['allow_overwrite'])throw new RuntimeException('Destination already exists', 409);
+    $from = $fs->relative($a);
+    if (!rename($a, $z))throw new RuntimeException('Rename failed', 500);
+    ledger()->relocate($from, $fs->relative($z));
+    return ['success' => true,
         'message' => 'Renamed successfully'];
 });
 /**
@@ -563,10 +709,14 @@ if ($path === '/api/files/rename' && $method === 'POST') api_try(function()use($
 * PHP's normal multipart/post_max_size limit because each request contains only
 * one small chunk.
 */
-if ($path === '/api/uploads/init' && $method === 'POST') api_try(function()use($config) {
+if ($path === '/api/uploads/init' && $method === 'POST') api_try(function()use($config, $fs) {
     $b = Http::body();
+    $size = (int)($b['size']??-1);
+    // Checked before anything is staged, so a doomed upload does not first
+    // consume the disk it is about to be refused for.
+    if ($size > 0)assert_upload_fits($fs, $config, $size);
     return uploads()->init(
-        (string)($b['targetPath']??'/'), (string)($b['name']??''), (int)($b['size']??-1),
+        (string)($b['targetPath']??'/'), (string)($b['name']??''), $size,
         (string)($b['uploadId']??''), (string)($b['conflict']??$config['upload_conflict'])
     );
 });
@@ -575,8 +725,17 @@ if ($path === '/api/uploads/chunk' && $method === 'PUT') api_try(function() {
     $id = (string)($_GET['id']??''); $offset = (int)($_SERVER['HTTP_X_UPLOAD_OFFSET']??-1);
     return uploads()->append($id, $offset, 'php://input');
 });
-if ($path === '/api/uploads/complete' && $method === 'POST') api_try(function() {
-    $b = Http::body(); return uploads()->complete((string)($b['id']??''));
+if ($path === '/api/uploads/complete' && $method === 'POST') api_try(function()use($fs) {
+    $b = Http::body();
+    $done = uploads()->complete((string)($b['id']??''));
+
+    // Attribute the finished file to whoever uploaded it, so a per-account
+    // quota has something to count. Best-effort, like the audit log.
+    $full = $fs->root().$done['path'];
+    ledger()->record((string)$done['path'], (string)$done['name'],
+        is_file($full)?(int)(filesize($full)?:0):0, is_file($full)?mime_type($full):null,
+        Auth::user()['id'] ?? null);
+    return $done;
 });
 if ($path === '/api/uploads/cancel' && $method === 'DELETE') api_try(function() {
     $b = Http::body(); return uploads()->cancel((string)($b['id']??''));
@@ -1107,7 +1266,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         http_response_code(204); header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS'); exit;
     }
     if (str_starts_with($path, '/api/'))Http::error(404, 'NOT_FOUND', 'API endpoint not found');
-    if (in_array($path, ['/', '/servers', '/browse', '/users', '/trash'], true)) {
+    if (in_array($path, ['/', '/servers', '/browse', '/users', '/trash', '/storage'], true)) {
         require dirname(__DIR__).'/views/pages/app.php'; exit;
     }
 /**

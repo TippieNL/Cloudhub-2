@@ -26,6 +26,7 @@
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Ftrash" data-route="/trash">Trash</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
             <a id="nav-users" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fusers" data-route="/users" hidden>Users</a>
+            <a id="nav-storage" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fstorage" data-route="/storage" hidden>Storage</a>
         </nav>
         <div class="header-actions">
             <button id="theme" aria-label="Toggle dark mode">◐</button>
@@ -268,6 +269,15 @@
             </div>
             <p id="trash-note" class="muted"></p>
             <div id="trash-list"></div>
+        </section>
+        <section id="storage-page" hidden>
+            <div class="toolbar">
+                <h2>Storage</h2>
+                <button id="recalculate-usage" type="button">Recalculate</button>
+            </div>
+            <p id="usage-note" class="muted"></p>
+            <div id="usage-summary"></div>
+            <div id="usage-detail" class="usage-columns"></div>
         </section>
         <section id="browse-page" hidden>
             <h2>Remote server browser</h2>

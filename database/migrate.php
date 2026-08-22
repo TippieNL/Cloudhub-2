@@ -128,6 +128,10 @@ $pdo->exec("UPDATE storage_servers SET config = JSON_OBJECT() WHERE config IS NU
 addColumn($pdo, 'file_metadata', 'size', 'BIGINT UNSIGNED NOT NULL DEFAULT 0');
 addColumn($pdo, 'file_metadata', 'mime_type', 'VARCHAR(190) NULL');
 addColumn($pdo, 'file_metadata', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+// Which account an upload came from, so a per-user quota can be computed.
+// Nullable on purpose: rows that predate this, and files that arrive by any
+// other route, are unattributed rather than wrongly blamed on someone.
+addColumn($pdo, 'file_metadata', 'uploaded_by', 'INT UNSIGNED NULL');
 
 addColumn($pdo, 'share_links', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
 addColumn($pdo, 'share_links', 'expires_at', 'TIMESTAMP NULL DEFAULT NULL');
@@ -137,6 +141,8 @@ if (!indexExists($pdo, 'storage_servers', 'idx_storage_default')) $pdo->exec('AL
 if (!indexExists($pdo, 'share_links', 'idx_share_expires')) $pdo->exec('ALTER TABLE share_links ADD INDEX idx_share_expires (expires_at)');
 if (!indexExists($pdo, 'file_metadata', 'idx_file_server')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server (server_id)');
 if (!indexExists($pdo, 'file_metadata', 'idx_file_server_path')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server_path (server_id, file_path(190))');
+// Per-user usage is a SUM grouped by this column on every upload attempt.
+if (!indexExists($pdo, 'file_metadata', 'idx_file_uploader')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_uploader (uploaded_by)');
 
 // Phase 4 removed the predefined account: seeding a known password hash here
 // meant every migrated installation carried a working admin/change-me login.

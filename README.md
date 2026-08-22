@@ -248,6 +248,53 @@ Passwords are stored using PHP-compatible password hashes and are re-hashed to
 the preferred algorithm on the next successful login. The browser no longer
 receives a `WWW-Authenticate` header, so native Basic Auth popups are not used.
 
+## Storage and quotas
+
+Administrators get a **Storage** screen: what the store holds, how much of the
+disk is free, what is reclaimable from the trash, a breakdown by folder and by
+kind of file, the largest files, and how much each account has uploaded.
+
+Measuring means walking the whole tree, so the figure is deliberately not
+recomputed per request: it is cached for `USAGE_CACHE_SECONDS` (default 300),
+the screen says how old it is, and **Recalculate** forces a fresh measurement.
+The cache lives outside the storage root, so it is neither listed, searched,
+nor counted in the number it holds. Bounding the walk was rejected — a
+dashboard that stops counting early reports a number that is simply wrong.
+
+Two optional limits, both `0` (unlimited) by default and both checked at
+`POST /api/uploads/init`, before a single byte is staged:
+
+| Setting | Caps |
+|---|---|
+| `STORAGE_LIMIT_GB` | the whole file store, measured from disk |
+| `USER_QUOTA_GB` | what one account has uploaded |
+
+Refusals come back as `507 INSUFFICIENT_STORAGE` and say where the caller
+stands (`You have used 4.1 GB of your 5 GB quota`) — 5xx messages are
+otherwise hidden, but a caller cannot act on what they are not told.
+
+### What the per-account figure counts
+
+The per-user quota needs to know who uploaded what, and nothing recorded that:
+`file_metadata` was declared in `schema.sql` from the beginning and referenced
+by no PHP at all. It is now an upload ledger, with an added nullable
+`uploaded_by` column (`php database/migrate.php` adds it to an existing
+installation).
+
+It counts **bytes an account uploaded through CloudHub that are still on
+disk**. Moves, renames, copies, deletes, trashing and restores all keep it in
+step. Files that predate the feature, or that arrive by WebDAV or by a change
+made directly on disk, are unattributed: they count towards
+`STORAGE_LIMIT_GB` but towards nobody's personal quota. A periodic sweep drops
+rows whose file has since disappeared, so the ledger converges instead of
+requiring every write in the system to remember it.
+
+A copy is charged to whoever made it, not to the original uploader — a quota
+avoided by uploading one file and copying it a hundred times is not a quota.
+
+Every ledger operation fails open. A bookkeeping problem means "the quota does
+not bind", never "a legitimate upload is refused".
+
 ## Upgrading an older Cloud File Hub database (v5)
 
 Do not re-import `schema.sql` over an existing installation. Copy your existing `.env` into this release, back up the database, then run:

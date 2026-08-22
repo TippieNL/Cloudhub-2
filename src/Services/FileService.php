@@ -172,6 +172,25 @@ final class FileService {
  }
 
  /**
+  * Every file at or below a path, for attributing what a copy just created.
+  *
+  * @return list<string> absolute paths
+  */
+ public function copiedFiles(string $path): array {
+  if(is_link($path))return [];
+  if(!is_dir($path))return [$path];
+  $out=[];$stack=[$path];
+  while($stack){
+   $dir=array_pop($stack);
+   foreach(scandir($dir)?:[] as $n){
+    if($n==='.'||$n==='..')continue;$full=$dir.'/'.$n;if(is_link($full))continue;
+    is_dir($full)?$stack[]=$full:$out[]=$full;
+   }
+  }
+  return $out;
+ }
+
+ /**
   * Total bytes and file count below a path.
   *
   * @return array{bytes:int,files:int}
@@ -189,6 +208,87 @@ final class FileService {
    }
   }
   return ['bytes'=>$bytes,'files'=>$files];
+ }
+
+
+ /**
+  * One pass over the whole tree, producing everything the storage screen shows.
+  *
+  * Deliberately unbounded, unlike search(): a dashboard that stopped counting
+  * early would report a number that is simply wrong, and "your disk is 60%
+  * full" is only useful if it is true. The cost is paid once and cached by the
+  * caller rather than reduced by guessing.
+  *
+  * The trash is measured separately and excluded from the browsable totals,
+  * because it is space you can reclaim rather than space you are using.
+  */
+ public function storageReport(int $largestCount=10): array {
+  $acc=['bytes'=>0,'files'=>0,'largest'=>[],'byType'=>[]];
+  $folders=[];
+  foreach($this->children($this->root) as $child){
+   $before=[$acc['bytes'],$acc['files']];
+   $this->accumulate($child,$acc,$largestCount);
+   if(is_dir($child))$folders[]=['name'=>basename($child),'path'=>$this->relative($child),
+    'bytes'=>$acc['bytes']-$before[0],'files'=>$acc['files']-$before[1]];
+  }
+  usort($folders,fn($a,$b)=>$b['bytes']<=>$a['bytes']);
+
+  $largest=$acc['largest'];
+  usort($largest,fn($a,$b)=>$b['bytes']<=>$a['bytes']);
+  arsort($acc['byType']);
+
+  // Summed from what each entry recorded when it was trashed, rather than by
+  // measuring .trash: that would count the bookkeeping files as reclaimable
+  // space and report a folder of one file as two.
+  $trash=['bytes'=>0,'files'=>0,'entries'=>0];
+  foreach($this->trashList() as $entry){
+   $trash['bytes']+=(int)($entry['bytes']??0);
+   $trash['files']+=(int)($entry['files']??0);
+   $trash['entries']++;
+  }
+
+  return ['bytes'=>$acc['bytes'],'files'=>$acc['files'],'folders'=>$folders,
+   'largest'=>array_slice($largest,0,$largestCount),
+   'byType'=>$acc['byType'],'trash'=>$trash,
+   'diskTotal'=>(int)(@disk_total_space($this->root)?:0),
+   'diskFree'=>(int)(@disk_free_space($this->root)?:0),
+   'measuredAt'=>gmdate('c')];
+ }
+
+ private function accumulate(string $path,array &$acc,int $largestCount): void {
+  if(is_link($path))return;
+  if(is_dir($path)){
+   foreach($this->children($path) as $child)$this->accumulate($child,$acc,$largestCount);
+   return;
+  }
+  $size=(int)(filesize($path)?:0);
+  $acc['bytes']+=$size;$acc['files']++;
+  $type=self::fileCategory($path);
+  $acc['byType'][$type]=($acc['byType'][$type]??0)+$size;
+
+  // Trimmed periodically rather than sorted on every file: a hundred thousand
+  // files would otherwise mean a hundred thousand sorts.
+  $acc['largest'][]=['name'=>basename($path),'path'=>$this->relative($path),'bytes'=>$size];
+  if(count($acc['largest'])>$largestCount*8){
+   usort($acc['largest'],fn($a,$b)=>$b['bytes']<=>$a['bytes']);
+   $acc['largest']=array_slice($acc['largest'],0,$largestCount);
+  }
+ }
+
+ /** Coarse grouping for "what is filling the disk", by extension. */
+ public static function fileCategory(string $path): string {
+  static $map=null;
+  if($map===null){
+   $map=[];
+   foreach(['image'=>['jpg','jpeg','png','gif','webp','bmp','svg','avif','heic','tif','tiff'],
+    'video'=>['mp4','webm','ogv','mov','m4v','avi','mkv','mpeg','mpg','3gp','ts','m2ts','mts'],
+    'audio'=>['mp3','wav','ogg','oga','m4a','aac','flac','opus'],
+    'document'=>['pdf','doc','docx','odt','xls','xlsx','ods','ppt','pptx','odp','txt','md','csv','rtf'],
+    'archive'=>['zip','tar','gz','bz2','xz','7z','rar','iso']] as $group=>$exts)
+    foreach($exts as $e)$map[$e]=$group;
+  }
+  $ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));
+  return $map[$ext]??'other';
  }
 
  /* ---- Trash ------------------------------------------------------------

@@ -40,6 +40,10 @@ $checks['the header can grow instead of overflowing'] =
 $checks['the header wraps rather than spilling'] = (bool)preg_match('/header\{min-height:56px;[^}]*flex-wrap:wrap/', $css);
 $checks['the account group has its own hook'] =
     str_contains($view, 'class="header-actions"') && str_contains($css, '.header-actions');
+// Six nav entries no longer fit beside the account group at tablet widths, so
+// the header wraps there. Left-aligned under the brand looks like a mistake.
+$checks['a wrapped header keeps the account group at the end of its row'] =
+    str_contains($css, '.header-actions{display:flex;gap:6px;align-items:center;margin-left:auto}');
 $checks['mobile puts nav on its own row'] =
     str_contains($css, 'grid-template-areas:"brand actions" "nav nav"');
 $checks['a crowded nav scrolls instead of wrapping'] =

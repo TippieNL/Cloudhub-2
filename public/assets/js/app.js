@@ -75,6 +75,7 @@ async function login(u, p) {
     S.csrf = d.csrfToken || '';
     S.role = d.user?.role || 'viewer';
     $('#nav-users').hidden = S.role !== 'admin';
+    $('#nav-storage').hidden = S.role !== 'admin';
     $('#login').style.display = 'none';
     await route();
 }
@@ -1742,13 +1743,83 @@ $('#empty-trash').addEventListener('click', async () => {
     loadTrash();
 });
 
+/* ---- Storage dashboard --------------------------------------------------
+ *
+ * Administrator-only, because it names the largest files in the store and how
+ * much every account has uploaded. Measuring walks the whole tree, so the
+ * server caches the figure and this screen says how old it is rather than
+ * pretending it is live.
+ */
+function usageBar(used, limit) {
+    if (!limit) return '';
+    const pct = Math.min(100, Math.round(used / limit * 1000) / 10);
+    const state = pct >= 90 ? ' critical' : pct >= 75 ? ' warning' : '';
+    return `<div class="usage-bar${state}"><span style="width:${pct}%"></span></div>
+        <p class="muted">${fmt(used)} of ${fmt(limit)} used (${pct}%)</p>`;
+}
+
+function usageTable(caption, rows, empty) {
+    if (!rows.length) return `<div class="usage-block"><h3>${esc(caption)}</h3><p class="muted">${esc(empty)}</p></div>`;
+    return `<div class="usage-block"><h3>${esc(caption)}</h3><table class="usage-table"><tbody>${
+        // Long paths are clipped to keep the card narrow, so the full value
+        // has to stay reachable on hover and to a screen reader.
+        rows.map(r => `<tr><th scope="row" title="${esc(r[0])}">${esc(r[0])}</th><td>${esc(r[1])}</td></tr>`).join('')
+    }</tbody></table></div>`;
+}
+
+async function loadStorage(refresh = false) {
+    const summary = $('#usage-summary');
+    const detail = $('#usage-detail');
+    summary.innerHTML = '<p class="muted">Measuring…</p>';
+    detail.innerHTML = '';
+    let d;
+    try {
+        d = await (await api('/api/storage/usage' + (refresh ? '?refresh=1' : ''))).json();
+    } catch (e) {
+        summary.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        return;
+    }
+
+    const measured = new Date(d.measuredAt).toLocaleString();
+    $('#usage-note').textContent = d.cached
+        ? `Measured ${measured}; recalculated at most every ${d.cacheSeconds} seconds.`
+        : `Measured just now (${measured}).`;
+
+    // Without a configured limit there is no percentage to show, so fall back
+    // to what the disk itself reports.
+    const diskUsed = d.diskTotal ? d.diskTotal - d.diskFree : 0;
+    summary.innerHTML = `<div class="usage-summary">
+        <div class="usage-figure"><span class="usage-value">${fmt(d.bytes)}</span><span class="muted">in ${d.files} file${d.files === 1 ? '' : 's'}</span></div>
+        <div class="usage-figure"><span class="usage-value">${d.diskTotal ? fmt(d.diskFree) : '—'}</span><span class="muted">free on disk${d.diskTotal ? ' of ' + fmt(d.diskTotal) : ''}</span></div>
+        <div class="usage-figure"><span class="usage-value">${fmt(d.trash.bytes)}</span><span class="muted">reclaimable from ${d.trash.entries} trash entr${d.trash.entries === 1 ? 'y' : 'ies'}</span></div>
+    </div>
+    ${d.storageLimitBytes
+        ? usageBar(d.bytes, d.storageLimitBytes)
+        : `<p class="muted">No store limit is configured (STORAGE_LIMIT_GB). Disk is ${d.diskTotal ? Math.round(diskUsed / d.diskTotal * 100) + '% full' : 'not measurable here'}.</p>`}`;
+
+    detail.innerHTML = [
+        usageTable('Folders', d.folders.map(f => [f.name, `${fmt(f.bytes)} · ${f.files} file${f.files === 1 ? '' : 's'}`]), 'No folders yet.'),
+        usageTable('By type', Object.entries(d.byType).map(([k, v]) => [k, fmt(v)]), 'Nothing stored yet.'),
+        usageTable('Largest files', d.largest.map(f => [f.path, fmt(f.bytes)]), 'Nothing stored yet.'),
+        usageTable('Uploaded by account',
+            d.byUser.map(u => [u.username || 'unattributed',
+                fmt(u.bytes) + (d.userQuotaBytes ? ` of ${fmt(d.userQuotaBytes)}` : '')]),
+            'No uploads have been attributed yet.')
+    ].join('');
+}
+
+$('#recalculate-usage').addEventListener('click', () => loadStorage(true));
+
 async function route() {
     const p = window.CLOUDHUB_ROUTE || new URLSearchParams(location.search).get('route') || '/';
-    ['files', 'servers', 'browse', 'users', 'trash'].forEach(x => $(`#${x}-page`).hidden = true);
+    ['files', 'servers', 'browse', 'users', 'trash', 'storage'].forEach(x => $(`#${x}-page`).hidden = true);
     document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', (a.dataset.route || '/') === p));
     if (p === '/trash') {
         $('#trash-page').hidden = false;
         await loadTrash();
+    } else if (p === '/storage') {
+        $('#storage-page').hidden = false;
+        await loadStorage();
     } else if (p === '/users') {
         $('#users-page').hidden = false;
         await users();
@@ -1774,6 +1845,7 @@ async function route() {
             S.role = d.user?.role || 'viewer';
             // Convenience only: /api/users is administrator-gated server-side.
             $('#nav-users').hidden = S.role !== 'admin';
+            $('#nav-storage').hidden = S.role !== 'admin';
             $('#login').style.display = 'none';
             await route();
         } else {
