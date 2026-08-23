@@ -103,6 +103,18 @@ const readSetting = key => idb('settings', 'readonly', s => s.get(key)).then(v =
 
 self.addEventListener('fetch', event => {
     const req = event.request;
+
+    /*
+     * Android's share sheet POSTs here. Handling it in the worker rather than
+     * on the server means the shared files go straight into the durable queue
+     * and upload in the background with resume, instead of being pushed up in
+     * one blocking request that a flaky connection would lose.
+     */
+    if (req.method === 'POST' && new URL(req.url).searchParams.get('route') === '/share-target') {
+        event.respondWith(acceptShare(req));
+        return;
+    }
+
     if (req.method !== 'GET') return;
 
     const url = new URL(req.url);
@@ -204,12 +216,60 @@ function offlineResponse() {
         { status: 503, headers: { 'Content-Type': 'application/json', 'X-CloudHub-Offline': '1' } });
 }
 
+/**
+ * Take the shared files into the queue, then redirect to the app.
+ *
+ * The redirect is what the user sees: the share sheet closes and CloudHub
+ * opens showing the upload already in progress. The queue itself is drained by
+ * the page, which owns the chunk protocol.
+ */
+async function acceptShare(req) {
+    const home = `${shellUrl()}?route=%2F&shared=1`;
+    try {
+        const form = await req.formData();
+        const files = form.getAll('files').filter(f => f && typeof f === 'object' && 'size' in f);
+        const target = (await readSetting('sharePath')) || '/';
+        let queued = 0;
+        for (const file of files) {
+            const id = 'q' + [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, '0')).join('');
+            await idb('uploads', 'readwrite', s => s.put({
+                id,
+                name: file.name || `shared-${Date.now()}`,
+                type: file.type || 'application/octet-stream',
+                size: file.size,
+                targetPath: target,
+                blob: file,
+                offset: 0,
+                state: 'pending',
+                error: '',
+                addedAt: Date.now(),
+            }));
+            queued++;
+        }
+        return Response.redirect(`${home}&queued=${queued}`, 303);
+    } catch {
+        // Never leave the share sheet hanging on an error; open the app and
+        // let it report an empty queue.
+        return Response.redirect(`${home}&queued=0`, 303);
+    }
+}
+
 /* ---- messages and background sync --------------------------------------- */
 
 self.addEventListener('message', event => {
     const msg = event.data || {};
     if (msg.type === 'base') BASE = msg.base.replace(/\/$/, '');
     if (msg.type === 'skip-waiting') self.skipWaiting();
+
+    /*
+     * Keeping a file for offline use is done here rather than in the page so
+     * that the cache name exists in exactly one place. A page that opened the
+     * cache itself would have to know the version string, and would silently
+     * write into an orphaned cache the moment this worker was updated.
+     */
+    if (msg.type === 'keep-offline') event.waitUntil(reply(event, keepOffline(msg.paths || [])));
+    if (msg.type === 'drop-offline') event.waitUntil(reply(event, dropOffline(msg.paths || [])));
+    if (msg.type === 'list-offline') event.waitUntil(reply(event, listOffline()));
     if (msg.type === 'sign-out') {
         // Cached listings and kept files belong to whoever was signed in.
         event.waitUntil(Promise.all([
@@ -234,6 +294,64 @@ self.addEventListener('sync', event => {
 });
 
 self.addEventListener('online', () => notifyClients({ type: 'resume-uploads' }));
+
+async function reply(event, work) {
+    const port = event.ports && event.ports[0];
+    try {
+        const result = await work;
+        port?.postMessage({ ok: true, result });
+    } catch (err) {
+        port?.postMessage({ ok: false, error: String(err && err.message || err) });
+    }
+}
+
+const downloadUrl = path => `${BASE}/?route=${encodeURIComponent('/api/files/download')}&path=${encodeURIComponent(path)}`;
+const thumbUrl = path => `${BASE}/?route=${encodeURIComponent('/api/thumbnail')}&path=${encodeURIComponent(path)}`;
+
+/**
+ * Store a file, and its thumbnail, for use with no connection.
+ *
+ * The thumbnail matters as much as the file: without it the offline listing
+ * shows a grid of broken tiles for files that are in fact available.
+ */
+async function keepOffline(paths) {
+    const cache = await caches.open(FILES);
+    const failed = [];
+    for (const path of paths) {
+        try {
+            await cache.add(new Request(downloadUrl(path), { credentials: 'same-origin' }));
+            // A thumbnail is a nicety; a file that has none must still count
+            // as kept.
+            await cache.add(new Request(thumbUrl(path), { credentials: 'same-origin' })).catch(() => {});
+        } catch (err) {
+            failed.push({ path, message: String(err && err.message || err) });
+        }
+    }
+    return { kept: await listOffline(), failed };
+}
+
+async function dropOffline(paths) {
+    const cache = await caches.open(FILES);
+    for (const path of paths) {
+        await cache.delete(downloadUrl(path));
+        await cache.delete(thumbUrl(path));
+    }
+    return { kept: await listOffline() };
+}
+
+/** The kept set is derived from the cache itself, so it cannot drift from it. */
+async function listOffline() {
+    const cache = await caches.open(FILES);
+    const keys = await cache.keys();
+    const paths = [];
+    for (const req of keys) {
+        const url = new URL(req.url);
+        if (url.searchParams.get('route') !== '/api/files/download') continue;
+        const path = url.searchParams.get('path');
+        if (path) paths.push(path);
+    }
+    return paths;
+}
 
 async function notifyClients(message) {
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

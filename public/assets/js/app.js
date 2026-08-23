@@ -77,7 +77,9 @@ async function login(u, p) {
     $('#nav-users').hidden = S.role !== 'admin';
     $('#nav-storage').hidden = S.role !== 'admin';
     $('#login').style.display = 'none';
+    document.dispatchEvent(new CustomEvent('cfh-signed-in'));
     await route();
+    refreshOfflineSet();
 }
 
 $('#login-form').addEventListener('submit', async e => {
@@ -131,6 +133,157 @@ document.addEventListener('cfh-connection', e => {
     document.querySelectorAll('#mkdir,#upload-btn,#selection-move,#selection-copy,#selection-delete,#delete-selected')
         .forEach(b => b.disabled = offline);
 });
+
+/* ---- Upload queue -------------------------------------------------------
+ *
+ * queue.js owns the durable store and the chunk protocol; this renders it and
+ * feeds it from the camera, the gallery and Android's share sheet.
+ */
+const QUEUE = window.CloudHubQueue;
+
+const QUEUE_LABEL = {
+    pending: 'Waiting',
+    uploading: 'Uploading',
+    done: 'Uploaded',
+    failed: 'Failed',
+};
+
+async function renderQueue() {
+    if (!QUEUE) return;
+    const items = (await QUEUE.list()).sort((a, b) => a.addedAt - b.addedAt);
+    const panel = $('#queue-panel');
+    panel.hidden = items.length === 0;
+    if (!items.length) return;
+
+    const active = items.filter(i => i.state !== 'done').length;
+    $('#queue-title').textContent = active
+        ? `Uploads · ${active} remaining`
+        : `Uploads · all ${items.length} finished`;
+    $('#queue-clear').hidden = !items.some(i => i.state === 'done');
+
+    $('#queue-items').innerHTML = items.map(i => {
+        const pct = i.size ? Math.floor((i.offset / i.size) * 100) : 0;
+        const detail = i.state === 'failed' ? esc(i.error || 'Upload failed')
+            : i.state === 'done' ? `${fmt(i.size)} · to ${esc(i.targetPath)}`
+            : `${fmt(i.offset)} of ${fmt(i.size)} · to ${esc(i.targetPath)}`;
+        return `<div class="queue-row" data-state="${i.state}">
+            <div class="queue-row-head">
+                <span class="queue-name">${esc(i.name)}</span>
+                <span class="muted">${QUEUE_LABEL[i.state] || i.state}</span>
+            </div>
+            ${i.state === 'done' ? '' : `<progress value="${i.offset}" max="${Math.max(1, i.size)}"></progress>`}
+            <div class="queue-row-foot">
+                <span class="muted">${detail}</span>
+                <span class="queue-row-actions">
+                    ${i.state === 'failed' ? `<button data-requeue="${esc(i.id)}">Retry</button>` : ''}
+                    ${i.state === 'done' ? '' : `<button data-unqueue="${esc(i.id)}">Remove</button>`}
+                </span>
+            </div>
+            ${i.state === 'uploading' ? `<span class="sr-only">${pct}%</span>` : ''}
+        </div>`;
+    }).join('');
+
+    $('#queue-items').querySelectorAll('[data-requeue]').forEach(b =>
+        b.addEventListener('click', () => QUEUE.retry(b.dataset.requeue)));
+    $('#queue-items').querySelectorAll('[data-unqueue]').forEach(b =>
+        b.addEventListener('click', () => QUEUE.remove(b.dataset.unqueue)));
+}
+
+document.addEventListener('cfh-queue-changed', renderQueue);
+// A queue that survived the app closing is already populated before any event
+// fires, so the first render has to be asked for.
+renderQueue();
+document.addEventListener('cfh-queue-uploaded', e => {
+    // Only disturb the listing the user is actually looking at.
+    if (e.detail.targetPath === S.path) loadFiles();
+});
+$('#queue-clear').addEventListener('click', () => QUEUE?.clearFinished());
+
+/* ---- Keeping files for offline use --------------------------------------
+ *
+ * The worker owns the cache, so the page asks it rather than opening the cache
+ * itself: the cache name carries a version, and a page that knew it would keep
+ * writing into an orphaned one after the worker updated.
+ */
+S.offlinePaths = new Set();
+
+function askWorker(message) {
+    const worker = navigator.serviceWorker?.controller;
+    if (!worker) return Promise.resolve(null);
+    return new Promise(resolve => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = e => resolve(e.data);
+        // A worker that is being replaced never answers; without this the
+        // caller would await forever.
+        setTimeout(() => resolve(null), 15000);
+        worker.postMessage(message, [channel.port2]);
+    });
+}
+
+async function refreshOfflineSet() {
+    const res = await askWorker({ type: 'list-offline' });
+    if (!res?.ok) return;
+    S.offlinePaths = new Set(res.result);
+    renderFiles();
+}
+
+async function keepOffline(path) {
+    if (!navigator.serviceWorker?.controller) return toast('Offline access needs the app to be installed');
+    toast('Saving for offline use…');
+    const res = await askWorker({ type: 'keep-offline', paths: [path] });
+    if (!res?.ok) return toast('Could not save that file for offline use');
+    S.offlinePaths = new Set(res.result.kept);
+    // A file that could not be stored must not be shown as if it had been.
+    toast(res.result.failed.length ? 'That file could not be saved for offline use' : 'Available offline');
+    renderFiles();
+}
+
+async function dropOffline(path) {
+    const res = await askWorker({ type: 'drop-offline', paths: [path] });
+    if (!res?.ok) return;
+    S.offlinePaths = new Set(res.result.kept);
+    toast('Removed the offline copy');
+    renderFiles();
+}
+
+/* ---- Camera and gallery -------------------------------------------------
+ *
+ * Both are ordinary file inputs. capture= is the only difference: it asks
+ * Android for the camera rather than the picker. They are shown only where
+ * they mean something, so a desktop toolbar is not padded with a control that
+ * opens the same dialog as Upload.
+ */
+if (matchMedia('(pointer: coarse)').matches) {
+    $('#camera-btn').hidden = false;
+    $('#gallery-btn').hidden = false;
+}
+
+for (const [input, what] of [['#camera-input', 'photo'], ['#gallery-input', 'file']]) {
+    $(input).addEventListener('change', async e => {
+        const files = [...e.target.files];
+        // The same input must accept the same file twice in a row, and it
+        // will not fire change again unless the value is cleared.
+        e.target.value = '';
+        if (!files.length) return;
+        await QUEUE?.add(files, S.path);
+        toast(files.length === 1 ? `1 ${what} queued for upload` : `${files.length} files queued for upload`);
+    });
+}
+
+/*
+ * Files arriving from Android's share sheet are already in the queue by the
+ * time the app opens -- the service worker put them there and redirected here.
+ */
+(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('shared')) return;
+    const queued = Number(params.get('queued') || 0);
+    setTimeout(() => toast(queued
+        ? `${queued} shared file${queued === 1 ? '' : 's'} queued for upload`
+        : 'Nothing could be read from that share'), 400);
+    // Leave the address bar clean so a refresh does not repeat the message.
+    history.replaceState(null, '', FRONT);
+})();
 
 $('#theme').addEventListener('click', () => {
     document.documentElement.classList.toggle('dark');
@@ -537,7 +690,7 @@ function renderFiles() {
         return `<article class="file" data-path="${encoded}" tabindex="0">
         <div class="file-select"><input type="checkbox" data-sel="${encoded}" aria-label="Select ${esc(f.name)}"></div>
         <div class="thumb">${thumb}</div>
-        <div class="file-info"><div class="name">${esc(f.name)}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}${S.results ? ` · in ${esc(parentLabel(f.path))}` : ''}</div></div>
+        <div class="file-info"><div class="name">${esc(f.name)}${S.offlinePaths.has(f.path) ? ' <span class="offline-badge" title="Available offline">&#8681;</span>' : ''}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}${S.results ? ` · in ${esc(parentLabel(f.path))}` : ''}</div></div>
         <div class="actions">${f.isDirectory ? `<button data-open="${encoded}">Open</button>` : `${preview}<button data-down="${encoded}">Download</button><button data-share="${encoded}">Share</button>`}<button data-menu="${encoded}" aria-label="More actions">⋮</button></div>
         </article>`;
     }).join('');
@@ -986,7 +1139,7 @@ function showContextMenu(path, x, y) {
     const f = currentEntries().find(item => item.path === path);
     const menu = $('#file-context');
     if (!f) return;
-    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button><button data-cmd="delete" class="danger-text">Delete</button>`;
+    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
     menu.hidden = false;
     menu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(y, window.innerHeight - 240)}px`;
@@ -1000,6 +1153,8 @@ function showContextMenu(path, x, y) {
         if (c === 'rename') ren(path);
         if (c === 'move') relocate([path], 'move');
         if (c === 'copy') relocate([path], 'copy');
+        if (c === 'keep') keepOffline(path);
+        if (c === 'unkeep') dropOffline(path);
         if (c === 'delete') del(path);
     }));
 }
@@ -1880,7 +2035,9 @@ async function route() {
             $('#nav-users').hidden = S.role !== 'admin';
             $('#nav-storage').hidden = S.role !== 'admin';
             $('#login').style.display = 'none';
+            document.dispatchEvent(new CustomEvent('cfh-signed-in'));
             await route();
+            refreshOfflineSet();
         } else {
             $('#login').style.display = 'flex';
         }

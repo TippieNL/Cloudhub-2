@@ -56,6 +56,15 @@
                 <div class="toolbar-actions">
                     <button id="mkdir">New folder</button>
                     <button id="upload-btn" class="primary-button" type="button">Upload</button>
+                    <!-- capture= asks Android for the camera directly; without
+                         it the same input opens the gallery picker. Both are
+                         labels so the input itself can stay hidden. -->
+                    <label id="camera-btn" class="button-like" hidden>Take photo
+                        <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+                    </label>
+                    <label id="gallery-btn" class="button-like" hidden>From gallery
+                        <input id="gallery-input" type="file" accept="image/*,video/*" multiple hidden>
+                    </label>
                     <button id="zip">Download selected</button>
                     <button id="delete-selected" type="button">Delete selected</button>
                     <button id="refresh">Refresh</button>
@@ -89,6 +98,13 @@
                 <button id="selection-copy" type="button">Copy</button>
                 <button id="selection-delete" type="button">Delete</button>
             </div>
+            <section id="queue-panel" aria-label="Upload queue" hidden>
+                <div class="queue-head">
+                    <strong id="queue-title">Uploads</strong>
+                    <button id="queue-clear" type="button">Clear finished</button>
+                </div>
+                <div id="queue-items"></div>
+            </section>
             <p id="search-status" class="muted" role="status" aria-live="polite" hidden></p>
             <div id="file-list" class="file-grid" aria-live="polite"></div>
         </section>
@@ -323,6 +339,7 @@
     <!-- Before app.js so the worker registers even if the application script
          fails to load, and so the shared storage helpers exist first. -->
     <script src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/pwa.js?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/js/pwa.js') ?>"></script>
+    <script src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/queue.js?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/js/queue.js') ?>"></script>
     <script src="<?= htmlspecialchars($assetBase, ENT_QUOTES) ?>/assets/js/app.js?v=<?= (int)@filemtime(dirname(__DIR__, 2).'/public/assets/js/app.js') ?>"></script>
 </body>
 </html>

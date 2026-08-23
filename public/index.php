@@ -475,6 +475,19 @@ if ($path === '/manifest.webmanifest' && ($method === 'GET' || $method === 'HEAD
     echo $body;
     exit;
 }
+/*
+* The share target's server-side fallback.
+*
+* Normally the service worker intercepts this POST and puts the shared files
+* straight into the durable upload queue. This exists for the window where the
+* app is installed but the worker is not yet controlling the page -- without
+* it Android's share sheet would land on a 404 and look broken.
+*/
+if ($path === '/share-target' && $method === 'POST') {
+    $app = ($basePath === '' ? '/' : $basePath.'/');
+    header('Location: '.$app.'?route=%2F&shared=1&queued=0', true, 303);
+    exit;
+}
 if ($path === '/sw.js' && ($method === 'GET' || $method === 'HEAD')) {
     $file = dirname(__DIR__).'/public/assets/js/sw.js';
     if (!is_file($file))Http::error(404, 'NOT_FOUND', 'Service worker not found');
@@ -1107,7 +1120,12 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             'bmp' => function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($f) : false,
             default => false
         };
-        if (!$create)throw new RuntimeException('Failed to generate thumbnail', 500);
+        // A file can carry an image extension and not be an image -- a
+        // truncated download, a rename, or something that was never a photo.
+        // That is a fact about the file, not a server fault: 500 logs it as an
+        // internal error and invites the client to retry something that will
+        // never succeed.
+        if (!$create)throw new RuntimeException('This file is not a readable image', 415);
 
         // Dimensions come from the decoded image rather than a second
         // getimagesize() read of the file.

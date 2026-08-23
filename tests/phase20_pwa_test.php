@@ -158,6 +158,89 @@ $checks['actions that need the network are disabled while offline'] =
 $checks['the installed app clears the system status bar'] =
     str_contains($css, '@media(display-mode:standalone){') && str_contains($css, 'env(safe-area-inset-top)');
 
+// --- the upload queue ---------------------------------------------------
+$queue = (string)file_get_contents($root.'/public/assets/js/queue.js');
+
+// The chunk protocol could always resume -- init reports how many bytes the
+// server holds. What was missing was anything to resume from: localStorage
+// stores strings, so once the tab closed the bytes were gone.
+$checks['the queued file itself is stored, not just its name'] =
+    str_contains($queue, 'blob: file,') && str_contains($pwa, "createObjectStore('uploads', { keyPath: 'id' })");
+$checks['progress is persisted per chunk'] =
+    str_contains($queue, "await put({ ...item, offset, state: 'uploading' });");
+$checks['the queue resumes from what the server confirms'] =
+    str_contains($queue, "let offset = Math.min(status.received || 0, item.size);");
+// None of the wake-up events fire on a fresh launch, so without this an
+// upload interrupted by the app closing would sit there forever -- which is
+// the entire point of a durable queue.
+$checks['the queue starts itself on load'] =
+    str_contains($queue, "if (document.readyState === 'complete') setTimeout(run, 500);")
+    && str_contains($queue, "else window.addEventListener('load', () => setTimeout(run, 500));");
+$checks['a queue that survived the app closing is rendered'] =
+    (bool)preg_match("/document\.addEventListener\('cfh-queue-changed', renderQueue\);\s*(\/\/[^\n]*\n\s*)*renderQueue\(\);/", $app);
+$checks['it resumes when the connection returns'] =
+    str_contains($queue, "window.addEventListener('online', () => run());")
+    && str_contains($queue, "document.addEventListener('cfh-resume-uploads', () => run());");
+$checks['it resumes when a session appears'] =
+    str_contains($queue, "document.addEventListener('cfh-signed-in'") && str_contains($app, "new CustomEvent('cfh-signed-in')");
+// Background Sync is Chromium-only, so it is a bonus on top of the online
+// event rather than the mechanism relied upon.
+$checks['background sync is requested but not depended on'] =
+    str_contains($queue, "reg?.sync?.register('cloudhub-uploads')") && str_contains($queue, 'async function requestSync()');
+$checks['the worker wakes an open page rather than uploading itself'] =
+    str_contains($sw, "if (event.tag !== 'cloudhub-uploads') return;") && str_contains($sw, "notifyClients({ type: 'resume-uploads' })");
+// A network failure is not a failure of the upload; asking the user to press
+// retry for something they did not do wrong is wrong.
+$checks['a network failure leaves the item queued, not failed'] =
+    str_contains($queue, 'const transient = !err.permanent && (err.status === undefined || err.status >= 500 || !navigator.onLine);');
+// Retrying a quota or size refusal changes nothing.
+$checks['a refusal that retrying cannot fix is failed outright'] =
+    str_contains($queue, 'permanent: [413, 507, 403].includes(init.status)');
+$checks['only one upload runs at a time'] = str_contains($queue, 'if (state.running) return;');
+
+// --- camera, gallery and the share target -------------------------------
+// capture= is the only difference between the two inputs: it asks Android for
+// the camera rather than the picker.
+$checks['the camera control asks for the camera'] =
+    str_contains($view, 'id="camera-input" type="file" accept="image/*" capture="environment"');
+$checks['the gallery control takes several images or videos'] =
+    str_contains($view, 'id="gallery-input" type="file" accept="image/*,video/*" multiple');
+// The same input must accept the same file twice in a row.
+$checks['picking the same file twice still fires'] = str_contains($app, "e.target.value = '';");
+$checks['the worker intercepts the share POST'] =
+    str_contains($sw, "if (req.method === 'POST' && new URL(req.url).searchParams.get('route') === '/share-target')")
+    && str_contains($sw, 'async function acceptShare(req)');
+$checks['shared files go into the durable queue, not one blocking request'] =
+    (bool)preg_match("/acceptShare[\s\S]{0,1200}idb\('uploads', 'readwrite'/", $sw);
+$checks['the share sheet is never left hanging on an error'] =
+    (bool)preg_match("/acceptShare[\s\S]{0,1800}catch \{[\s\S]{0,200}Response\.redirect/", $sw);
+// Without this Android's share sheet would land on a 404 in the window where
+// the app is installed but the worker is not yet controlling the page.
+$checks['a server-side fallback exists for the share target'] =
+    str_contains($index, "if (\$path === '/share-target' && \$method === 'POST') {")
+    && str_contains($index, "header('Location: '.\$app.'?route=%2F&shared=1&queued=0', true, 303);");
+
+// --- keeping files offline ----------------------------------------------
+// A page that opened the cache itself would have to know the version string,
+// and would write into an orphaned cache the moment the worker updated.
+$checks['the cache name lives only in the worker'] =
+    str_contains($sw, "if (msg.type === 'keep-offline')") && !str_contains($app, 'cloudhub-files');
+$checks['the page asks the worker over a message channel'] =
+    str_contains($app, 'function askWorker(message)') && str_contains($app, 'new MessageChannel()');
+// A worker being replaced never answers.
+$checks['a worker that never answers does not hang the page'] =
+    str_contains($app, 'setTimeout(() => resolve(null), 15000);');
+// Without it the offline listing shows broken tiles for files that are there.
+$checks['a thumbnail is kept alongside the file'] =
+    str_contains($sw, 'await cache.add(new Request(thumbUrl(path)');
+$checks['a file with no thumbnail still counts as kept'] =
+    str_contains($sw, 'thumbUrl(path), { credentials: \'same-origin\' })).catch(() => {});');
+$checks['the kept set is derived from the cache, so it cannot drift'] =
+    str_contains($sw, 'async function listOffline()') && str_contains($sw, "url.searchParams.get('route') !== '/api/files/download'");
+$checks['kept files are shown in the listing'] = str_contains($app, 'offline-badge');
+$checks['a file that could not be kept is not shown as if it had been'] =
+    str_contains($app, "res.result.failed.length ? 'That file could not be saved for offline use'");
+
 $bad = false;
 foreach ($checks as $name => $ok) {
     echo ($ok ? '[PASS] ' : '[FAIL] ').$name.PHP_EOL;

@@ -225,6 +225,55 @@ session-authenticated, so nothing is cached opportunistically: only what you
 asked to keep. Signing out clears the cached listings and files so the next
 person on the device does not inherit them.
 
+## Uploading from a phone
+
+The toolbar gains **Take photo** and **From gallery** on touch devices — the
+same file input, differing only in whether it asks Android for the camera or
+the picker. CloudHub also registers as an Android **share target**, so it
+appears in the share sheet alongside other apps; shared files go straight into
+the upload queue rather than being pushed up in one blocking request.
+
+### The upload queue
+
+Uploads go through a durable queue, shown above the file list. The chunk
+protocol could always resume — `/api/uploads/init` reports how many bytes the
+server already holds — but there was nothing to resume *from*: the id and
+offset were kept in localStorage, which stores strings, so once the tab closed
+the browser had no handle on the file's bytes and "resume" could only mean
+"start again".
+
+The file itself now lives in IndexedDB, so an upload survives the app being
+closed, the screen locking, the connection dropping and the phone restarting.
+Progress is written after every chunk, so a crash costs at most one chunk.
+
+The queue resumes when the app loads, when the connection returns, when the
+app is brought back to the foreground, and when you sign in. Where the browser
+supports Background Sync (Chromium) it also asks to be woken; that is a bonus
+on top of the `online` event, not the mechanism relied on.
+
+**The upload engine stays in the page, not the worker.** Reimplementing the
+chunk protocol in the service worker would mean two copies of the resume logic
+that have to agree exactly. Instead the worker wakes an open page when the
+connection returns, and if none is open the queue continues the next time the
+app is launched. Either way the upload finishes.
+
+A network failure leaves an item queued rather than failed — you should not
+have to press retry for something you did not do wrong. A refusal that
+retrying cannot fix (`413` too large, `507` over quota, `403` forbidden) fails
+the item outright and says why.
+
+## Keeping files for offline use
+
+Any file's ⋮ menu offers **Keep offline**, which stores its bytes and its
+thumbnail on the device; kept files are marked in the listing and readable
+with no connection. Without the thumbnail the offline listing would show
+broken tiles for files that are in fact available.
+
+The cache name lives only in the service worker, and the page asks it over a
+message channel — a page that opened the cache itself would have to know the
+version string and would silently write into an orphaned cache the moment the
+worker updated.
+
 ## Moving, copying and searching
 
 Select one or more items and use **Move** or **Copy**, or pick *Move to…* /
