@@ -224,3 +224,18 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
   .file-grid .folder-icon,.file-grid .file-icon{font-size:58px}
   .thumb-preview.video-thumb{height:100%}
 }
+
+/* Progressive web app ------------------------------------------------------
+ *
+ * The banner sits between the header and the content rather than floating, so
+ * it cannot cover a control the user is reaching for -- being offline is a
+ * state to read, not an alert to dismiss. */
+#offline-banner{margin:0;padding:10px 18px;background:#8a5a00;color:#fff;font-size:14px;text-align:center}
+html.dark #offline-banner{background:#a06b00}
+#install-app{white-space:nowrap}
+/* Installed, the app has no browser chrome, so the sticky header must clear
+   the status bar the system draws over it. */
+@media(display-mode:standalone){
+  header{padding-top:env(safe-area-inset-top)}
+  main{padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+}

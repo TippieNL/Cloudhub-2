@@ -96,7 +96,40 @@ $('#logout').addEventListener('click', async () => {
         await api('/api/auth/logout', { method: 'POST' });
     } catch {}
     S.csrf = '';
+    // Cached listings and kept files belong to the account that was signed in;
+    // the next person on this device must not inherit them.
+    navigator.serviceWorker?.controller?.postMessage({ type: 'sign-out' });
     $('#login').style.display = 'flex';
+});
+
+/* ---- Progressive web app ------------------------------------------------
+ *
+ * pwa.js owns registration and the install event; this is the visible half.
+ */
+const PWA = window.CloudHubPWA;
+
+document.addEventListener('cfh-installable', () => {
+    // Only offered once the browser says the app qualifies, so the button is
+    // never present-but-broken.
+    if (!PWA?.isInstalled()) $('#install-app').hidden = false;
+});
+document.addEventListener('cfh-installed', () => {
+    $('#install-app').hidden = true;
+    toast('CloudHub was added to your home screen');
+});
+
+$('#install-app').addEventListener('click', async () => {
+    const outcome = await PWA?.promptInstall();
+    if (outcome === 'accepted') $('#install-app').hidden = true;
+});
+
+document.addEventListener('cfh-connection', e => {
+    const offline = !e.detail.online;
+    $('#offline-banner').hidden = !offline;
+    // Anything that writes needs a connection; showing it enabled just
+    // produces a failed request and a confusing error.
+    document.querySelectorAll('#mkdir,#upload-btn,#selection-move,#selection-copy,#selection-delete,#delete-selected')
+        .forEach(b => b.disabled = offline);
 });
 
 $('#theme').addEventListener('click', () => {

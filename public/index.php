@@ -416,6 +416,81 @@ if ($path === '/api/auth/status' && $method === 'GET') Http::json(['authenticate
 if ($path === '/api/auth/logout' && $method === 'POST') {
     Authorization::requireRead(); Auth::verifyCsrf(); AuditLog::write(db(), 'auth.logout'); Auth::logout(); Http::json(['success' => true]);
 }
+/*
+* Progressive web app plumbing.
+*
+* Both of these are served by PHP rather than as static files, because both
+* have to know where the application lives. basePath() can be '' or a
+* subdirectory, and assetBase() can differ from it again depending on whether
+* the document root is the project or public/ -- a hand-written manifest
+* cannot express that, and a service worker under /assets/js/ would have a
+* scope of /assets/js/ and control nothing.
+*
+* Neither requires a session: the browser fetches the manifest before anyone
+* signs in, and the worker has to register on the login screen too.
+*/
+if ($path === '/manifest.webmanifest' && ($method === 'GET' || $method === 'HEAD')) {
+    $app = ($basePath === '' ? '/' : $basePath.'/');
+    $icon = fn(string $file): string => $assetBase.'/assets/icons/'.$file;
+    $manifest = [
+        'name' => 'Cloud File Hub',
+        'short_name' => 'CloudHub',
+        'description' => 'Browse, stream and upload your files from anywhere.',
+        'id' => $app,
+        'start_url' => $app,
+        'scope' => $app,
+        'display' => 'standalone',
+        // Android draws the splash screen from background_color plus the 512
+        // icon, so these two are the whole launch experience.
+        'background_color' => '#f7f7f8',
+        'theme_color' => '#1479c9',
+        'orientation' => 'any',
+        'icons' => [
+            ['src' => $icon('icon-192.png'), 'sizes' => '192x192', 'type' => 'image/png', 'purpose' => 'any'],
+            ['src' => $icon('icon-512.png'), 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'any'],
+            ['src' => $icon('icon-maskable-512.png'), 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'maskable'],
+        ],
+        'shortcuts' => [
+            ['name' => 'Upload', 'url' => $app.'?route=%2F&action=upload', 'icons' => [['src' => $icon('icon-192.png'), 'sizes' => '192x192']]],
+            ['name' => 'Trash', 'url' => $app.'?route=%2Ftrash'],
+        ],
+        // Android's share sheet posts here, so CloudHub appears alongside the
+        // other apps when sharing a photo or a video.
+        'share_target' => [
+            'action' => $app.'?route=%2Fshare-target',
+            'method' => 'POST',
+            'enctype' => 'multipart/form-data',
+            'params' => ['title' => 'title', 'text' => 'text', 'url' => 'url',
+                'files' => [['name' => 'files', 'accept' => ['image/*', 'video/*', 'audio/*', 'application/pdf', 'text/*']]]],
+        ],
+    ];
+
+    // Emitted directly rather than through Http::json(), which sends
+    // application/json and no-store. Browsers want the manifest media type,
+    // and re-fetching an unchanged manifest on every launch is waste.
+    header('Content-Type: application/manifest+json; charset=utf-8');
+    header('Cache-Control: public,max-age=3600');
+    header('Content-Length: '.strlen($body = (string)json_encode($manifest, JSON_UNESCAPED_SLASHES)));
+    if ($method === 'HEAD')exit;
+    echo $body;
+    exit;
+}
+if ($path === '/sw.js' && ($method === 'GET' || $method === 'HEAD')) {
+    $file = dirname(__DIR__).'/public/assets/js/sw.js';
+    if (!is_file($file))Http::error(404, 'NOT_FOUND', 'Service worker not found');
+
+    // A worker's default scope is its own directory. The file lives under
+    // assets/, so without this header it could never control the application
+    // routes it exists to serve.
+    header('Service-Worker-Allowed: '.($basePath === '' ? '/' : $basePath.'/'));
+    header('Content-Type: text/javascript; charset=utf-8');
+    // The worker must be revalidated or a stale one pins every cached asset.
+    header('Cache-Control: no-cache');
+    header('Content-Length: '.filesize($file));
+    if ($method === 'HEAD')exit;
+    readfile($file);
+    exit;
+}
 $isAuthEndpoint = str_starts_with($path, '/api/auth/');
 $isProtectedApi = (str_starts_with($path, '/api/')&&!$isAuthEndpoint) || str_starts_with($path, '/webdav');
 if ($isProtectedApi && $method !== 'OPTIONS') {
