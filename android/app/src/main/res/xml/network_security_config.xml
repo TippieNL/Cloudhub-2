@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is permitted because self-hosting on a LAN address is a legitimate
+  way to run CloudHub. It is not a recommendation: over http:// the browser
+  engine refuses to register a service worker, so the offline features and the
+  clipboard stay unavailable. The setup screen says so.
+
+  User-installed certificate authorities are trusted so that a private CA (the
+  usual arrangement behind a VPN) works once it is installed on the device.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

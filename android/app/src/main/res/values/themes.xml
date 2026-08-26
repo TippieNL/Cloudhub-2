@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The system light theme, tinted to the application's own blue so the
+      status bar and the setup screen do not look like a different product
+      from the page they lead to.
+    -->
+    <style name="CloudHubTheme" parent="@android:style/Theme.Material.Light.DarkActionBar">
+        <item name="android:colorPrimary">#1479c9</item>
+        <item name="android:colorPrimaryDark">#10609f</item>
+        <item name="android:colorAccent">#1479c9</item>
+        <item name="android:windowBackground">#f7f7f8</item>
+    </style>
+</resources>

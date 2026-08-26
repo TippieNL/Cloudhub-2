@@ -204,6 +204,71 @@ address the registration is refused by the browser and CloudHub runs as an
 ordinary web page — no install, no offline. That is a browser rule, not a
 setting.
 
+## Android app
+
+`android/` holds a small Android client. Build it with:
+
+    tools/build-apk.sh
+
+The script installs the Android SDK on first run, generates a signing keystore
+if there is not one, and prints the APK's path and signing fingerprint. The
+result is at `android/app/build/outputs/apk/release/app-release.apk` — sideload
+it (Android will ask you to allow installs from your file manager).
+
+CloudHub is a PHP server, so the app is a **client**: it asks for your server's
+address on first launch and remembers it, and the menu can change it later. One
+APK works for any deployment.
+
+### Why a WebView and not a Trusted Web Activity
+
+A TWA would have been the natural home for the progressive web app, but it
+fixes one origin at build time and requires Digital Asset Links verification
+against a publicly trusted certificate. A private or VPN-only domain cannot
+satisfy that, and the app degrades to a browser tab with a URL bar — worse than
+what the browser already does. So the app is a WebView.
+
+The cost is that a WebView is not Chrome. Three things the web app relies on
+are inert inside one, and the shell supplies them from
+`android/app/src/main/assets/bridge.js`, injected into each page:
+
+| What | Why it breaks | What the app does |
+|---|---|---|
+| Downloads | the page points an anchor at a `blob:` URL and clicks it; WebView's `DownloadListener` only ever sees `http(s)`, so every download and the ZIP export silently do nothing | intercepts the click, streams the blob to the app in slices, writes it to Downloads through `MediaStore` |
+| Copy link | `navigator.clipboard` does not exist outside a secure context | shimmed from `ClipboardManager`, and only when it is genuinely missing |
+| The share dialog's Open link | `target="_blank"` needs `onCreateWindow` | hands the URL to the system browser, which is where a public share link belongs |
+
+The web application itself is untouched: it must keep working in an ordinary
+browser, where none of this exists.
+
+### Certificates
+
+The app never accepts an untrusted certificate silently — that would make every
+install a man-in-the-middle. It shows the host and the certificate's SHA-256
+fingerprint and, if you accept, pins *that certificate*: a different one for
+the same host asks again. A private CA installed on the device is trusted
+normally.
+
+Plain `http://` is permitted, because a LAN server is a legitimate way to run
+this, but the setup screen says what it costs: no secure context means no
+service worker, so offline browsing and kept files stay unavailable — in the
+app exactly as in the browser.
+
+### What the app adds over the browser
+
+- **Share sheet** — CloudHub appears when you share a photo or video from any
+  app. Shared files are handed to the page's own durable upload queue, so they
+  get the same resumable treatment as anything picked inside the app.
+- **Camera and gallery** — the page's file inputs open the camera or the
+  picker. No camera permission is requested: `ACTION_IMAGE_CAPTURE` needs none
+  unless the app declares one, and the camera app owns the capture.
+
+### Signing
+
+`android/keystore.jks` and `android/keystore.properties` are generated on first
+build and are **gitignored** — a committed keystore is a published signing key.
+Back them up: without them a later build is a different app identity, which
+Android treats as a different app (reinstall rather than update).
+
 ## Working offline
 
 The worker precaches the interface, so the app opens and renders with no

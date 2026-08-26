@@ -1,0 +1,54 @@
+plugins { id 'com.android.application' }
+
+/*
+ * Signing material is read from keystore.properties, which is gitignored:
+ * a keystore committed to a repository is a published signing key. The build
+ * script generates both on first run. Without them the build still works and
+ * produces a debug-signed APK, which is fine for sideloading.
+ */
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+def hasKeystore = keystorePropertiesFile.exists()
+if (hasKeystore) keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+
+android {
+    namespace 'nl.tippie.cloudhub'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "nl.tippie.cloudhub"
+        // ServiceWorkerController, which the offline features need, is API 24.
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    if (hasKeystore) {
+        signingConfigs {
+            release {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasKeystore) signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // FileProvider only; deliberately not appcompat, to keep the build small.
+    implementation 'androidx.core:core:1.13.1'
+}

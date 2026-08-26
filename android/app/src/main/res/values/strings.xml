@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CloudHub</string>
+
+    <string name="setup_title">Connect to your server</string>
+    <string name="setup_help">Enter the address of your CloudHub server. You can change it later from the menu.</string>
+    <string name="setup_hint">files.example.com</string>
+    <string name="setup_connect">Connect</string>
+    <string name="setup_checking">Checking…</string>
+    <string name="setup_enter_address">Enter a server address.</string>
+    <string name="setup_failed">Could not reach that server: %1$s</string>
+    <string name="setup_https_note">Use https:// where you can. Over plain http the browser engine refuses to run a service worker, so offline browsing and kept files stay unavailable.</string>
+
+    <string name="cert_title">Certificate not trusted</string>
+    <string name="cert_message">%1$s presented a certificate this device does not trust (%2$s).\n\nSHA-256:\n%3$s\n\nOnly continue if this fingerprint is your server\'s. It will be remembered, and you will be asked again if it ever changes.</string>
+    <string name="cert_trust">Trust this certificate</string>
+    <string name="cert_cancel">Cancel</string>
+    <string name="cert_untrusted">not signed by a trusted authority</string>
+    <string name="cert_expired">expired</string>
+    <string name="cert_idmismatch">issued for a different host name</string>
+    <string name="cert_notyetvalid">not valid yet</string>
+    <string name="cert_invalid">invalid</string>
+
+    <string name="menu_reload">Reload</string>
+    <string name="menu_change_server">Change server</string>
+
+    <string name="choose_file">Choose a file</string>
+    <string name="no_file_app">No app on this device can pick a file.</string>
+    <string name="no_browser">No browser is installed to open that link.</string>
+    <string name="load_failed">Could not load the server: %1$s</string>
+    <string name="saved_to_downloads">Saved %1$s to Downloads</string>
+    <string name="share_read_failed">A shared file could not be read.</string>
+</resources>

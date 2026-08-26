@@ -15,3 +15,13 @@
 Thumbs.db
 *.swp
 *.swo
+
+# Android
+/android-sdk/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+# Signing material: a committed keystore is a published signing key
+/android/keystore.jks
+/android/keystore.properties

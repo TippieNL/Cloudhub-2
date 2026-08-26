@@ -105,3 +105,54 @@ $im = icon(64, false);
 imagepng($im, dirname(__DIR__).'/public/favicon.png', 9);
 imagedestroy($im);
 echo str_pad('favicon.png', 26), "64x64", PHP_EOL;
+
+/*
+ * Android launcher icons.
+ *
+ * Generated from the same mark so the web app and the installed app cannot
+ * drift apart. Two sets are needed:
+ *
+ *  - legacy square icons per density, for launchers older than adaptive icons;
+ *  - an adaptive foreground, which the launcher composes over the background
+ *    colour and then masks to its own shape. The mark is drawn small inside a
+ *    full-size canvas because the outer 1/6 on each side can be cropped away,
+ *    and anything that reaches the edge gets clipped.
+ */
+$android = dirname(__DIR__).'/android/app/src/main/res';
+if (is_dir(dirname($android))) {
+    $densities = ['mdpi' => 48, 'hdpi' => 72, 'xhdpi' => 96, 'xxhdpi' => 144, 'xxxhdpi' => 192];
+
+    foreach ($densities as $density => $size) {
+        $dir = $android.'/mipmap-'.$density;
+        if (!is_dir($dir)) mkdir($dir, 0775, true);
+
+        $im = icon($size, false);
+        imagepng($im, $dir.'/ic_launcher.png', 9);
+        imagedestroy($im);
+
+        // The round variant is masked to a circle by the launcher, so it is
+        // the full-bleed drawing rather than the rounded-square one.
+        $im = icon($size, true);
+        imagepng($im, $dir.'/ic_launcher_round.png', 9);
+        imagedestroy($im);
+
+        // Adaptive foreground: 108dp canvas, mark confined to the safe circle.
+        $fg = (int)round($size * 108 / 48);
+        $im = imagecreatetruecolor($fg, $fg);
+        imagealphablending($im, false);
+        imagesavealpha($im, true);
+        imagefilledrectangle($im, 0, 0, $fg, $fg, imagecolorallocatealpha($im, 0, 0, 0, 127));
+        imagealphablending($im, true);
+        // The arrow is knocked out in the brand colour rather than in
+        // transparency: the background layer is that same colour, so the
+        // composite is identical, and it avoids relying on alpha blending
+        // behaviour to punch a hole.
+        $mark = $fg * 0.52;
+        draw_mark($im, ($fg - $mark) / 2, ($fg - $mark) / 2 - $mark * 0.02, $mark,
+            imagecolorallocate($im, ...INK), imagecolorallocate($im, ...BRAND));
+        imagepng($im, $dir.'/ic_launcher_foreground.png', 9);
+        imagedestroy($im);
+
+        echo str_pad('mipmap-'.$density, 26), $size, "x", $size, PHP_EOL;
+    }
+}

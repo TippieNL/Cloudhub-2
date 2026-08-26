@@ -2024,6 +2024,21 @@ async function route() {
     }
 }
 
+/*
+ * A small, deliberate public surface.
+ *
+ * The Android shell needs two things from the page: which folder is open, so a
+ * file arriving from the system share sheet is queued for the right place, and
+ * a way to show a message in the application's own style rather than a console
+ * line nobody reads. Exposed as an accessor so it always reports the live
+ * value rather than a copy taken at load.
+ */
+window.CloudHubApp = {
+    get path() { return S.path; },
+    toast,
+};
+window.cfhToast = toast;
+
 (async () => {
     try {
         const r = await fetch(appUrl('/api/auth/status'), { credentials: 'same-origin' });
