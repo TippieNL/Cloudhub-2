@@ -1,10 +1,14 @@
-plugins { id 'com.android.application' }
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'org.jetbrains.kotlin.plugin.serialization'
+}
 
 /*
- * Signing material is read from keystore.properties, which is gitignored:
- * a keystore committed to a repository is a published signing key. The build
- * script generates both on first run. Without them the build still works and
- * produces a debug-signed APK, which is fine for sideloading.
+ * Signing material is read from keystore.properties, which is gitignored: a
+ * keystore committed to a repository is a published signing key. The build
+ * script generates both on first run.
  */
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
@@ -17,11 +21,13 @@ android {
 
     defaultConfig {
         applicationId "nl.tippie.cloudhub"
-        // ServiceWorkerController, which the offline features need, is API 24.
+        // Media3 and the Compose runtime both want 24; it is also where
+        // scoped-storage-free MediaStore writes stop being needed.
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "2.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     if (hasKeystore) {
@@ -42,13 +48,57 @@ android {
         }
     }
 
+    buildFeatures { compose true }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    kotlinOptions { jvmTarget = '17' }
+
+    packaging {
+        resources.excludes += ['META-INF/{AL2.0,LGPL2.1}', 'META-INF/DEPENDENCIES']
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
-    // FileProvider only; deliberately not appcompat, to keep the build small.
-    implementation 'androidx.core:core:1.13.1'
+    implementation platform('androidx.compose:compose-bom:2024.09.02')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.activity:activity-compose:1.9.2'
+    implementation 'androidx.navigation:navigation-compose:2.8.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.5'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.8.5'
+
+    // One HTTP client shared by the API, by Coil and by the media player, so
+    // the session cookie travels with thumbnails and video streams too.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1'
+
+    implementation 'io.coil-kt:coil-compose:2.7.0'
+    // Decodes a frame locally for a video the server has no thumbnail for.
+    implementation 'io.coil-kt:coil-video:2.7.0'
+
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-ui:1.4.1'
+    implementation 'androidx.media3:media3-datasource-okhttp:1.4.1'
+
+    // Uploads outlive the app being closed.
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    // The upload queue is a handful of records serialised to one file rather
+    // than a database: Room would mean adding KSP to the build for something
+    // a list of a few dozen entries does not need.
+
+    implementation 'androidx.datastore:datastore-preferences:1.1.1'
+    implementation 'androidx.core:core-ktx:1.13.1'
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.jetbrains.kotlin:kotlin-test:2.0.20'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1'
 }

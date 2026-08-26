@@ -206,68 +206,96 @@ setting.
 
 ## Android app
 
-`android/` holds a small Android client. Build it with:
+`android/` holds a native Android client, written in Kotlin with Jetpack
+Compose. Build it with:
 
     tools/build-apk.sh
 
 The script installs the Android SDK on first run, generates a signing keystore
 if there is not one, and prints the APK's path and signing fingerprint. The
 result is at `android/app/build/outputs/apk/release/app-release.apk` — sideload
-it (Android will ask you to allow installs from your file manager).
+it.
 
 CloudHub is a PHP server, so the app is a **client**: it asks for your server's
-address on first launch and remembers it, and the menu can change it later. One
-APK works for any deployment.
+address on first launch and remembers it. One APK works for any deployment.
 
-### Why a WebView and not a Trusted Web Activity
+### Why native rather than a WebView
 
-A TWA would have been the natural home for the progressive web app, but it
-fixes one origin at build time and requires Digital Asset Links verification
-against a publicly trusted certificate. A private or VPN-only domain cannot
-satisfy that, and the app degrades to a browser tab with a URL bar — worse than
-what the browser already does. So the app is a WebView.
+The first Android build wrapped the web app in a WebView. That works, but a
+WebView is not Chrome: downloads (which the page performs by clicking an anchor
+at a `blob:` URL), the clipboard and `target="_blank"` all had to be
+re-implemented by hand before the page behaved. A native client talks to the
+same REST API directly, so none of that indirection exists — and it can do
+things the page cannot, like swipe between photos and keep uploading with the
+app closed.
 
-The cost is that a WebView is not Chrome. Three things the web app relies on
-are inert inside one, and the shell supplies them from
-`android/app/src/main/assets/bridge.js`, injected into each page:
+### What it covers
 
-| What | Why it breaks | What the app does |
-|---|---|---|
-| Downloads | the page points an anchor at a `blob:` URL and clicks it; WebView's `DownloadListener` only ever sees `http(s)`, so every download and the ZIP export silently do nothing | intercepts the click, streams the blob to the app in slices, writes it to Downloads through `MediaStore` |
-| Copy link | `navigator.clipboard` does not exist outside a secure context | shimmed from `ClipboardManager`, and only when it is genuinely missing |
-| The share dialog's Open link | `target="_blank"` needs `onCreateWindow` | hands the URL to the system browser, which is where a public share link belongs |
+Sign in, browse with thumbnails, full-screen image viewing with pinch-zoom and
+swipe, video and audio playback with seeking, download to the device, upload
+from the camera, the gallery or the Android share sheet, new folder, rename,
+delete to trash, move, copy, recursive search, trash restore and empty, and
+share links.
 
-The web application itself is untouched: it must keep working in an ordinary
-browser, where none of this exists.
+**Not covered**, deliberately: Users, Storage usage, Storage servers and the
+security event log — four administrator screens that stay in the browser. There
+is no offline mode; the progressive web app has one.
+
+### How it hangs together
+
+One OkHttp client is shared by the API, by the thumbnail loader and by the
+media player, so all three carry the same session cookie and the same
+certificate decisions. Giving them separate clients is how you end up with a
+file list that loads and thumbnails that all fail with 401.
+
+Uploads reuse the server's resumable chunk protocol and run under WorkManager,
+so an upload survives the app being closed — and unlike the web queue it makes
+progress with no page open. `/api/uploads/init` reports how many bytes the
+server already holds, so a resumed upload continues from what is actually
+there rather than from what the device believes it sent. Files are copied into
+app-private storage when queued, because a `content://` grant from the share
+sheet is frequently not persistable.
+
+### Permissions
+
+The app declares only `INTERNET` and `ACCESS_NETWORK_STATE`. There is no camera
+permission — the photo is taken by the camera app through an intent, which
+needs none unless this app declares one — and no storage permission, because
+downloads go through `MediaStore`.
+
+At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
+`FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an
+upload keep going with the app closed.
 
 ### Certificates
 
-The app never accepts an untrusted certificate silently — that would make every
-install a man-in-the-middle. It shows the host and the certificate's SHA-256
-fingerprint and, if you accept, pins *that certificate*: a different one for
-the same host asks again. A private CA installed on the device is trusted
-normally.
+The app never accepts an untrusted certificate silently. The platform trust
+manager gets first refusal, so a properly issued certificate — or a private CA
+installed on the device — works with no prompt. Otherwise the app shows the
+certificate's SHA-256 fingerprint and, if you accept, pins *that certificate*:
+a different one for the same host asks again.
 
-Plain `http://` is permitted, because a LAN server is a legitimate way to run
-this, but the setup screen says what it costs: no secure context means no
-service worker, so offline browsing and kept files stay unavailable — in the
-app exactly as in the browser.
+### Testing
 
-### What the app adds over the browser
+The half of the app that talks to the server is tested for real, on the host,
+with no emulator:
 
-- **Share sheet** — CloudHub appears when you share a photo or video from any
-  app. Shared files are handed to the page's own durable upload queue, so they
-  get the same resumable treatment as anything picked inside the app.
-- **Camera and gallery** — the page's file inputs open the camera or the
-  picker. No camera permission is requested: `ACTION_IMAGE_CAPTURE` needs none
-  unless the app declares one, and the camera app owns the capture.
+    php -S 127.0.0.1:8900 -t public &
+    cd android && CLOUDHUB_TEST_URL=http://127.0.0.1:8900 gradle test
+
+Those tests sign in and exercise the chunked upload — including interrupting
+one and resuming it from the server's offset — plus download, rename, move,
+copy, search, trash and restore, and share create and revoke. Without
+`CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
+
+The Compose UI has no such coverage: rendering it needs a device.
 
 ### Signing
 
 `android/keystore.jks` and `android/keystore.properties` are generated on first
 build and are **gitignored** — a committed keystore is a published signing key.
-Back them up: without them a later build is a different app identity, which
-Android treats as a different app (reinstall rather than update).
+Back them up: the package id is unchanged from the WebView build, so the native
+app installs as an update, but only while it is signed by the same key.
 
 ## Working offline
 

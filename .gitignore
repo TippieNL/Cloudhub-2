@@ -25,3 +25,4 @@ Thumbs.db
 # Signing material: a committed keystore is a published signing key
 /android/keystore.jks
 /android/keystore.properties
+/android/.kotlin/

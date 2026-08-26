@@ -2,160 +2,163 @@
 declare(strict_types=1);
 
 /**
- * The Android app.
+ * The native Android client.
  *
- * CloudHub is a PHP server application, so the APK is a client pointing at the
- * user's own server. A Trusted Web Activity would have been the natural home
- * for the progressive web app, but it fixes one origin at build time and needs
- * Digital Asset Links verification against a publicly trusted certificate --
- * which a private or VPN-only domain cannot satisfy. Hence a WebView, and
- * hence the shims below: a WebView is not Chrome, and three things the web app
- * already relies on are inert inside one.
+ * The first Android build was a WebView, which meant re-supplying browser
+ * behaviour by hand: blob downloads, the clipboard and target="_blank" all had
+ * to be shimmed before the page worked. This replaces it with a native client
+ * against the REST API, so none of that indirection exists.
  *
- * The build itself proves the Java compiles and the APK is signed. These
- * assertions pin the decisions that a later edit could quietly undo.
+ * The API layer is verified for real rather than asserted: the JVM tests in
+ * android/app/src/test run against a live CloudHub and exercise sign in, the
+ * chunked upload including an interrupted one, download, rename, move, copy,
+ * search, trash and restore, and share create/revoke. These checks pin the
+ * decisions that a later edit could quietly undo.
  */
 $root = dirname(__DIR__);
 $android = $root.'/android/app/src/main';
+$kotlin = $android.'/java/nl/tippie/cloudhub';
 
-$manifest = (string)@file_get_contents($android.'/AndroidManifest.xml');
-$gradle = (string)@file_get_contents($root.'/android/app/build.gradle');
-$bridgeJs = (string)@file_get_contents($android.'/assets/bridge.js');
-$bridgeJava = (string)@file_get_contents($android.'/java/nl/tippie/cloudhub/CloudHubBridge.java');
-$mainJava = (string)@file_get_contents($android.'/java/nl/tippie/cloudhub/MainActivity.java');
-$configJava = (string)@file_get_contents($android.'/java/nl/tippie/cloudhub/ServerConfig.java');
-$setupJava = (string)@file_get_contents($android.'/java/nl/tippie/cloudhub/SetupActivity.java');
-$netConfig = (string)@file_get_contents($android.'/res/xml/network_security_config.xml');
-$script = (string)@file_get_contents($root.'/tools/build-apk.sh');
-$gitignore = (string)@file_get_contents($root.'/.gitignore');
-$appJs = (string)@file_get_contents($root.'/public/assets/js/app.js');
+$read = fn(string $path): string => (string)@file_get_contents($path);
+
+$manifest = $read($android.'/AndroidManifest.xml');
+$gradle = $read($root.'/android/app/build.gradle');
+$api = $read($kotlin.'/net/CloudHubApi.kt');
+$client = $read($kotlin.'/net/CloudHubClient.kt');
+$trust = $read($kotlin.'/net/CertificateTrust.kt');
+$error = $read($kotlin.'/net/ApiError.kt');
+$models = $read($kotlin.'/net/Models.kt');
+$stores = $read($kotlin.'/data/Stores.kt');
+$uploads = $read($kotlin.'/work/Uploads.kt');
+$app = $read($kotlin.'/App.kt');
+$main = $read($kotlin.'/MainActivity.kt');
+$tests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/ApiIntegrationTest.kt');
+$script = $read($root.'/tools/build-apk.sh');
+$gitignore = $read($root.'/.gitignore');
 
 $checks = [];
 
-// --- identity -----------------------------------------------------------
-$checks['the package id is nl.tippie.cloudhub'] =
-    str_contains($gradle, 'applicationId "nl.tippie.cloudhub"') && str_contains($gradle, "namespace 'nl.tippie.cloudhub'");
-$checks['the launcher label is CloudHub'] =
-    str_contains((string)@file_get_contents($android.'/res/values/strings.xml'), '<string name="app_name">CloudHub</string>');
-// ServiceWorkerController, which the offline features need, arrived in API 24.
-$checks['minSdk covers the service worker API'] = str_contains($gradle, 'minSdk 24');
-$checks['it targets a current platform'] = str_contains($gradle, 'targetSdk 34');
+// --- it really is native ------------------------------------------------
+$checks['there is no WebView left'] =
+    !is_file($kotlin.'/CloudHubBridge.java')
+    && !is_file($android.'/assets/bridge.js')
+    && !str_contains($main, 'WebView');
+$checks['the UI is Compose'] =
+    str_contains($gradle, 'buildFeatures { compose true }') && str_contains($main, 'setContent {');
+$checks['it is a Kotlin project'] =
+    str_contains($gradle, "id 'org.jetbrains.kotlin.android'") && is_file($kotlin.'/MainActivity.kt');
 
-// --- what a WebView breaks, and the shims -------------------------------
-// The page downloads by pointing an anchor at a blob: URL and clicking it.
-// WebView's DownloadListener only ever sees http(s), so without this every
-// download and the whole ZIP export silently does nothing.
-$checks['blob downloads are intercepted'] =
-    str_contains($bridgeJs, 'HTMLAnchorElement.prototype.click') && str_contains($bridgeJs, "href.indexOf('blob:') === 0");
-$checks['a download is streamed, not sent as one string'] =
-    str_contains($bridgeJs, 'function sendBlob(token, blob)') && str_contains($bridgeJava, 'appendBlobChunk');
-$checks['downloads land in the Downloads folder'] =
-    str_contains($bridgeJava, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
-// The name comes from page JavaScript, so "../../evil" must not become a path.
-$checks['a download filename cannot escape its folder'] =
-    str_contains($bridgeJava, 'static String safeFileName(String name)')
-    && str_contains($bridgeJava, "cleaned.lastIndexOf('/')");
-$checks['an oversized download is refused rather than allocated'] =
-    str_contains($bridgeJava, 'MAX_BLOB_BYTES') && str_contains($bridgeJava, 'total > MAX_BLOB_BYTES');
+// --- identity ------------------------------------------------------------
+$checks['the package id is unchanged, so it installs as an update'] =
+    str_contains($gradle, 'applicationId "nl.tippie.cloudhub"');
+$checks['the version was raised'] = str_contains($gradle, 'versionCode 2');
+$checks['minSdk still covers Media3'] = str_contains($gradle, 'minSdk 24');
 
-// navigator.clipboard does not exist outside a secure context, and the share
-// dialog's one useful action needs it.
-$checks['the clipboard is shimmed only when missing'] =
-    str_contains($bridgeJs, 'if (!navigator.clipboard)') && str_contains($bridgeJava, 'ClipboardManager');
+// --- one client, shared ---------------------------------------------------
+// Separate clients are how you get a file list that loads and thumbnails that
+// all fail with 401.
+$checks['thumbnails use the same client as the API'] =
+    str_contains($app, 'okHttpClient { client.okHttp }');
+$checks['playback uses the same client as the API'] =
+    str_contains($read($kotlin.'/ui/ViewerScreens.kt'), 'OkHttpDataSource.Factory(client.okHttp)');
+$checks['the session is kept across restarts'] =
+    str_contains($client, 'cookieJar(') && str_contains($stores, 'class PersistentCookieStore');
+// The server rotates the session periodically; storing whatever arrives keeps
+// up with it without anything to maintain by hand.
+$checks['an expired cookie is dropped rather than replayed'] =
+    str_contains($stores, 'if (cookie.expiresAt > System.currentTimeMillis())');
+$checks['mutating calls carry the CSRF token'] =
+    str_contains($api, 'header("X-CSRF-Token", client.csrfToken)');
 
-// The share dialog opens a public link with target="_blank".
-$checks['target=_blank links reach a real browser'] =
-    str_contains($mainJava, 'setSupportMultipleWindows(true)') && str_contains($mainJava, 'onCreateWindow');
-$checks['links off the server open outside the app'] =
-    str_contains($mainJava, 'if (server != null && uri.toString().startsWith(server)) return false;');
+// --- certificates ---------------------------------------------------------
+// Trust-all would turn every install into a man-in-the-middle.
+$checks['the platform trust manager gets first refusal'] =
+    str_contains($trust, 'platform.checkServerTrusted(chain, authType)');
+$checks['an unknown certificate raises a question, not a pass'] =
+    str_contains($trust, 'throw UntrustedCertificate(')
+    && !(bool)preg_match('/checkServerTrusted[^}]*\{\s*\}/s', $trust);
+$checks['acceptance is pinned per certificate, not per host'] =
+    str_contains($trust, 'if (pins.isPinned(fingerprint)) return')
+    && str_contains($stores, 'class CertificatePins');
+$checks['the fingerprint is shown before it is trusted'] =
+    str_contains($read($kotlin.'/ui/Screens.kt'), 'certificate.fingerprint');
 
-// --- certificates -------------------------------------------------------
-// A blanket proceed() turns every install into a silent man-in-the-middle.
-$checks['an untrusted certificate is not waved through'] =
-    str_contains($mainJava, 'onReceivedSslError')
-    && !(bool)preg_match('/onReceivedSslError[^}]*\{\s*handler\.proceed\(\);\s*\}/s', $mainJava);
-$checks['the user is shown the fingerprint before trusting it'] =
-    str_contains($mainJava, 'private String fingerprintOf(SslCertificate certificate)')
-    && str_contains($mainJava, 'MessageDigest.getInstance("SHA-256")');
-// "Yes once" must not become "trust anything this host ever presents".
-$checks['acceptance is pinned to one certificate, not one host'] =
-    str_contains($configJava, 'public void pinCertificate(String host, String sha256)')
-    && str_contains($mainJava, 'config.isPinned(host, fingerprint)');
-$checks['a private certificate authority is trusted if the device has it'] =
-    str_contains($netConfig, '<certificates src="user" />');
+// --- the API contract -----------------------------------------------------
+// The portable front-controller form works whether or not the deployment has
+// URL rewriting; Http::requestPath() prefers it.
+$checks['routes use the portable front-controller form'] =
+    str_contains($api, 'addQueryParameter("route", route)');
+$checks['the error envelope is parsed, not guessed at'] =
+    str_contains($error, 'val error: Body? = null') && str_contains($error, 'response.header("X-Request-ID")');
+// A quota refusal is a 5xx that the caller can act on.
+$checks['out of space is distinguishable'] = str_contains($error, 'val isOutOfSpace get() = status == 507');
+// Two mistakes the live tests caught: the route is a DELETE, and it is keyed
+// by token because a link outlives the path it was made from.
+$checks['share revoke is a DELETE taking a token'] =
+    str_contains($api, 'suspend fun revokeShare(token: String)')
+    && str_contains($api, 'request("/api/shares/revoke", "DELETE"');
+$checks['a bulk move reports failures per item'] =
+    str_contains($models, 'val failed: List<Failure> = emptyList()');
 
-// --- camera and gallery -------------------------------------------------
-$checks['the file chooser is handled'] = str_contains($mainJava, 'onShowFileChooser');
-$checks['the camera is offered when the page asks for it'] =
-    str_contains($mainJava, 'params.isCaptureEnabled()') && str_contains($mainJava, 'ACTION_IMAGE_CAPTURE');
-// ACTION_IMAGE_CAPTURE needs no runtime permission unless the app declares
-// one; declaring it forces a prompt that buys nothing.
-// Compare the declarations, not the file: the manifest's own comment explains
-// why CAMERA is absent, and naming it there must not read as declaring it.
-$checks['no camera permission is demanded'] = (function () use ($manifest): bool {
-    $declarations = preg_replace('/<!--.*?-->/s', '', $manifest);
-    return !str_contains((string)$declarations, 'android.permission.CAMERA');
-})();
-$checks['only network permissions are requested'] =
-    substr_count((string)preg_replace('/<!--.*?-->/s', '', $manifest), '<uses-permission') === 2
-    && str_contains($manifest, 'android.permission.INTERNET');
-$checks['the camera gets a scoped URI, not app storage'] =
-    str_contains($manifest, 'androidx.core.content.FileProvider') && str_contains($mainJava, 'FileProvider.getUriForFile');
+// --- uploads ---------------------------------------------------------------
+$checks['uploads resume from what the server confirms'] =
+    str_contains($uploads, 'var offset = status.received.coerceAtMost(item.size)');
+$checks['a chunk is streamed, not held in memory'] =
+    str_contains($uploads, 'private fun File.slice(start: Long, end: Long): RequestBody')
+    && str_contains($uploads, 'sink.write(buffer, 0, read)');
+// WorkManager runs without the app open, which the web queue cannot do.
+$checks['uploads outlive the app being closed'] =
+    str_contains($uploads, 'class UploadWorker') && str_contains($uploads, 'CoroutineWorker');
+// A share-sheet content:// grant is frequently not persistable, so the bytes
+// are copied rather than the URI remembered.
+$checks['queued bytes are staged, not referenced'] =
+    str_contains($uploads, 'fun stage(context: Context, uri: Uri, name: String)')
+    && str_contains($uploads, 'input.copyTo(output)');
+$checks['a refusal that retrying cannot fix is dropped'] =
+    str_contains($uploads, 'if (e.isOutOfSpace || e.status == 413 || e.isForbidden)');
+$checks['a stalled chunk does not spin'] =
+    str_contains($uploads, 'if (status.received <= offset) return Result.retry()');
 
-// --- the Android share sheet --------------------------------------------
+// --- permissions -----------------------------------------------------------
+$declarations = (string)preg_replace('/<!--.*?-->/s', '', $manifest);
+$checks['no camera permission is demanded'] = !str_contains($declarations, 'android.permission.CAMERA');
+$checks['no storage permission is demanded'] = !str_contains($declarations, 'WRITE_EXTERNAL_STORAGE');
+$checks['only network permissions are requested'] = substr_count($declarations, '<uses-permission') === 2;
+$checks['downloads go through MediaStore'] = str_contains($main, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
+
+// --- the share sheet --------------------------------------------------------
 $checks['CloudHub appears in the share sheet'] =
-    str_contains($manifest, 'android.intent.action.SEND') && str_contains($manifest, 'android.intent.action.SEND_MULTIPLE');
-// Reuses the durable, resumable queue rather than a second uploader written
-// in Java that would have to agree with it exactly.
-$checks['shared files go to the existing upload queue'] =
-    str_contains($bridgeJs, 'queue.add(files, path)') && str_contains($appJs, 'window.CloudHubApp');
-$checks['the page is told when a share arrives while it is open'] =
-    str_contains($mainJava, 'onNewIntent') && str_contains($mainJava, 'CloudHubAndroid.collectShared()');
-$checks['a share that cannot be read says so'] = str_contains($mainJava, 'share_read_failed');
+    str_contains($manifest, 'android.intent.action.SEND')
+    && str_contains($manifest, 'android.intent.action.SEND_MULTIPLE');
+$checks['shared files join the upload queue'] =
+    str_contains($main, 'private fun takeSharedFiles(intent: Intent?)') && str_contains($main, 'enqueue(uris)');
 
-// --- the server address --------------------------------------------------
-// One build has to work for any deployment, and a self-hosted server moves.
-$checks['the server address is not baked into the APK'] =
-    str_contains($configJava, 'KEY_URL') && !preg_match('#https?://[a-z0-9.-]+\.[a-z]{2,}#i', $gradle);
-$checks['a typed address is normalised'] = str_contains($configJava, 'public static String normalise(String input)');
-// A typo otherwise shows up much later as a blank screen with no explanation.
-$checks['the address is checked before it is accepted'] =
-    str_contains($setupJava, '/?route=%2Fapi%2Fauth%2Fstatus');
-// A private CA behind a VPN is the arrangement this app is for.
-$checks['a certificate error does not fail the check'] =
-    str_contains($setupJava, 'catch (javax.net.ssl.SSLException e)');
-$checks['plain http is allowed but its cost is stated'] =
-    str_contains($netConfig, 'cleartextTrafficPermitted="true"')
-    && str_contains((string)@file_get_contents($android.'/res/values/strings.xml'), 'refuses to run a service worker');
-$checks['the server can be changed later'] = str_contains($mainJava, 'menu_change_server');
+// --- the server address ------------------------------------------------------
+$checks['the address is not baked into the APK'] =
+    str_contains($stores, 'var serverUrl') && !preg_match('#https?://[a-z0-9.-]+\.[a-z]{2,}#i', $gradle);
+$checks['a typed address is normalised'] = str_contains($stores, 'object ServerAddress');
+$checks['plain http is flagged rather than silently accepted'] = str_contains($stores, 'fun isInsecure');
 
-// --- build ---------------------------------------------------------------
-$checks['the build script is executable'] = is_executable($root.'/tools/build-apk.sh');
-$checks['it installs the SDK only when missing'] =
-    str_contains($script, 'if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]');
-$checks['it generates a keystore only once'] = str_contains($script, 'if [ ! -f "$KEYSTORE" ]');
-// A keystore committed to a repository is a published signing key.
+// --- the tests that do the real work -----------------------------------------
+$checks['the API is tested against a live server'] =
+    str_contains($tests, 'CLOUDHUB_TEST_URL') && str_contains($tests, 'class ApiIntegrationTest');
+$checks['an interrupted upload is tested, not assumed'] =
+    str_contains($tests, 'an interrupted upload resumes from the server offset')
+    && str_contains($tests, 'assertEquals(90_000L, resumed.received)');
+// Without a server the tests skip, so an ordinary build stays green.
+$checks['the tests skip rather than fail with no server'] =
+    str_contains($tests, 'assumeTrue("set CLOUDHUB_TEST_URL to run the API tests", baseUrl != null)');
+$checks['the tests work in a folder of their own'] =
+    str_contains($tests, 'private val scratch = "/_apitest_');
+
+// --- build -------------------------------------------------------------------
+$checks['the build script still builds and verifies'] =
+    str_contains($script, 'assembleRelease') && str_contains($script, 'apksigner');
 $checks['signing material is never committed'] =
     str_contains($gitignore, '/android/keystore.jks') && str_contains($gitignore, '/android/keystore.properties');
-$checks['the SDK and build output are not committed'] =
-    str_contains($gitignore, '/android-sdk/') && str_contains($gitignore, '/android/app/build/');
-$checks['the build verifies what it produced'] =
-    str_contains($script, 'apksigner') && str_contains($script, 'aapt2') && str_contains($script, 'dump badging');
-// Generated from the same mark, so the web app and the installed app cannot
-// drift apart.
-$checks['launcher icons come from the shared generator'] =
-    str_contains((string)@file_get_contents($root.'/tools/make-icons.php'), 'mipmap-')
+$checks['launcher icons still come from the shared generator'] =
+    str_contains($read($root.'/tools/make-icons.php'), 'mipmap-')
     && is_file($android.'/res/mipmap-xxxhdpi/ic_launcher.png');
-$checks['an adaptive icon is provided for modern launchers'] =
-    is_file($android.'/res/mipmap-anydpi-v26/ic_launcher.xml')
-    && is_file($android.'/res/mipmap-xxxhdpi/ic_launcher_foreground.png');
-
-// --- the web app is untouched by the app ---------------------------------
-// bridge.js is injected by the shell; the page must keep working in a plain
-// browser where none of it exists.
-$checks['the web app does not depend on the Android bridge'] =
-    !str_contains($appJs, 'CloudHubNative') && !str_contains($appJs, '__cloudhubBridgeReady');
-$checks['the shims run only inside the app'] = str_contains($bridgeJs, 'if (!native || window.__cloudhubBridgeReady) return;');
 
 $bad = false;
 foreach ($checks as $name => $ok) {
