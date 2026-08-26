@@ -267,6 +267,22 @@ At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
 `FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an
 upload keep going with the app closed.
 
+### A server in a subdirectory
+
+CloudHub installed under a path — `https://example.com/Cloud File Hub` — works;
+enter the address exactly as you would in a browser, spaces and all.
+
+Requests are addressed to the front controller with its trailing slash, the
+same form the web client uses. That is not cosmetic: asking for the directory
+without the slash makes a web server answer with a 301 to add one, and OkHttp
+follows a redirect by re-sending the request as a GET with the body dropped.
+The query string survives, so the route arrives — as a GET, matching nothing,
+and the reply is "API endpoint not found" naming an endpoint that exists. Every
+write failed that way, since uploads are PUTs and deletes are DELETEs.
+
+If a request is ever redirected in a way that drops it, the app now says so
+instead of passing the confusing 404 through.
+
 ### Certificates
 
 The app never accepts an untrusted certificate silently. The platform trust

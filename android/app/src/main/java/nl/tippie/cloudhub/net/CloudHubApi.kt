@@ -31,9 +31,26 @@ class CloudHubApi(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    /** Public so Coil and the media player can build authenticated URLs. */
+    /**
+     * Public so Coil and the media player can build authenticated URLs.
+     *
+     * The trailing slash is not cosmetic. Requests go to the front controller,
+     * which is a directory -- the web client addresses it the same way, as
+     * $frontController in public/index.php. Asking for the directory without
+     * the slash makes a web server answer with a 301 to add one, and OkHttp
+     * follows that by re-sending the request as a GET with the body dropped
+     * (HttpMethod.redirectsToGet, the same rule browsers use). The query
+     * survives, so route=/api/auth/login arrives -- as a GET, which matches no
+     * route, and the reply is "API endpoint not found" naming an endpoint that
+     * plainly exists. Every write broke this way on a subdirectory install:
+     * login, upload (PUT) and delete (DELETE) alike.
+     *
+     * Concatenated rather than addPathSegment(""), which would turn a bare
+     * origin -- whose path is already "/" -- into "//".
+     */
     fun url(route: String, vararg query: Pair<String, String?>): HttpUrl {
-        val builder = baseUrl.toHttpUrl().newBuilder()
+        val front = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
+        val builder = front.toHttpUrl().newBuilder()
             .addQueryParameter("route", route)
         for ((key, value) in query) if (value != null) builder.addQueryParameter(key, value)
         return builder.build()
@@ -218,7 +235,23 @@ class CloudHubApi(
     private fun <T> execute(request: Request, parse: (String) -> T): T {
         client.okHttp.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw ApiError.from(response, body)
+            if (!response.isSuccessful) {
+                // A redirect that quietly turned a write into a GET surfaces as
+                // a 404 for an endpoint that exists, which tells the user
+                // nothing they can act on. Name the real problem instead.
+                if (response.priorResponse != null &&
+                    request.method != "GET" && response.request.method == "GET"
+                ) {
+                    throw ApiError(
+                        status = response.code,
+                        code = "REDIRECTED",
+                        message = "The server redirected this request, which drops it. " +
+                            "Check the server address is exactly right.",
+                        requestId = response.header("X-Request-ID"),
+                    )
+                }
+                throw ApiError.from(response, body)
+            }
             return parse(body)
         }
     }

@@ -51,7 +51,10 @@ $checks['it is a Kotlin project'] =
 // --- identity ------------------------------------------------------------
 $checks['the package id is unchanged, so it installs as an update'] =
     str_contains($gradle, 'applicationId "nl.tippie.cloudhub"');
-$checks['the version was raised'] = str_contains($gradle, 'versionCode 2');
+// Pinned as "at least 2" rather than a fixed number, so a later release does
+// not have to edit the test to say the same thing.
+$checks['the version was raised past the WebView build'] =
+    (bool)preg_match('/versionCode (\d+)/', $gradle, $v) && (int)$v[1] >= 2;
 $checks['minSdk still covers Media3'] = str_contains($gradle, 'minSdk 24');
 
 // --- one client, shared ---------------------------------------------------
@@ -88,6 +91,27 @@ $checks['the fingerprint is shown before it is trusted'] =
 // URL rewriting; Http::requestPath() prefers it.
 $checks['routes use the portable front-controller form'] =
     str_contains($api, 'addQueryParameter("route", route)');
+/*
+ * The trailing slash is load-bearing. Requests go to the front controller,
+ * which is a directory; asking for it without the slash makes a web server
+ * answer 301 to add one, and OkHttp follows a 301 by re-sending as a GET with
+ * the body dropped. The query survives, so route=/api/auth/login arrived as a
+ * GET, matched nothing, and came back "API endpoint not found" -- naming an
+ * endpoint that plainly exists. Every write broke that way on a subdirectory
+ * install: login, upload (PUT) and delete (DELETE) alike.
+ */
+$checks['requests address the front controller, not the directory'] =
+    str_contains($api, 'val front = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"');
+$checks['a redirected write is reported for what it is'] =
+    str_contains($api, 'code = "REDIRECTED"');
+$checks['the stored address is canonical'] =
+    str_contains($stores, "url.toHttpUrl().toString().trimEnd('/')");
+// The bug was invisible at a root install, which is all the live suite used to
+// cover; these run with no server at all.
+$checks['url building is covered without needing a server'] =
+    is_file($root.'/android/app/src/test/java/nl/tippie/cloudhub/UrlBuildingTest.kt')
+    && str_contains((string)@file_get_contents($root.'/android/app/src/test/java/nl/tippie/cloudhub/UrlBuildingTest.kt'),
+        'a subdirectory install addresses the front controller, not the directory');
 $checks['the error envelope is parsed, not guessed at'] =
     str_contains($error, 'val error: Body? = null') && str_contains($error, 'response.header("X-Request-ID")');
 // A quota refusal is a 5xx that the caller can act on.

@@ -129,7 +129,9 @@ object ServerAddress {
         url = url.trimEnd('/')
         if (url.endsWith("/index.php", ignoreCase = true)) url = url.dropLast(10)
         if (url.isEmpty()) return null
-        return runCatching { url.toHttpUrl(); url }.getOrNull()
+        // Stored in OkHttp's canonical form, so a typed space and a typed %20
+        // become one value rather than two spellings of the same server.
+        return runCatching { url.toHttpUrl().toString().trimEnd('/') }.getOrNull()
     }
 
     fun isInsecure(url: String) = url.startsWith("http://", ignoreCase = true)
