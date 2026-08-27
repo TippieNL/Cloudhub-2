@@ -241,6 +241,42 @@ restore and empty, and share links.
 security event log — four administrator screens that stay in the browser. There
 is no offline mode; the progressive web app has one.
 
+### Browsing files
+
+A folder that is loading draws placeholder cards with a slow shimmer rather
+than a spinner, and they are built from the *same* card layout as the real
+thing — so content arriving changes colour, not position. The number of
+placeholders comes from the grid actually on screen, so a tablet fills its
+viewport and a phone does not over-draw. A folder that lists quickly never
+shows one at all, and one that does show is held briefly so it cannot blink.
+
+Cards give slightly under the finger, arrive staggered when a folder opens
+(only the first screenful — scrolling never pays for an animation), and re-flow
+rather than snap when you filter. Thumbnails hold their place while they load
+and crossfade in. Folders get a tinted mark rather than another grey glyph.
+
+Breadcrumbs are ripple-carrying targets that scroll to the folder you just
+opened. The search field lifts on focus and its clear button animates in.
+Changing folders cross-fades the title; switching grid and list cross-fades the
+icon.
+
+Under **Accessibility > Remove animations** the shimmer holds still, cards
+arrive without a stagger, and nothing drifts. Placeholders are hidden from
+screen readers — TalkBack hears "Loading this folder" once instead of a dozen
+empty cards read as content.
+
+**An empty folder and a failed one are no longer the same screen.** A listing
+that fails now says so and offers **Retry**; it used to flash the error through
+a snackbar that cleared itself and then report "This folder is empty" about
+files it had never managed to ask for. "Nothing matched" is likewise its own
+state, distinct from a folder that really has nothing in it.
+
+The file menu also shows **Properties** — type, size, when it changed and where
+it lives, all from the listing the app already has.
+
+Folders have no preview image: CloudHub's listing does not carry one, and
+building a mosaic would mean one extra request per folder on screen.
+
 ### Signing in
 
 A gradient background with two soft colour fields drifting behind a translucent
@@ -376,14 +412,17 @@ copy, search, trash and restore, and share create and revoke. Without
 Decisions that are awkward to reach by hand are pure functions or plain state
 machines, tested without a server or a device: whether a saved position is
 worth resuming, whether there is room to stage a file before the copy begins,
-what the sign-in form will send, how sign-in moves between its states, and
-whether two taps can become two sign-in requests. One needs a half-watched
-film, another needs a full phone, and another needs hands fast enough to
-double-tap a button mid-request.
+what the sign-in form will send, how sign-in moves between its states, whether
+two taps can become two sign-in requests, and which of skeleton, content,
+empty, no-matches or error the browser should draw. One needs a half-watched
+film, another needs a full phone, another needs hands fast enough to double-tap
+a button mid-request, and the last needs a server that fails at the right
+moment.
 
 The Compose UI has no such coverage: rendering it needs a device. Fullscreen,
-the rotation, the double-tap zones, the gallery picker, the camera and every
-animation on the sign-in screen are only provable with the APK on a phone.
+the rotation, the double-tap zones, the gallery picker, the camera, and every
+animation on the sign-in and browsing screens are only provable with the APK on
+a phone.
 
 ### Signing
 

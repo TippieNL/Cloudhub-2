@@ -16,8 +16,16 @@ import nl.tippie.cloudhub.net.User
 data class FilesState(
     val path: String = "/",
     val entries: List<FileEntry> = emptyList(),
-    val loading: Boolean = false,
-    val error: String? = null,
+    val load: LoadState = LoadState.LOADING,
+    /**
+     * Why the listing failed, kept until it is retried.
+     *
+     * Separate from [message], which is transient snackbar feedback for an
+     * action ("Renamed", "Moved to trash"). Routing a failed *listing* through
+     * the snackbar cleared it a moment later and left the content area showing
+     * "This folder is empty" -- a wrong answer stated confidently.
+     */
+    val loadError: String? = null,
     val message: String? = null,
     val selected: Set<String> = emptySet(),
     val user: User? = null,
@@ -48,6 +56,19 @@ data class FilesState(
         }
 
     val canWrite get() = user?.canWrite == true
+
+    /** True while a filter or a server search is narrowing what is shown. */
+    val filtering get() = searchResults != null || query.isNotBlank()
+
+    val loading get() = load == LoadState.LOADING
+
+    /** What the content area should draw. */
+    val shown: Shown get() = browserState(
+        load = load,
+        hasEntries = entries.isNotEmpty(),
+        hasVisible = visible.isNotEmpty(),
+        filtering = filtering,
+    )
 }
 
 class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
@@ -65,10 +86,20 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
 
     fun open(path: String) {
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null, selected = emptySet(), searchResults = null) }
+            // Entries are dropped when moving to a different folder so the
+            // skeleton appears; a refresh of the same folder keeps them, and
+            // keeps what is on screen.
+            val movingOn = path != _state.value.path
+            _state.update {
+                it.copy(
+                    load = LoadState.LOADING, loadError = null, selected = emptySet(),
+                    searchResults = null,
+                    entries = if (movingOn) emptyList() else it.entries,
+                )
+            }
             try {
                 val entries = api.list(path)
-                _state.update { it.copy(path = path, entries = entries, loading = false) }
+                _state.update { it.copy(path = path, entries = entries, load = LoadState.READY) }
             } catch (e: ApiError) {
                 // A folder can be renamed or deleted between visits. Falling
                 // back to the root beats an empty screen with no explanation.
@@ -76,15 +107,20 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
                     _state.update { it.copy(message = "That folder is no longer there") }
                     open("/")
                 } else {
-                    _state.update { it.copy(loading = false, error = e.message) }
+                    _state.update { it.copy(load = LoadState.FAILED, loadError = e.message) }
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(loading = false, error = e.message ?: "Could not reach the server") }
+                _state.update {
+                    it.copy(load = LoadState.FAILED, loadError = e.message ?: "Could not reach the server")
+                }
             }
         }
     }
 
     fun refresh() = open(_state.value.path)
+
+    /** After a failure: back to the skeleton, and try the same folder again. */
+    fun retry() = open(_state.value.path)
 
     fun setQuery(query: String) {
         _state.update { it.copy(query = query, searchResults = if (query.isBlank()) null else it.searchResults) }
@@ -98,15 +134,15 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
             return
         }
         viewModelScope.launch {
-            _state.update { it.copy(loading = true) }
+            _state.update { it.copy(load = LoadState.LOADING, loadError = null) }
             try {
                 val found = api.search(query, _state.value.path)
                 _state.update {
-                    it.copy(loading = false, searchResults = found.results,
+                    it.copy(load = LoadState.READY, searchResults = found.results,
                         searchTruncated = found.truncated, selected = emptySet())
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(loading = false, error = e.message) }
+                _state.update { it.copy(load = LoadState.FAILED, loadError = e.message) }
             }
         }
     }
@@ -123,7 +159,7 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
 
     fun setGrid(grid: Boolean) = _state.update { it.copy(grid = grid) }
 
-    fun dismissMessage() = _state.update { it.copy(message = null, error = null) }
+    fun dismissMessage() = _state.update { it.copy(message = null) }
 
     /* ---- actions -------------------------------------------------------- */
 
@@ -159,7 +195,7 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
                 _state.update { it.copy(message = note, selected = emptySet()) }
                 refresh()
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message) }
+                _state.update { it.copy(message = e.message) }
             }
         }
     }
@@ -174,9 +210,9 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
                 _state.update { it.copy(message = note, selected = emptySet()) }
                 refresh()
             } catch (e: ApiError) {
-                _state.update { it.copy(error = e.message) }
+                _state.update { it.copy(message = e.message) }
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: "That did not work") }
+                _state.update { it.copy(message = e.message ?: "That did not work") }
             }
         }
     }

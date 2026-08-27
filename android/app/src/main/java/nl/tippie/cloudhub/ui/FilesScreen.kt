@@ -1,35 +1,74 @@
 package nl.tippie.cloudhub.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
-import java.util.Locale
 
 /**
  * The file browser.
@@ -37,6 +76,10 @@ import java.util.Locale
  * Grid by default because a phone showing photos wants pictures, not rows;
  * the list view is there for folders full of documents where the name is what
  * you are scanning for.
+ *
+ * While a folder loads it draws placeholder cards rather than a spinner --
+ * built from the same [FileCardScaffold] as the real cards, so the content
+ * arriving is a change of colour and not a change of layout.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,54 +102,45 @@ fun FilesScreen(
     var renaming by remember { mutableStateOf<FileEntry?>(null) }
     var picking by remember { mutableStateOf<PickerRequest?>(null) }
     var menuFor by remember { mutableStateOf<FileEntry?>(null) }
+    var propertiesFor by remember { mutableStateOf<FileEntry?>(null) }
     var overflow by remember { mutableStateOf(false) }
 
-    LaunchedEffect(state.message, state.error) {
-        val note = state.error ?: state.message
-        if (note != null) {
-            snackbar.showSnackbar(note)
+    // Only action feedback goes through the snackbar now. A failed *listing*
+    // is a state of the screen, not a message that scrolls away.
+    LaunchedEffect(state.message) {
+        state.message?.let {
+            snackbar.showSnackbar(it)
             model.dismissMessage()
         }
     }
 
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
-                title = { Text(state.path.substringAfterLast('/').ifEmpty { "CloudHub" }, maxLines = 1) },
-                navigationIcon = {
-                    if (state.path != "/") {
-                        IconButton(onClick = { model.open(state.path.substringBeforeLast('/', "").ifEmpty { "/" }) }) {
-                            Icon(Icons.Default.ArrowBack, "Up one folder")
-                        }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { model.setGrid(!state.grid) }) {
-                        Icon(if (state.grid) Icons.Default.ViewList else Icons.Default.GridView,
-                            if (state.grid) "List view" else "Grid view")
-                    }
-                    IconButton(onClick = { overflow = true }) { Icon(Icons.Default.MoreVert, "More") }
-                    DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                        DropdownMenuItem(text = { Text("Refresh") },
-                            onClick = { overflow = false; model.refresh() })
-                        DropdownMenuItem(text = { Text("Sort by name") },
-                            onClick = { overflow = false; model.setSort(FilesState.Sort.NAME) })
-                        DropdownMenuItem(text = { Text("Sort by newest") },
-                            onClick = { overflow = false; model.setSort(FilesState.Sort.NEWEST) })
-                        DropdownMenuItem(text = { Text("Sort by largest") },
-                            onClick = { overflow = false; model.setSort(FilesState.Sort.LARGEST) })
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text("Trash") },
-                            onClick = { overflow = false; onOpenTrash() })
-                        DropdownMenuItem(text = { Text("Sign out") },
-                            onClick = { overflow = false; onSignOut() })
-                    }
-                },
+            BrowserTopBar(
+                folder = state.path.substringAfterLast('/').ifEmpty { "CloudHub" },
+                atRoot = state.path == "/",
+                grid = state.grid,
+                scrollBehavior = scrollBehavior,
+                overflowOpen = overflow,
+                onUp = { model.open(state.path.substringBeforeLast('/', "").ifEmpty { "/" }) },
+                onToggleView = { model.setGrid(!state.grid) },
+                onOverflow = { overflow = it },
+                onRefresh = { model.refresh() },
+                onSort = { model.setSort(it) },
+                onTrash = onOpenTrash,
+                onSignOut = onSignOut,
             )
         },
         floatingActionButton = {
-            if (state.canWrite && state.selected.isEmpty()) {
+            AnimatedVisibility(
+                visible = state.canWrite && state.selected.isEmpty(),
+                enter = scaleIn(spring(stiffness = 500f)) + fadeIn(),
+                exit = scaleOut(tween(120)) + fadeOut(tween(120)),
+            ) {
                 UploadFab(
                     onPickMedia = onPickMedia,
                     onPickFile = onPickFile,
@@ -119,24 +153,36 @@ fun FilesScreen(
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             Breadcrumbs(state.path, model::open)
-            SearchBar(
+
+            SearchField(
                 query = state.query,
                 searching = state.searchResults != null,
                 onQuery = model::setQuery,
                 onSearchAll = model::searchEverywhere,
                 onClear = model::clearSearch,
             )
-            state.searchResults?.let { results ->
+
+            AnimatedVisibility(
+                visible = state.searchResults != null,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                val results = state.searchResults.orEmpty()
                 Text(
                     if (results.isEmpty()) "No matches for \"${state.query}\""
                     else "${results.size} match${if (results.size == 1) "" else "es"}" +
                         if (state.searchTruncated) " (showing the first ${results.size})" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                 )
             }
-            if (state.selected.isNotEmpty()) {
+
+            AnimatedVisibility(
+                visible = state.selected.isNotEmpty(),
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
                 SelectionBar(
                     count = state.selected.size,
                     canWrite = state.canWrite,
@@ -146,35 +192,16 @@ fun FilesScreen(
                     onDelete = { model.delete(state.selected.toList()) },
                 )
             }
-            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
 
-            val entries = state.visible
-            if (entries.isEmpty() && !state.loading) {
-                EmptyFolder(state.searchResults != null)
-            } else if (state.grid) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 150.dp),
-                    contentPadding = PaddingValues(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(entries, key = { it.path }) { entry ->
-                        FileTile(api, entry, entry.path in state.selected, state.searchResults != null,
-                            onOpen = { if (entry.isDirectory) model.open(entry.path) else onOpenFile(entry) },
-                            onLongPress = { model.toggleSelected(entry.path) },
-                            onMenu = { menuFor = entry })
-                    }
-                }
-            } else {
-                LazyColumn(contentPadding = PaddingValues(vertical = 6.dp)) {
-                    items(entries, key = { it.path }) { entry ->
-                        FileRow(api, entry, entry.path in state.selected, state.searchResults != null,
-                            onOpen = { if (entry.isDirectory) model.open(entry.path) else onOpenFile(entry) },
-                            onLongPress = { model.toggleSelected(entry.path) },
-                            onMenu = { menuFor = entry })
-                    }
-                }
-            }
+            BrowserContent(
+                api = api,
+                state = state,
+                onOpen = { entry -> if (entry.isDirectory) model.open(entry.path) else onOpenFile(entry) },
+                onLongPress = model::toggleSelected,
+                onMenu = { menuFor = it },
+                onRetry = model::retry,
+                onNewFolder = { showNewFolder = true },
+            )
         }
     }
 
@@ -190,7 +217,12 @@ fun FilesScreen(
             onMove = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = true) },
             onCopy = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = false) },
             onDelete = { menuFor = null; model.delete(listOf(entry.path)) },
+            onProperties = { menuFor = null; propertiesFor = entry },
         )
+    }
+
+    propertiesFor?.let { entry ->
+        PropertiesSheet(entry = entry, onDismiss = { propertiesFor = null })
     }
 
     if (showNewFolder) {
@@ -222,33 +254,439 @@ fun FilesScreen(
 
 private data class PickerRequest(val paths: List<String>, val moving: Boolean)
 
+/* ---- the content area ----------------------------------------------------- */
+
+/**
+ * Skeleton, content, empty, no matches or error -- and the transitions between.
+ *
+ * Which one is [FilesState.shown]'s decision, made in one testable place. The
+ * crossfade is the whole point: replacing placeholders with content in a single
+ * frame is what makes an app feel like it stuttered rather than loaded.
+ */
 @Composable
-private fun Breadcrumbs(path: String, onOpen: (String) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun BrowserContent(
+    api: CloudHubApi,
+    state: FilesState,
+    onOpen: (FileEntry) -> Unit,
+    onLongPress: (String) -> Unit,
+    onMenu: (FileEntry) -> Unit,
+    onRetry: () -> Unit,
+    onNewFolder: () -> Unit,
+) {
+    val shown = state.shown
+    // Held briefly past the answer so a fast folder does not flash a skeleton
+    // and a slow one does not blink it away the instant it lands.
+    val settled = rememberSettledSkeleton(shown)
+
+    AnimatedContent(
+        targetState = settled,
+        transitionSpec = {
+            // Content rises very slightly as it replaces the placeholders.
+            (fadeIn(tween(260)) + slideInVertically(tween(260)) { it / 24 })
+                .togetherWith(fadeOut(tween(160)))
+        },
+        label = "content",
+        modifier = Modifier.fillMaxSize(),
+    ) { target ->
+        when (target) {
+            Shown.SKELETON -> SkeletonList(grid = state.grid)
+            Shown.ERROR -> LoadFailed(state.loadError, onRetry)
+            Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
+            Shown.NO_MATCHES -> NoMatches(state.query)
+            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu)
+        }
+    }
+}
+
+/**
+ * The skeleton's own timing, kept out of the state machine.
+ *
+ * [browserState] says whether a skeleton is warranted; this says whether it is
+ * worth *showing*, which is a different question and one only the passage of
+ * time can answer.
+ */
+@Composable
+private fun rememberSettledSkeleton(target: Shown): Shown {
+    var settled by remember { mutableStateOf(target) }
+    var shownAt by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(target) {
+        if (target == Shown.SKELETON) {
+            delay(SkeletonTiming.DELAY_MS)
+            shownAt = System.currentTimeMillis()
+            settled = target
+        } else {
+            if (settled == Shown.SKELETON && shownAt > 0L) {
+                delay(SkeletonTiming.lingerMs(System.currentTimeMillis() - shownAt))
+            }
+            shownAt = 0L
+            settled = target
+        }
+    }
+    return settled
+}
+
+@Composable
+private fun SkeletonList(grid: Boolean) {
+    // One transition for the whole screen, its progress handed to every card.
+    val progress = rememberShimmer()
+    val height = LocalConfiguration.current.screenHeightDp
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            // Announced once, rather than a dozen empty cards read as content.
+            .semantics { contentDescription = "Loading this folder" },
     ) {
-        TextButton(onClick = { onOpen("/") }) { Text("Root") }
-        var walked = ""
-        for (part in path.split('/').filter { it.isNotEmpty() }) {
-            walked += "/$part"
-            val target = walked
-            Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = { onOpen(target) }) { Text(part, maxLines = 1) }
+        if (grid) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val columns = (maxWidth / GRID_MIN_CELL).toInt().coerceAtLeast(1)
+                val cardHeight = cardHeightDp((maxWidth.value / columns).toInt())
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+                    contentPadding = PaddingValues(GRID_PADDING),
+                    horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
+                    verticalArrangement = Arrangement.spacedBy(GRID_GAP),
+                    userScrollEnabled = false,
+                ) {
+                    items(skeletonCount(columns, height, cardHeight)) { SkeletonTile(progress) }
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(vertical = 6.dp),
+                userScrollEnabled = false,
+            ) {
+                items(skeletonCount(1, height, ROW_HEIGHT.value.toInt())) { SkeletonRow(progress) }
+            }
         }
     }
 }
 
 @Composable
-private fun SearchBar(
+private fun EntryList(
+    api: CloudHubApi,
+    state: FilesState,
+    onOpen: (FileEntry) -> Unit,
+    onLongPress: (String) -> Unit,
+    onMenu: (FileEntry) -> Unit,
+) {
+    val entries = state.visible
+    val searching = state.searchResults != null
+    // Reset when the folder changes, so opening a folder plays the stagger
+    // again rather than showing an already-arrived screen.
+    val entrance = remember(state.path) { Animatable(0f) }
+    val reduceMotion = LocalReduceMotion.current
+
+    LaunchedEffect(state.path, reduceMotion) {
+        if (reduceMotion) entrance.snapTo(1f)
+        else entrance.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+    }
+
+    if (state.grid) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+            state = rememberLazyGridState(),
+            contentPadding = PaddingValues(GRID_PADDING),
+            horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
+            verticalArrangement = Arrangement.spacedBy(GRID_GAP),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            itemsIndexed(entries) { index, entry ->
+                FileTile(
+                    api, entry, entry.path in state.selected, searching,
+                    onOpen = { onOpen(entry) },
+                    onLongPress = { onLongPress(entry.path) },
+                    onMenu = { onMenu(entry) },
+                    // animateItem gives filtering-as-you-type a re-flow rather
+                    // than a snap; the stagger only touches the first screenful.
+                    modifier = Modifier.animateItem().staggered(entrance.value, index),
+                )
+            }
+        }
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(vertical = 6.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            itemsIndexed(entries) { index, entry ->
+                FileRow(
+                    api, entry, entry.path in state.selected, searching,
+                    onOpen = { onOpen(entry) },
+                    onLongPress = { onLongPress(entry.path) },
+                    onMenu = { onMenu(entry) },
+                    modifier = Modifier.animateItem().staggered(entrance.value, index),
+                )
+            }
+        }
+    }
+}
+
+private val GRID_MIN_CELL = 158.dp
+private val GRID_PADDING = 14.dp
+private val GRID_GAP = 12.dp
+
+/** Items past this appear at once: scrolling should never pay for an entrance. */
+private const val STAGGER_LIMIT = 12
+
+/**
+ * Fade and rise, offset by position.
+ *
+ * Reads the one shared driver rather than starting an animation per card --
+ * with fifty files on screen that would be fifty animation clocks for an
+ * effect lasting half a second.
+ */
+private fun Modifier.staggered(progress: Float, index: Int): Modifier {
+    if (index >= STAGGER_LIMIT || progress >= 1f) return this
+    val start = index / (STAGGER_LIMIT * 1.6f)
+    val local = ((progress - start) / (1f - start)).coerceIn(0f, 1f)
+    return this.graphicsLayer {
+        alpha = local
+        translationY = (1f - local) * 40f
+    }
+}
+
+/* ---- the states with no list ---------------------------------------------- */
+
+@Composable
+private fun EmptyFolder(canWrite: Boolean, onNewFolder: () -> Unit) {
+    StateMessage(
+        icon = { BrandMark(Modifier.size(64.dp)) },
+        title = "This folder is empty",
+        detail = if (canWrite) "Add files with the + button, or create a folder to organise them."
+        else "Nothing has been put here yet.",
+        action = if (canWrite) {
+            { OutlinedButton(onClick = onNewFolder) { Text("Create a folder") } }
+        } else null,
+    )
+}
+
+@Composable
+private fun NoMatches(query: String) {
+    StateMessage(
+        icon = {
+            Icon(
+                Icons.Default.Search, null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(56.dp),
+            )
+        },
+        title = "Nothing matched",
+        detail = if (query.isBlank()) "Try a different search."
+        else "No file here is called \"$query\". Try All folders to search everywhere.",
+    )
+}
+
+/**
+ * The listing failed.
+ *
+ * This state exists because the screen used to show "This folder is empty"
+ * when the server was unreachable -- a wrong answer stated with confidence.
+ */
+@Composable
+private fun LoadFailed(reason: String?, onRetry: () -> Unit) {
+    StateMessage(
+        icon = {
+            Icon(
+                Icons.Default.CloudOff, null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(56.dp),
+            )
+        },
+        title = "Could not load this folder",
+        detail = reason ?: "The server did not answer.",
+        action = { Button(onClick = onRetry) { Text("Retry") } },
+    )
+}
+
+/** One layout for all three, so they arrive the same way. */
+@Composable
+private fun StateMessage(
+    icon: @Composable () -> Unit,
+    title: String,
+    detail: String,
+    action: (@Composable () -> Unit)? = null,
+) {
+    val reduceMotion = LocalReduceMotion.current
+    val appear = remember { Animatable(if (reduceMotion) 1f else 0f) }
+    LaunchedEffect(Unit) { if (!reduceMotion) appear.animateTo(1f, tween(340)) }
+
+    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.graphicsLayer {
+                alpha = appear.value
+                translationY = (1f - appear.value) * 24f
+            },
+        ) {
+            icon()
+            Spacer(Modifier.height(18.dp))
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            action?.let {
+                Spacer(Modifier.height(22.dp))
+                it()
+            }
+        }
+    }
+}
+
+/* ---- the bar, the crumbs and the search ------------------------------------ */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BrowserTopBar(
+    folder: String,
+    atRoot: Boolean,
+    grid: Boolean,
+    scrollBehavior: TopAppBarScrollBehavior,
+    overflowOpen: Boolean,
+    onUp: () -> Unit,
+    onToggleView: () -> Unit,
+    onOverflow: (Boolean) -> Unit,
+    onRefresh: () -> Unit,
+    onSort: (FilesState.Sort) -> Unit,
+    onTrash: () -> Unit,
+    onSignOut: () -> Unit,
+) {
+    TopAppBar(
+        scrollBehavior = scrollBehavior,
+        title = {
+            // Changing folders cross-fades the name rather than swapping it.
+            AnimatedContent(
+                targetState = folder,
+                transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(140))) },
+                label = "folder",
+            ) { name ->
+                Text(name, maxLines = 1, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        navigationIcon = {
+            AnimatedVisibility(visible = !atRoot, enter = fadeIn(), exit = fadeOut()) {
+                IconButton(onClick = onUp) { Icon(Icons.Default.ArrowBack, "Up one folder") }
+            }
+        },
+        actions = {
+            IconButton(onClick = onToggleView) {
+                AnimatedContent(
+                    targetState = grid,
+                    transitionSpec = {
+                        (fadeIn(tween(180)) + scaleIn(tween(180), initialScale = 0.7f))
+                            .togetherWith(fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.7f))
+                    },
+                    label = "view",
+                ) { isGrid ->
+                    Icon(
+                        if (isGrid) Icons.Default.ViewList else Icons.Default.GridView,
+                        if (isGrid) "Switch to list view" else "Switch to grid view",
+                    )
+                }
+            }
+            IconButton(onClick = { onOverflow(true) }) { Icon(Icons.Default.MoreVert, "More") }
+            DropdownMenu(expanded = overflowOpen, onDismissRequest = { onOverflow(false) }) {
+                DropdownMenuItem(text = { Text("Refresh") },
+                    onClick = { onOverflow(false); onRefresh() })
+                HorizontalDivider()
+                DropdownMenuItem(text = { Text("Sort by name") },
+                    onClick = { onOverflow(false); onSort(FilesState.Sort.NAME) })
+                DropdownMenuItem(text = { Text("Sort by newest") },
+                    onClick = { onOverflow(false); onSort(FilesState.Sort.NEWEST) })
+                DropdownMenuItem(text = { Text("Sort by largest") },
+                    onClick = { onOverflow(false); onSort(FilesState.Sort.LARGEST) })
+                HorizontalDivider()
+                DropdownMenuItem(text = { Text("Trash") },
+                    onClick = { onOverflow(false); onTrash() })
+                DropdownMenuItem(text = { Text("Sign out") },
+                    onClick = { onOverflow(false); onSignOut() })
+            }
+        },
+    )
+}
+
+/**
+ * Root › Photos, each part a target.
+ *
+ * Scrolled to the end on navigation: with a deep path the crumb you just
+ * opened is the one off the right edge, which is the one worth seeing.
+ */
+@Composable
+private fun Breadcrumbs(path: String, onOpen: (String) -> Unit) {
+    val scroll = rememberScrollState()
+    LaunchedEffect(path) { scroll.animateScrollTo(scroll.maxValue) }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(scroll)
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Crumb("Root", onClick = { onOpen("/") })
+        var walked = ""
+        for (part in path.split('/').filter { it.isNotEmpty() }) {
+            walked += "/$part"
+            val target = walked
+            Text(
+                "›",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 2.dp),
+            )
+            Crumb(part, onClick = { onOpen(target) })
+        }
+    }
+}
+
+@Composable
+private fun Crumb(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+    }
+}
+
+/**
+ * Search.
+ *
+ * Typing filters what is on screen without a request; All folders asks the
+ * server to walk the tree, which is the web app's This folder / All folders
+ * split and the reason the two are not merged into one live search.
+ */
+@Composable
+private fun SearchField(
     query: String,
     searching: Boolean,
     onQuery: (String) -> Unit,
     onSearchAll: () -> Unit,
     onClear: () -> Unit,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    val border by animateColorAsState(
+        if (focused) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.outlineVariant,
+        tween(220), label = "search-border",
+    )
+    val container by animateColorAsState(
+        if (focused) MaterialTheme.colorScheme.surface
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        tween(220), label = "search-fill",
+    )
+
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         OutlinedTextField(
@@ -256,17 +694,37 @@ private fun SearchBar(
             onValueChange = onQuery,
             placeholder = { Text("Search") },
             singleLine = true,
+            interactionSource = interaction,
+            shape = RoundedCornerShape(26.dp),
             leadingIcon = { Icon(Icons.Default.Search, null) },
             trailingIcon = {
-                if (query.isNotEmpty()) IconButton(onClick = onClear) { Icon(Icons.Default.Close, "Clear") }
+                AnimatedVisibility(
+                    visible = query.isNotEmpty(),
+                    enter = fadeIn(tween(140)) + scaleIn(tween(140), initialScale = 0.7f),
+                    exit = fadeOut(tween(100)) + scaleOut(tween(100), targetScale = 0.7f),
+                ) {
+                    IconButton(onClick = onClear) { Icon(Icons.Default.Close, "Clear search") }
+                }
             },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { keyboard?.hide(); onSearchAll() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = border,
+                unfocusedBorderColor = border,
+                focusedContainerColor = container,
+                unfocusedContainerColor = container,
+            ),
             modifier = Modifier.weight(1f),
         )
-        // The web app's This folder / All folders split: typing filters what is
-        // on screen, and asking explicitly walks the tree on the server.
-        if (query.length >= 2 && !searching) {
-            Spacer(Modifier.width(6.dp))
-            TextButton(onClick = onSearchAll) { Text("All folders") }
+        AnimatedVisibility(
+            visible = query.length >= 2 && !searching,
+            enter = fadeIn() + expandHorizontally(),
+            exit = fadeOut() + shrinkHorizontally(),
+        ) {
+            Row {
+                Spacer(Modifier.width(4.dp))
+                TextButton(onClick = { keyboard?.hide(); onSearchAll() }) { Text("All folders") }
+            }
         }
     }
 }
@@ -280,9 +738,13 @@ private fun SelectionBar(
     onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(16.dp)),
+    ) {
         Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onClear) { Icon(Icons.Default.Close, "Clear selection") }
@@ -297,16 +759,6 @@ private fun SelectionBar(
     }
 }
 
-@Composable
-private fun EmptyFolder(searching: Boolean) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(
-            if (searching) "Nothing matched." else "This folder is empty.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 /**
  * The add button, and the sheet behind it.
  *
@@ -314,6 +766,8 @@ private fun EmptyFolder(searching: Boolean) {
  * a camera glyph and a film glyph side by side tell you nothing about which one
  * records -- so the button opens the same labelled sheet pattern the file menu
  * uses.
+ *
+ * There is no "new album": CloudHub stores folders, and nothing else.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -325,9 +779,24 @@ private fun UploadFab(
     onNewFolder: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        if (pressed && !LocalReduceMotion.current) 0.92f else 1f,
+        spring(dampingRatio = 0.55f, stiffness = 800f),
+        label = "fab",
+    )
 
-    FloatingActionButton(onClick = { open = true }) {
-        Icon(Icons.Default.Add, "Add")
+    FloatingActionButton(
+        onClick = { open = true },
+        interactionSource = interaction,
+        shape = RoundedCornerShape(18.dp),
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
+        modifier = Modifier.graphicsLayer { scaleX = scale; scaleY = scale },
+    ) {
+        Icon(Icons.Default.Add, "Add to this folder")
     }
 
     if (open) {
@@ -347,148 +816,3 @@ private fun UploadFab(
         }
     }
 }
-
-/* ---- one file ----------------------------------------------------------- */
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FileTile(
-    api: CloudHubApi,
-    entry: FileEntry,
-    selected: Boolean,
-    showFolder: Boolean,
-    onOpen: () -> Unit,
-    onLongPress: () -> Unit,
-    onMenu: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.combinedClickableCompat(onOpen, onLongPress),
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surface
-        ),
-    ) {
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(4f / 3f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            Thumbnail(api, entry, Modifier.fillMaxSize())
-        }
-        Column(Modifier.padding(8.dp)) {
-            Text(entry.name, style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    subtitle(entry, showFolder),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = onMenu, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.MoreVert, "Actions", Modifier.size(18.dp))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FileRow(
-    api: CloudHubApi,
-    entry: FileEntry,
-    selected: Boolean,
-    showFolder: Boolean,
-    onOpen: () -> Unit,
-    onLongPress: () -> Unit,
-    onMenu: () -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth()
-            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent)
-            .combinedClickableCompat(onOpen, onLongPress)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) { Thumbnail(api, entry, Modifier.fillMaxSize()) }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(entry.name, style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle(entry, showFolder), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        IconButton(onClick = onMenu) { Icon(Icons.Default.MoreVert, "Actions") }
-    }
-}
-
-/**
- * A picture where there is one, an icon where there is not.
- *
- * Videos the server has no cached frame for are decoded on the device by
- * Coil's video decoder pointed at the stream, so the grid is not a wall of
- * identical placeholders.
- */
-@Composable
-private fun Thumbnail(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
-    val context = LocalContext.current
-    when (entry.kind) {
-        FileEntry.Kind.IMAGE -> AsyncImage(
-            model = ImageRequest.Builder(context).data(api.thumbnailUrl(entry).toString()).build(),
-            contentDescription = entry.name,
-            contentScale = ContentScale.Crop,
-            modifier = modifier,
-        )
-        FileEntry.Kind.VIDEO -> Box(modifier, contentAlignment = Alignment.Center) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(if (entry.hasThumbnail) api.thumbnailUrl(entry).toString()
-                          else api.streamUrl(entry.path).toString())
-                    .build(),
-                contentDescription = entry.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Icon(Icons.Default.PlayCircle, null, Modifier.size(34.dp))
-        }
-        else -> Icon(iconFor(entry), null, Modifier.size(30.dp))
-    }
-}
-
-private fun iconFor(entry: FileEntry): ImageVector = when (entry.kind) {
-    FileEntry.Kind.FOLDER -> Icons.Default.Folder
-    FileEntry.Kind.AUDIO -> Icons.Default.MusicNote
-    FileEntry.Kind.PDF -> Icons.Default.PictureAsPdf
-    FileEntry.Kind.TEXT -> Icons.Default.Description
-    else -> Icons.Default.InsertDriveFile
-}
-
-private fun subtitle(entry: FileEntry, showFolder: Boolean): String {
-    val head = if (entry.isDirectory) "Folder" else humanBytes(entry.size)
-    // In search results the folder is the useful half; in a listing it is
-    // already obvious from where you are.
-    if (!showFolder) return head
-    val parent = entry.path.substringBeforeLast('/', "").ifEmpty { "/" }
-    return "$head · in $parent"
-}
-
-fun humanBytes(bytes: Long): String {
-    if (bytes < 1024) return "$bytes B"
-    val units = listOf("KB", "MB", "GB", "TB")
-    var value = bytes.toDouble() / 1024
-    var index = 0
-    while (value >= 1024 && index < units.lastIndex) { value /= 1024; index++ }
-    return String.format(Locale.US, if (value >= 100) "%.0f %s" else "%.1f %s", value, units[index])
-}
-
-/** Long-press to select is the Android idiom for what the web app does with checkboxes. */
-@OptIn(ExperimentalFoundationApi::class)
-private fun Modifier.combinedClickableCompat(onClick: () -> Unit, onLongClick: () -> Unit) =
-    this.combinedClickable(onClick = onClick, onLongClick = onLongClick)

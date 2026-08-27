@@ -129,6 +129,7 @@ fun FileActionsSheet(
     onMove: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit,
+    onProperties: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Text(entry.name, style = MaterialTheme.typography.titleMedium,
@@ -145,8 +146,58 @@ fun FileActionsSheet(
             SheetAction(Icons.Default.ContentCopy, "Copy to…", onCopy)
             SheetAction(Icons.Default.Delete, "Delete", onDelete, danger = true)
         }
+        SheetAction(Icons.Default.Info, "Properties", onProperties)
         Spacer(Modifier.height(20.dp))
     }
+}
+
+/**
+ * Size, type, when it changed and where it lives.
+ *
+ * Every field is already in the listing the screen has, so this shows what the
+ * app knows rather than asking the server anything new.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PropertiesSheet(entry: FileEntry, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Text(
+            entry.name,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+        )
+        HorizontalDivider()
+        Property("Type", describeKind(entry))
+        if (!entry.isDirectory) Property("Size", humanBytes(entry.size))
+        entry.modified.takeIf { it.isNotBlank() }?.let { Property("Modified", it) }
+        Property("Location", entry.path.substringBeforeLast('/', "").ifEmpty { "/" })
+        Property("Full path", entry.path)
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun Property(label: String, value: String) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private fun describeKind(entry: FileEntry): String = when (entry.kind) {
+    FileEntry.Kind.FOLDER -> "Folder"
+    FileEntry.Kind.IMAGE -> if (entry.ext == "gif") "GIF image" else "Image"
+    FileEntry.Kind.VIDEO -> "Video"
+    FileEntry.Kind.AUDIO -> "Audio"
+    FileEntry.Kind.PDF -> "PDF document"
+    FileEntry.Kind.TEXT -> "Text"
+    // The extension is more use than "Other" when that is all there is.
+    else -> entry.ext.uppercase().ifBlank { "File" }
 }
 
 @Composable

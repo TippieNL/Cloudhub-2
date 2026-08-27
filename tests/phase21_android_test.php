@@ -42,6 +42,12 @@ $signInVm = $read($kotlin.'/ui/SignInViewModel.kt');
 $theme = $read($kotlin.'/ui/Theme.kt');
 $signInTests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/SignInStateTest.kt');
 $themes = $read($android.'/res/values/themes.xml');
+$cards = $read($kotlin.'/ui/FileCards.kt');
+$browser = $read($kotlin.'/ui/FilesBrowserState.kt');
+$viewModel = $read($kotlin.'/ui/FilesViewModel.kt');
+$dialogs = $read($kotlin.'/ui/Dialogs.kt');
+$browserTests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/FilesBrowserStateTest.kt');
+$brand = $read($kotlin.'/ui/Brand.kt');
 $script = $read($root.'/tools/build-apk.sh');
 $gitignore = $read($root.'/.gitignore');
 
@@ -314,8 +320,11 @@ $checks['focus moves from the username to the password'] =
 $checks['the keyboard cannot cover the fields'] = str_contains($signIn, '.imePadding()');
 $checks['the card stops growing on a tablet'] =
     str_contains($signIn, 'BoxWithConstraints') && str_contains($signIn, 'Modifier.width(400.dp)');
+// Drawn once and shared by the sign-in screen and the empty folder, from the
+// same unit-box geometry as the launcher icon.
 $checks['the mark is the launcher icon, not a stock glyph'] =
-    str_contains($signIn, 'private fun BrandMark') && !str_contains($signIn, 'Icons.Default.CloudUpload');
+    str_contains($brand, 'fun BrandMark') && !str_contains($brand, 'Icons.Default.CloudUpload')
+    && str_contains($signIn, 'BrandMark(') && str_contains($files, 'BrandMark(');
 
 // --- animation ------------------------------------------------------------------
 $checks['the entrance is staggered from one driver'] =
@@ -363,6 +372,76 @@ $checks['the sign-in rules are tested without a server'] =
     str_contains($signInTests, 'class SignInStateTest')
     && str_contains($signInTests, 'a second tap during a request is ignored')
     && !str_contains($signInTests, 'CLOUDHUB_TEST_URL');
+
+
+// --- the file browser -----------------------------------------------------------
+// A skeleton that is a second layout merely resembling the card is how a
+// crossfade becomes a jump. One scaffold, filled two ways, cannot drift.
+$checks['the card and its skeleton share one layout'] =
+    str_contains($cards, 'fun FileCardScaffold(')
+    && substr_count($cards, 'FileCardScaffold(') >= 3;
+$checks['the skeleton is sized from the real grid, not hard-coded'] =
+    str_contains($browser, 'fun skeletonCount(columns: Int, viewportHeightDp: Int, cardHeightDp: Int)')
+    && str_contains($files, 'skeletonCount(columns,');
+// Thirty cards each driving an infinite transition is thirty clocks for one effect.
+$checks['the shimmer is one animation for the whole screen'] =
+    substr_count($cards, 'rememberInfiniteTransition') === 1
+    && str_contains($cards, 'fun rememberShimmer(): Float')
+    && str_contains($files, 'val progress = rememberShimmer()');
+$checks['the shimmer holds still under Reduce Motion'] =
+    str_contains($cards, 'if (LocalReduceMotion.current) return SHIMMER_STILL');
+// TalkBack reading a dozen empty cards as content is worse than silence.
+$checks['placeholders are not announced as content'] =
+    str_contains($cards, 'clearAndSetSemantics { }')
+    && str_contains($files, 'contentDescription = "Loading this folder"');
+$checks['the skeleton crossfades rather than snapping'] =
+    str_contains($files, 'AnimatedContent') && str_contains($files, 'Shown.SKELETON ->');
+$checks['a fast load never flashes a skeleton'] =
+    str_contains($browser, 'const val DELAY_MS') && str_contains($browser, 'const val MIN_SHOWN_MS')
+    && str_contains($files, 'SkeletonTiming.lingerMs(');
+
+// --- the states, decided once ------------------------------------------------------
+// The defect this replaced: a failed listing went to a snackbar that cleared
+// itself, and the screen then said "This folder is empty" about files it had
+// never managed to ask for.
+$checks['a failed listing cannot render as an empty folder'] =
+    str_contains($browser, 'load == LoadState.FAILED -> Shown.ERROR')
+    && str_contains($viewModel, 'val loadError: String?')
+    && !str_contains($viewModel, 'copy(message = null, error = null)');
+$checks['a refresh does not blank the screen'] =
+    str_contains($browser, 'load == LoadState.LOADING && !hasEntries -> Shown.SKELETON');
+$checks['a mistyped search is not called an empty folder'] =
+    str_contains($browser, 'filtering -> Shown.NO_MATCHES');
+$checks['a failure offers a retry'] =
+    str_contains($viewModel, 'fun retry()') && str_contains($files, 'Text("Retry")');
+$checks['the browser states are tested without a server'] =
+    str_contains($browserTests, 'class BrowserStateTest')
+    && str_contains($browserTests, 'a failed load is an error, never an empty folder')
+    && !str_contains($browserTests, 'CLOUDHUB_TEST_URL');
+
+// --- what the browser offers ----------------------------------------------------------
+// CloudHub stores folders and nothing else; an album action would be a button
+// with nothing behind it.
+$checks['the add sheet offers no album'] =
+    !preg_match('/\b(album|gallery)\b/i', (string)preg_replace('#/\*.*?\*/|//[^\n]*#s', '', $files));
+$propertiesBody = (string)@substr($dialogs, (int)strpos($dialogs, 'fun PropertiesSheet('), 900);
+$checks['file details are shown from what was already fetched'] =
+    str_contains($dialogs, 'fun PropertiesSheet(') && !str_contains($propertiesBody, 'api.');
+$checks['thumbnails hold their place while they load'] =
+    str_contains($cards, 'AsyncImagePainter.State.Loading ->')
+    && str_contains($cards, 'SkeletonBlock(progress, Modifier.fillMaxSize()');
+$checks['folders get a mark rather than a blank tile'] =
+    str_contains($cards, 'private fun FolderGlyph');
+$checks['filtering re-flows the grid rather than snapping'] =
+    str_contains($files, 'Modifier.animateItem()');
+// An entrance on every item means scrolling pays for an animation forever.
+$checks['the entrance stagger stops after the first screenful'] =
+    str_contains($files, 'STAGGER_LIMIT') && str_contains($files, 'if (index >= STAGGER_LIMIT');
+$checks['breadcrumb segments are targets, and scroll'] =
+    str_contains($files, 'private fun Crumb(') && str_contains($files, 'horizontalScroll(scroll)')
+    && str_contains($files, 'scroll.animateScrollTo(scroll.maxValue)');
+$checks['the grid adapts to the screen it is on'] =
+    str_contains($files, 'GridCells.Adaptive(minSize = GRID_MIN_CELL)');
 
 
 $bad = false;
