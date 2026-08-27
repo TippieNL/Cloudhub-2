@@ -229,6 +229,24 @@ $checks['double-tap seeks by a set step'] =
 // press, so the gesture zones exist only while the controller is hidden.
 $checks['the seek gesture is gated on the controls being hidden'] =
     str_contains($player, 'if (!controlsVisible) {');
+/*
+ * The lock-out this replaced: the overlay was three pointerInput boxes, two of
+ * which handled only onDoubleTap. Compose consumes the tap either way, so once
+ * the controls hid every tap was eaten by an overlay that did nothing with it
+ * and they could never be shown again. One detector, and it must act on a
+ * single tap.
+ */
+$checks['a tap on the video always does something'] =
+    substr_count($player, 'detectTapGestures(') === 1
+    && str_contains($player, 'onTap = { toggleControls() }');
+// A mirror kept by a listener can go stale; the controller's own state cannot.
+$checks['the controls are toggled from the view, not from a stale copy'] =
+    str_contains($player, 'if (it.isControllerFullyVisible) it.hideController() else it.showController()');
+$checks['the controller is not assumed visible before it is shown'] =
+    str_contains($player, 'var controlsVisible by remember { mutableStateOf(false) }');
+$checks['which third was tapped is decided by a tested function'] =
+    str_contains($player, 'internal fun zoneAt(x: Float, width: Float): TapZone')
+    && str_contains($pure, 'class TapZoneTest');
 
 // --- resuming a half-watched video --------------------------------------------
 $checks['positions are remembered per file'] =

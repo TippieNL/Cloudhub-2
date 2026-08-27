@@ -73,9 +73,25 @@ fun PlayerScreen(
     val snackbar = remember { SnackbarHostState() }
 
     var fullscreen by remember { mutableStateOf(false) }
-    var controlsVisible by remember { mutableStateOf(true) }
+    // The controller starts hidden -- PlayerView has not been told to show it.
+    // Claiming otherwise left the gesture overlay uncomposed for the first
+    // taps and composed for good after the first genuine hide.
+    var controlsVisible by remember { mutableStateOf(false) }
     var view by remember { mutableStateOf<PlayerView?>(null) }
     var seekFeedback by remember { mutableStateOf<Boolean?>(null) }   // true = forward
+
+    /*
+     * Ask the view, not our copy of what the view said.
+     *
+     * controlsVisible is a mirror kept by a listener, and a mirror can be
+     * stale -- it already was at startup. Reading the controller's own state
+     * means a stale mirror can at worst compose an overlay that still works,
+     * never one that traps you.
+     */
+    val toggleControls = {
+        view?.let { if (it.isControllerFullyVisible) it.hideController() else it.showController() }
+        Unit
+    }
 
     val player = remember {
         ExoPlayer.Builder(context)
@@ -228,28 +244,34 @@ fun PlayerScreen(
             )
 
             /*
-             * Double-tap to seek.
+             * Tap to show or hide the controls; double-tap the sides to seek.
              *
-             * Only while the controller is hidden: an overlay on top of the
-             * visible transport controls would swallow every button press.
-             * With the controls up, taps belong to them.
+             * One detector for the whole video rather than a box per zone. The
+             * three separate boxes this replaces each needed their own onTap
+             * handler and two of them did not have one -- so once the controls
+             * hid, every tap landed on an overlay that consumed it and did
+             * nothing, and they could never be brought back.
+             *
+             * Still only composed while the controls are hidden: over the
+             * visible transport controls it would swallow every button press.
              */
             if (!controlsVisible) {
-                Row(Modifier.fillMaxSize()) {
-                    SeekZone(Modifier.weight(1f)) {
-                        player.seekBack(); seekFeedback = false
+                Box(
+                    Modifier.fillMaxSize().pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { toggleControls() },
+                            onDoubleTap = { offset ->
+                                when (zoneAt(offset.x, size.width.toFloat())) {
+                                    TapZone.SEEK_BACK -> { player.seekBack(); seekFeedback = false }
+                                    TapZone.SEEK_FORWARD -> { player.seekForward(); seekFeedback = true }
+                                    // No seek in the middle, so it does what a
+                                    // single tap there would.
+                                    TapZone.MIDDLE -> toggleControls()
+                                }
+                            },
+                        )
                     }
-                    // The middle is left alone so a tap there just shows the
-                    // controls rather than jumping the video.
-                    Box(
-                        Modifier.weight(0.6f).fillMaxHeight().pointerInput(Unit) {
-                            detectTapGestures { /* falls through to show controls */ }
-                        }
-                    )
-                    SeekZone(Modifier.weight(1f)) {
-                        player.seekForward(); seekFeedback = true
-                    }
-                }
+                )
             }
 
             seekFeedback?.let { forward ->
@@ -278,14 +300,29 @@ fun PlayerScreen(
     }
 }
 
-@Composable
-private fun SeekZone(modifier: Modifier, onDoubleTap: () -> Unit) {
-    Box(
-        modifier.fillMaxHeight().pointerInput(Unit) {
-            detectTapGestures(onDoubleTap = { onDoubleTap() })
-        }
-    )
+/**
+ * Which third of the video a tap landed in.
+ *
+ * Pure, so the geometry can be checked without a device -- and separating it
+ * from the gesture handling is what leaves one place where a tap is acted on
+ * rather than three that each had to remember to.
+ */
+internal enum class TapZone { SEEK_BACK, MIDDLE, SEEK_FORWARD }
+
+internal fun zoneAt(x: Float, width: Float): TapZone {
+    // A width of zero is possible before the first layout pass; treating it as
+    // the middle means a tap toggles rather than seeking somewhere arbitrary.
+    if (width <= 0f) return TapZone.MIDDLE
+    val fraction = x / width
+    return when {
+        fraction < SEEK_ZONE -> TapZone.SEEK_BACK
+        fraction > 1f - SEEK_ZONE -> TapZone.SEEK_FORWARD
+        else -> TapZone.MIDDLE
+    }
 }
+
+/** How much of each edge seeks. The middle third is left for plain taps. */
+private const val SEEK_ZONE = 0.35f
 
 /**
  * Immersive fullscreen: no system bars, and landscape for anything shot that

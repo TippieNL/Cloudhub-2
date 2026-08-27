@@ -1,6 +1,8 @@
 package nl.tippie.cloudhub
 
 import nl.tippie.cloudhub.data.ResumePolicy
+import nl.tippie.cloudhub.ui.TapZone
+import nl.tippie.cloudhub.ui.zoneAt
 import nl.tippie.cloudhub.work.StagingSpace
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -95,5 +97,67 @@ class StagingSpaceTest {
         assertTrue(StagingSpace.hasRoom(freeBytes = 8 * gb, neededBytes = -1))
         assertFalse(StagingSpace.hasRoom(freeBytes = 0, neededBytes = -1))
         assertFalse(StagingSpace.hasRoom(StagingSpace.HEADROOM_BYTES, -1))
+    }
+}
+
+/**
+ * Where a tap on the video lands.
+ *
+ * The overlay this belongs to used to be three separate boxes, two of which
+ * consumed a tap without acting on it -- so once the controls hid, they could
+ * never be shown again. One detector plus this function is the shape that
+ * cannot repeat that, and the geometry is checkable here rather than by
+ * poking a phone.
+ */
+class TapZoneTest {
+
+    private val width = 1000f
+
+    @Test
+    fun `the left edge seeks back`() {
+        assertEquals(TapZone.SEEK_BACK, zoneAt(0f, width))
+        assertEquals(TapZone.SEEK_BACK, zoneAt(120f, width))
+    }
+
+    @Test
+    fun `the right edge seeks forward`() {
+        assertEquals(TapZone.SEEK_FORWARD, zoneAt(width, width))
+        assertEquals(TapZone.SEEK_FORWARD, zoneAt(880f, width))
+    }
+
+    @Test
+    fun `the middle seeks neither way`() {
+        assertEquals(TapZone.MIDDLE, zoneAt(width / 2, width))
+        assertEquals(TapZone.MIDDLE, zoneAt(400f, width))
+        assertEquals(TapZone.MIDDLE, zoneAt(600f, width))
+    }
+
+    @Test
+    fun `the boundaries belong to the middle`() {
+        // A double tap exactly on the seam should not seek: the middle is the
+        // safe answer, since it only toggles the controls.
+        assertEquals(TapZone.MIDDLE, zoneAt(350f, width))
+        assertEquals(TapZone.MIDDLE, zoneAt(650f, width))
+        assertEquals(TapZone.SEEK_BACK, zoneAt(349f, width))
+        assertEquals(TapZone.SEEK_FORWARD, zoneAt(651f, width))
+    }
+
+    @Test
+    fun `an unmeasured video does not divide by zero`() {
+        // The width is zero until the first layout pass.
+        assertEquals(TapZone.MIDDLE, zoneAt(0f, 0f))
+        assertEquals(TapZone.MIDDLE, zoneAt(120f, 0f))
+        assertEquals(TapZone.MIDDLE, zoneAt(120f, -50f))
+    }
+
+    @Test
+    fun `the zones are fractions of the video, not fixed distances`() {
+        // The discriminating cases: on a 400-wide video, 300px in is the
+        // forward edge, while on a 2000-wide one the same 300px is still the
+        // back edge. A zone measured in pixels gets both of these wrong.
+        assertEquals(TapZone.SEEK_FORWARD, zoneAt(300f, 400f))
+        assertEquals(TapZone.SEEK_BACK, zoneAt(300f, 2000f))
+        assertEquals(TapZone.MIDDLE, zoneAt(200f, 400f))
+        assertEquals(TapZone.MIDDLE, zoneAt(1000f, 2000f))
     }
 }
