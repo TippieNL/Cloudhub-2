@@ -2,9 +2,13 @@
 <resources>
     <!-- Compose draws everything, so the platform theme only has to stay out
          of the way: no action bar, and a window background matching the app's
-         own so there is no flash of white on launch. -->
+         own so there is no flash of white on launch.
+
+         The bars are transparent because the app draws edge to edge: a solid
+         status bar would cut a band across the sign-in gradient. -->
     <style name="CloudHubTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">#F7F7F8</item>
-        <item name="android:statusBarColor">#1479C9</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>

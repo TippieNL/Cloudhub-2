@@ -25,6 +25,19 @@ class Settings(context: Context) {
         get() = prefs.getString("server_url", null)
         set(value) = prefs.edit().putString("server_url", value).apply()
 
+    /**
+     * The last username, when the sign-in screen was asked to remember it.
+     *
+     * Only the name: the password is never stored. The session cookie already
+     * survives a restart, so this is for the case where it has lapsed and the
+     * form has to be filled in again.
+     */
+    var rememberedUsername: String?
+        get() = prefs.getString("remembered_username", null)
+        set(value) =
+            if (value.isNullOrBlank()) prefs.edit().remove("remembered_username").apply()
+            else prefs.edit().putString("remembered_username", value).apply()
+
     /** Grid or list, remembered per install like the web app does. */
     var gridView: Boolean
         get() = prefs.getBoolean("grid_view", true)

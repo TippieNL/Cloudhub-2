@@ -13,6 +13,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -30,6 +32,8 @@ import nl.tippie.cloudhub.work.UploadWorker
 /** Where the app is; small enough that a navigation library would be ceremony. */
 private sealed interface Screen {
     data object Setup : Screen
+    /** Checking whether the stored session is still good; see the effect below. */
+    data object Restoring : Screen
     data object SignIn : Screen
     data object Files : Screen
     data object Trash : Screen
@@ -80,27 +84,54 @@ class MainActivity : ComponentActivity() {
         queue = UploadQueue(this)
         takeSharedFiles(intent)
 
+        // Edge to edge, so the sign-in gradient runs behind the status bar
+        // rather than stopping under a band of solid colour. Every other
+        // screen is a Scaffold, which pads for the system bars itself.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
         setContent {
             CloudHubTheme {
+                // Transparent bars mean the icons have to be told which way to
+                // contrast; without this they are white on a near-white
+                // background in light mode and invisible.
+                val dark = androidx.compose.foundation.isSystemInDarkTheme()
+                LaunchedEffect(dark) {
+                    WindowInsetsControllerCompat(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = !dark
+                        isAppearanceLightNavigationBars = !dark
+                    }
+                }
+
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>) = FilesViewModel(app.api) as T
                 })
+                val signIn: SignInViewModel = viewModel(
+                    key = "sign-in",
+                    factory = object : ViewModelProvider.Factory {
+                        @Suppress("UNCHECKED_CAST")
+                        override fun <T : ViewModel> create(modelClass: Class<T>) = SignInViewModel(app.api) as T
+                    },
+                )
 
                 var screen by remember {
                     mutableStateOf<Screen>(
-                        if (app.settings.serverUrl.isNullOrBlank()) Screen.Setup else Screen.SignIn
+                        if (app.settings.serverUrl.isNullOrBlank()) Screen.Setup else Screen.Restoring
                     )
                 }
                 var sharing by remember { mutableStateOf<FileEntry?>(null) }
                 val state by model.state.collectAsState()
 
                 // Straight to the files if the stored session is still good.
+                //
+                // Resolved from Restoring rather than from SignIn: rendering
+                // the sign-in screen first meant a launch that was already
+                // signed in flashed a half-animated login form on its way past.
                 LaunchedEffect(Unit) {
-                    if (screen is Screen.SignIn) {
+                    if (screen is Screen.Restoring) {
                         val ok = runCatching { withContext(Dispatchers.IO) { app.api.status() }.authenticated }
                             .getOrDefault(false)
-                        if (ok) { screen = Screen.Files; model.start() }
+                        if (ok) { screen = Screen.Files; model.start() } else screen = Screen.SignIn
                     }
                 }
 
@@ -114,10 +145,18 @@ class MainActivity : ComponentActivity() {
                         onReady = { app.useServer(it); screen = Screen.SignIn },
                     )
 
+                    is Screen.Restoring -> RestoringScreen()
+
                     is Screen.SignIn -> SignInScreen(
-                        api = app.api,
+                        model = signIn,
                         serverUrl = app.settings.serverUrl.orEmpty(),
-                        onSignedIn = { screen = Screen.Files; model.start(); UploadWorker.enqueue(this@MainActivity) },
+                        rememberedUsername = app.settings.rememberedUsername,
+                        onSignedIn = { username, remember ->
+                            app.settings.rememberedUsername = if (remember) username else null
+                            screen = Screen.Files
+                            model.start()
+                            UploadWorker.enqueue(this@MainActivity)
+                        },
                         onChangeServer = { screen = Screen.Setup },
                     )
 

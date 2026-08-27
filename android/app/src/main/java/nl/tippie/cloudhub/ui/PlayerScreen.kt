@@ -301,7 +301,10 @@ private fun Activity.setFullscreen(enabled: Boolean) {
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
     } else {
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        // Back to the app's baseline, which is edge-to-edge -- restoring `true`
+        // here would lay every screen out differently after a video than before
+        // one.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         controller.show(WindowInsetsCompat.Type.systemBars())
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }

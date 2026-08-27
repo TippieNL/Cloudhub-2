@@ -241,6 +241,33 @@ restore and empty, and share links.
 security event log — four administrator screens that stay in the browser. There
 is no offline mode; the progressive web app has one.
 
+### Signing in
+
+A gradient background with two soft colour fields drifting behind a translucent
+card, the launcher's own cloud mark above it, and the parts of the form fading
+and rising into place in sequence. The password can be revealed to check a typo.
+The button becomes a spinner and then a check mark, holding just long enough to
+read before the files appear; a rejected password shakes the card and names what
+went wrong under the field it belongs to.
+
+Under **Accessibility > Remove animations** all of that stops: the background
+holds still, nothing shakes, and the form is simply there. The states still
+change — instantly.
+
+**Remember my username** stores the name and nothing else. It is deliberately
+not "keep me signed in", which the app does anyway: the session cookie already
+survives a restart, so a box promising it would be describing something that
+happens either way.
+
+There is no sign-up, password reset or social sign-in, because CloudHub has
+none of them — accounts are made on the server with `tools/create-admin.php`,
+and the API accepts a username and a password. The one link is **Use a
+different server**, which is the only route back to the address screen.
+
+Launching with a session that is still good no longer flashes the login form:
+the app shows the mark while it asks the server, then goes where the answer
+says.
+
 ### The video player
 
 Fullscreen with a rotation to landscape and the system bars out of the way;
@@ -346,14 +373,17 @@ one and resuming it from the server's offset — plus download, rename, move,
 copy, search, trash and restore, and share create and revoke. Without
 `CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
 
-Two decisions that are awkward to reach by hand are pure functions and tested
-without a server or a device: whether a saved position is worth resuming, and
-whether there is room to stage a file before the copy begins. One needs a
-half-watched film and the other needs a full phone.
+Decisions that are awkward to reach by hand are pure functions or plain state
+machines, tested without a server or a device: whether a saved position is
+worth resuming, whether there is room to stage a file before the copy begins,
+what the sign-in form will send, how sign-in moves between its states, and
+whether two taps can become two sign-in requests. One needs a half-watched
+film, another needs a full phone, and another needs hands fast enough to
+double-tap a button mid-request.
 
 The Compose UI has no such coverage: rendering it needs a device. Fullscreen,
-the rotation, the double-tap zones, the gallery picker and the camera are only
-provable with the APK on a phone.
+the rotation, the double-tap zones, the gallery picker, the camera and every
+animation on the sign-in screen are only provable with the APK on a phone.
 
 ### Signing
 

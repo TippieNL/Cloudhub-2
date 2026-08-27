@@ -37,6 +37,11 @@ $player = $read($kotlin.'/ui/PlayerScreen.kt');
 $files = $read($kotlin.'/ui/FilesScreen.kt');
 $paths = $read($android.'/res/xml/file_paths.xml');
 $pure = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/PlayerAndStagingTest.kt');
+$signIn = $read($kotlin.'/ui/SignInScreen.kt');
+$signInVm = $read($kotlin.'/ui/SignInViewModel.kt');
+$theme = $read($kotlin.'/ui/Theme.kt');
+$signInTests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/SignInStateTest.kt');
+$themes = $read($android.'/res/values/themes.xml');
 $script = $read($root.'/tools/build-apk.sh');
 $gitignore = $read($root.'/.gitignore');
 
@@ -279,6 +284,85 @@ $checks['a half-copied file is not left in app storage'] =
 $checks['the resume and space rules are tested on every build'] =
     str_contains($pure, 'class ResumePolicyTest') && str_contains($pure, 'class StagingSpaceTest')
     && !str_contains($pure, 'CLOUDHUB_TEST_URL');
+
+
+// --- the sign-in screen ---------------------------------------------------------
+// CloudHub has no self-service accounts: they are made on the server with
+// tools/create-admin.php. A "Sign up" or "Forgot password" link would be a
+// promise the product cannot keep.
+$signInProse = (string)preg_replace('#/\*.*?\*/|//[^\n]*#s', '', $signIn);
+foreach (['Sign up', 'Sign Up', 'Create account', 'Register', 'Forgot password', 'Reset password'] as $absent) {
+    $checks["the sign-in screen does not offer \"$absent\""] = !str_contains($signInProse, $absent);
+}
+// The API accepts a username and a password and nothing else, so a social row
+// would be buttons that cannot work.
+$checks['no social sign-in buttons are shown'] =
+    !preg_match('/\b(Google|Apple|Facebook|GitHub|Microsoft|OAuth|continue with)\b/i', $signInProse);
+// Removing it would strand anyone whose server moved: it is the only route
+// back to the address screen.
+$checks['the way back to the server address survives'] =
+    str_contains($signIn, 'Use a different server') && str_contains($signIn, 'onChangeServer');
+$checks['the password can be revealed to check a typo'] =
+    str_contains($signIn, 'Icons.Default.VisibilityOff') && str_contains($signIn, 'PasswordVisualTransformation()');
+// Usernames, not email addresses -- an email keyboard would be wrong for them.
+$checks['the username field is typed for a username'] =
+    str_contains($signIn, 'capitalization = KeyboardCapitalization.None')
+    && str_contains($signIn, 'autoCorrect = false')
+    && !str_contains($signIn, 'KeyboardType.Email');
+$checks['focus moves from the username to the password'] =
+    str_contains($signIn, 'onNext = { focus.moveFocus(FocusDirection.Down) }');
+$checks['the keyboard cannot cover the fields'] = str_contains($signIn, '.imePadding()');
+$checks['the card stops growing on a tablet'] =
+    str_contains($signIn, 'BoxWithConstraints') && str_contains($signIn, 'Modifier.width(400.dp)');
+$checks['the mark is the launcher icon, not a stock glyph'] =
+    str_contains($signIn, 'private fun BrandMark') && !str_contains($signIn, 'Icons.Default.CloudUpload');
+
+// --- animation ------------------------------------------------------------------
+$checks['the entrance is staggered from one driver'] =
+    str_contains($signIn, 'private fun Staggered') && substr_count($signIn, 'Staggered(entrance, step =') >= 5;
+$checks['the background moves on its own'] = str_contains($signIn, 'rememberInfiniteTransition');
+$checks['the button becomes a loader and then a check'] =
+    str_contains($signIn, 'AnimatedContent') && str_contains($signIn, 'SignInUiState.Submitting::class')
+    && str_contains($signIn, 'SignInUiState.Success::class');
+$checks['a failure shakes rather than just printing'] = str_contains($signIn, 'keyframes {');
+$checks['validation errors grow into place'] =
+    str_contains($signIn, 'expandVertically') && str_contains($signIn, 'shrinkVertically');
+// Accessibility > Remove animations sets the animator scale to zero.
+$checks['Reduce Motion is honoured'] =
+    str_contains($theme, 'ANIMATOR_DURATION_SCALE') && str_contains($theme, 'LocalReduceMotion')
+    && substr_count($signIn, 'reduceMotion') >= 4;
+
+// --- state, kept out of the composable --------------------------------------------
+$checks['authentication logic is not in the screen'] =
+    str_contains($signInVm, 'class SignInViewModel') && !str_contains($signIn, 'api.login');
+$checks['two taps cannot become two sign-in requests'] =
+    str_contains($signInVm, 'if (_state.value is SignInUiState.Submitting) return');
+$checks['a password is never trimmed'] =
+    str_contains($signInVm, 'return Result.Valid(name, password)');
+$checks['only the username is ever remembered'] =
+    str_contains($stores, 'var rememberedUsername')
+    && !preg_match('/put(String|Boolean)\("(remembered_)?password/', $stores);
+
+// --- the launch path ----------------------------------------------------------------
+// Rendering sign-in before the session check answers meant an already signed-in
+// launch flashed a half-animated login form on its way to the files.
+$checks['the login screen is not shown before the session check answers'] =
+    str_contains($main, 'data object Restoring : Screen')
+    && str_contains($main, 'if (screen is Screen.Restoring)')
+    && str_contains($main, 'else screen = Screen.SignIn');
+$checks['the app draws edge to edge'] =
+    str_contains($main, 'WindowCompat.setDecorFitsSystemWindows(window, false)')
+    && str_contains($themes, '@android:color/transparent');
+// Restoring `true` here would lay every screen out differently after a video.
+$checks['leaving a video does not undo edge to edge'] =
+    !str_contains($player, 'setDecorFitsSystemWindows(window, true)');
+$checks['transparent bars still get readable icons'] =
+    str_contains($main, 'isAppearanceLightStatusBars = !dark');
+
+$checks['the sign-in rules are tested without a server'] =
+    str_contains($signInTests, 'class SignInStateTest')
+    && str_contains($signInTests, 'a second tap during a request is ignored')
+    && !str_contains($signInTests, 'CLOUDHUB_TEST_URL');
 
 
 $bad = false;
