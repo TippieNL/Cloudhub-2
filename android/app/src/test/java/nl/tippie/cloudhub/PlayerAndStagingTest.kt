@@ -1,0 +1,99 @@
+package nl.tippie.cloudhub
+
+import nl.tippie.cloudhub.data.ResumePolicy
+import nl.tippie.cloudhub.work.StagingSpace
+import org.junit.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * The two decisions behind the player and the picker uploads.
+ *
+ * Both are pure functions precisely so they can be checked here: one needs a
+ * half-watched film and the other needs a full phone, and neither is something
+ * to go looking for by hand on a device.
+ */
+class ResumePolicyTest {
+
+    @Test
+    fun `the first seconds are not worth resuming`() {
+        // Reopening a video you watched two seconds of should just start it.
+        assertFalse(ResumePolicy.shouldResume(0, 600_000))
+        assertFalse(ResumePolicy.shouldResume(2_000, 600_000))
+        assertFalse(ResumePolicy.shouldResume(ResumePolicy.MIN_POSITION_MS - 1, 600_000))
+    }
+
+    @Test
+    fun `the middle of a video resumes`() {
+        assertTrue(ResumePolicy.shouldResume(ResumePolicy.MIN_POSITION_MS, 600_000))
+        assertTrue(ResumePolicy.shouldResume(300_000, 600_000))
+    }
+
+    @Test
+    fun `the last seconds are not worth resuming either`() {
+        // Resuming a film 3 seconds from the end is worse than starting it.
+        val duration = 600_000L
+        assertFalse(ResumePolicy.shouldResume(duration, duration))
+        assertFalse(ResumePolicy.shouldResume(duration - 3_000, duration))
+        assertFalse(ResumePolicy.shouldResume(duration - ResumePolicy.END_MARGIN_MS, duration))
+        assertTrue(ResumePolicy.shouldResume(duration - ResumePolicy.END_MARGIN_MS - 1, duration))
+    }
+
+    @Test
+    fun `an unknown duration still resumes`() {
+        // A live or still-loading source reports no duration; the position we
+        // saved is all the information there is, and it is enough.
+        assertTrue(ResumePolicy.shouldResume(60_000, 0))
+        assertTrue(ResumePolicy.shouldResume(60_000, -1))
+        assertFalse(ResumePolicy.shouldResume(1_000, 0))
+    }
+
+    @Test
+    fun `the stored set is bounded, oldest first`() {
+        val entries = (1..10).associate { "/video-$it.mp4" to it * 1000L }
+        val kept = ResumePolicy.prune(entries, 4)
+
+        assertEquals(4, kept.size)
+        assertEquals(listOf("/video-7.mp4", "/video-8.mp4", "/video-9.mp4", "/video-10.mp4"), kept.keys.toList())
+    }
+
+    @Test
+    fun `pruning under the limit changes nothing`() {
+        val entries = mapOf("/a.mp4" to 1L, "/b.mp4" to 2L)
+        assertEquals(entries, ResumePolicy.prune(entries, ResumePolicy.MAX_REMEMBERED))
+        assertEquals(entries, ResumePolicy.prune(entries, 2))
+        assertTrue(ResumePolicy.prune(entries, 0).isEmpty())
+    }
+}
+
+class StagingSpaceTest {
+
+    private val gb = 1024L * 1024 * 1024
+
+    @Test
+    fun `a 4 GB clip onto a phone with 1 GB free is refused`() {
+        assertFalse(StagingSpace.hasRoom(freeBytes = 1 * gb, neededBytes = 4 * gb))
+    }
+
+    @Test
+    fun `a 4 GB clip onto a phone with 8 GB free is allowed`() {
+        assertTrue(StagingSpace.hasRoom(freeBytes = 8 * gb, neededBytes = 4 * gb))
+    }
+
+    @Test
+    fun `headroom is left behind`() {
+        // Exactly enough for the file but nothing over is still a refusal: an
+        // upload must not be the thing that fills the phone.
+        assertFalse(StagingSpace.hasRoom(freeBytes = 4 * gb, neededBytes = 4 * gb))
+        assertFalse(StagingSpace.hasRoom(4 * gb + StagingSpace.HEADROOM_BYTES - 1, 4 * gb))
+        assertTrue(StagingSpace.hasRoom(4 * gb + StagingSpace.HEADROOM_BYTES, 4 * gb))
+    }
+
+    @Test
+    fun `an unknown size is allowed to try, unless the phone is already full`() {
+        assertTrue(StagingSpace.hasRoom(freeBytes = 8 * gb, neededBytes = -1))
+        assertFalse(StagingSpace.hasRoom(freeBytes = 0, neededBytes = -1))
+        assertFalse(StagingSpace.hasRoom(StagingSpace.HEADROOM_BYTES, -1))
+    }
+}

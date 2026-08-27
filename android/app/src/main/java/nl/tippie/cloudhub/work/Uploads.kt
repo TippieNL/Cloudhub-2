@@ -32,6 +32,30 @@ data class QueuedUpload(
     val queuedAt: Long = System.currentTimeMillis(),
 )
 
+/** What staging a picked file did: it worked, the phone is full, or it could not be read. */
+sealed interface StageResult {
+    data class Staged(val upload: QueuedUpload) : StageResult
+    data class NoRoom(val needed: Long, val free: Long) : StageResult
+    data object Unreadable : StageResult
+}
+
+/**
+ * Whether there is room to copy a file into app storage.
+ *
+ * Pure, so the decision can be tested without filling a disk.
+ */
+object StagingSpace {
+    /** Left free after a staged copy, so the app is not the thing that fills the phone. */
+    const val HEADROOM_BYTES = 64L * 1024 * 1024
+
+    fun hasRoom(freeBytes: Long, neededBytes: Long): Boolean {
+        // A provider that will not say how big the file is gets the benefit of
+        // the doubt: the copy itself fails cleanly if it runs out.
+        if (neededBytes < 0) return freeBytes > HEADROOM_BYTES
+        return freeBytes - neededBytes >= HEADROOM_BYTES
+    }
+}
+
 /**
  * The queue itself, persisted as one small file.
  *
@@ -128,17 +152,53 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             )
         }
 
-        /** Copy the bytes somewhere they will still exist when the worker runs. */
-        fun stage(context: Context, uri: Uri, name: String): QueuedUpload? {
-            val id = "a" + java.util.UUID.randomUUID().toString().replace("-", "").take(20)
+        /**
+         * Copy the bytes somewhere they will still exist when the worker runs.
+         *
+         * A picker URI's grant cannot be made persistable, so copying is what
+         * lets an upload survive the app closing -- but it also means a 4 GB
+         * clip needs 4 GB free while it is staged. The space is checked before
+         * the copy starts, so a phone that is full says so rather than failing
+         * part-way through with an IOException nobody can act on.
+         */
+        fun stage(context: Context, uri: Uri, name: String): StageResult {
             val dir = File(context.filesDir, "uploads").apply { mkdirs() }
+            val needed = sizeOf(context, uri)
+            val free = runCatching { dir.usableSpace }.getOrDefault(0L)
+            if (!StagingSpace.hasRoom(free, needed)) return StageResult.NoRoom(needed, free)
+
+            val id = "a" + java.util.UUID.randomUUID().toString().replace("-", "").take(20)
             val target = File(dir, id)
             return runCatching {
                 context.contentResolver.openInputStream(uri)!!.use { input ->
                     target.outputStream().use { output -> input.copyTo(output) }
                 }
-                QueuedUpload(id, name, target.absolutePath, "/", target.length())
-            }.getOrNull()
+                StageResult.Staged(QueuedUpload(id, name, target.absolutePath, "/", target.length()))
+            }.getOrElse {
+                // Half a file left in filesDir is invisible and never collected.
+                target.delete()
+                if (it is java.io.IOException && dir.usableSpace < StagingSpace.HEADROOM_BYTES)
+                    StageResult.NoRoom(needed, 0L)
+                else StageResult.Unreadable
+            }
+        }
+
+        /** What the provider says the file weighs, or -1 when it will not say. */
+        private fun sizeOf(context: Context, uri: Uri): Long {
+            runCatching {
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val index = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                    if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) {
+                        return cursor.getLong(index)
+                    }
+                }
+            }
+            runCatching {
+                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { fd ->
+                    if (fd.length >= 0) return fd.length
+                }
+            }
+            return -1L
         }
     }
 }

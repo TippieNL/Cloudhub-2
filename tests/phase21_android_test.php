@@ -33,6 +33,10 @@ $uploads = $read($kotlin.'/work/Uploads.kt');
 $app = $read($kotlin.'/App.kt');
 $main = $read($kotlin.'/MainActivity.kt');
 $tests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/ApiIntegrationTest.kt');
+$player = $read($kotlin.'/ui/PlayerScreen.kt');
+$files = $read($kotlin.'/ui/FilesScreen.kt');
+$paths = $read($android.'/res/xml/file_paths.xml');
+$pure = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/PlayerAndStagingTest.kt');
 $script = $read($root.'/tools/build-apk.sh');
 $gitignore = $read($root.'/.gitignore');
 
@@ -63,7 +67,7 @@ $checks['minSdk still covers Media3'] = str_contains($gradle, 'minSdk 24');
 $checks['thumbnails use the same client as the API'] =
     str_contains($app, 'okHttpClient { client.okHttp }');
 $checks['playback uses the same client as the API'] =
-    str_contains($read($kotlin.'/ui/ViewerScreens.kt'), 'OkHttpDataSource.Factory(client.okHttp)');
+    str_contains($player, 'OkHttpDataSource.Factory(client.okHttp)');
 $checks['the session is kept across restarts'] =
     str_contains($client, 'cookieJar(') && str_contains($stores, 'class PersistentCookieStore');
 // The server rotates the session periodically; storing whatever arrives keeps
@@ -146,7 +150,13 @@ $checks['a stalled chunk does not spin'] =
 // --- permissions -----------------------------------------------------------
 $declarations = (string)preg_replace('/<!--.*?-->/s', '', $manifest);
 $checks['no camera permission is demanded'] = !str_contains($declarations, 'android.permission.CAMERA');
-$checks['no storage permission is demanded'] = !str_contains($declarations, 'WRITE_EXTERNAL_STORAGE');
+$checks['no storage permission is demanded'] = !str_contains($declarations, 'EXTERNAL_STORAGE');
+// The system photo picker returns only what was chosen, and the camera app owns
+// the capture: none of this needs a media or recording permission.
+$checks['no media permission is demanded'] =
+    !str_contains($declarations, 'READ_MEDIA_IMAGES') && !str_contains($declarations, 'READ_MEDIA_VIDEO');
+$checks['no recording permission is demanded'] =
+    !str_contains($declarations, 'android.permission.RECORD_AUDIO');
 $checks['only network permissions are requested'] = substr_count($declarations, '<uses-permission') === 2;
 $checks['downloads go through MediaStore'] = str_contains($main, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
 
@@ -183,6 +193,93 @@ $checks['signing material is never committed'] =
 $checks['launcher icons still come from the shared generator'] =
     str_contains($read($root.'/tools/make-icons.php'), 'mipmap-')
     && is_file($android.'/res/mipmap-xxxhdpi/ic_launcher.png');
+
+// --- the video player ---------------------------------------------------------
+// A bare PlayerView plays and does nothing else; most of what a player needs is
+// already in Media3 and merely has to be switched on.
+$checks['the player offers fullscreen'] =
+    str_contains($player, 'setFullscreenButtonClickListener');
+// Back to un-maximise, not back out of the film.
+$checks['back leaves fullscreen before it leaves the video'] =
+    str_contains($player, 'BackHandler(enabled = fullscreen)');
+$checks['the screen does not dim mid-film'] =
+    str_contains($player, 'FLAG_KEEP_SCREEN_ON')
+    && str_contains($player, 'clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)');
+$checks['the player yields to calls and other apps'] =
+    str_contains($player, '.setAudioAttributes(')
+    && str_contains($player, '/* handleAudioFocus = */ true');
+$checks['subtitle tracks can be turned on'] = str_contains($player, 'setShowSubtitleButton(true)');
+$checks['there is no playlist to skip through'] =
+    str_contains($player, 'setShowNextButton(false)') && str_contains($player, 'setShowPreviousButton(false)');
+$checks['double-tap seeks by a set step'] =
+    str_contains($player, 'setSeekBackIncrementMs(SEEK_STEP_MS)')
+    && str_contains($player, 'setSeekForwardIncrementMs(SEEK_STEP_MS)');
+// An overlay drawn over the visible transport controls swallows every button
+// press, so the gesture zones exist only while the controller is hidden.
+$checks['the seek gesture is gated on the controls being hidden'] =
+    str_contains($player, 'if (!controlsVisible) {');
+
+// --- resuming a half-watched video --------------------------------------------
+$checks['positions are remembered per file'] =
+    str_contains($stores, 'fun rememberResumePosition(path: String, positionMs: Long)')
+    && str_contains($stores, 'fun resumePositionOf(path: String): Long');
+$checks['a finished video is not resumed'] =
+    str_contains($player, 'settings.forgetResumePosition(entry.path)');
+$checks['the resume decision is a pure function'] =
+    str_contains($stores, 'object ResumePolicy')
+    && str_contains($stores, 'fun shouldResume(positionMs: Long, durationMs: Long): Boolean');
+$checks['the remembered set is bounded'] =
+    str_contains($stores, 'ResumePolicy.prune(updated, ResumePolicy.MAX_REMEMBERED)');
+$checks['a resume can be declined'] = str_contains($player, 'Start over');
+
+// --- uploading from the phone ---------------------------------------------------
+// GetMultipleContents opens the document browser, not the gallery: photos were
+// technically reachable and practically not.
+$checks['the gallery picker asks for photos and videos'] =
+    str_contains($main, 'ActivityResultContracts.PickMultipleVisualMedia')
+    && str_contains($main, 'ActivityResultContracts.PickVisualMedia.ImageAndVideo');
+$checks['the file browser is still there for a PDF'] =
+    str_contains($main, 'ActivityResultContracts.GetMultipleContents()');
+// TakePicturePreview hands back a ~150px thumbnail; uploading that is a bug.
+$checks['the thumbnail-only camera contract is gone'] =
+    !str_contains($main, 'TakePicturePreview');
+$checks['photos and clips can both be captured'] =
+    str_contains($main, 'ActivityResultContracts.TakePicture()')
+    && str_contains($main, 'ActivityResultContracts.CaptureVideo()');
+$checks['captures are written through a FileProvider'] =
+    str_contains($main, 'FileProvider.getUriForFile(this, "$packageName.fileprovider"');
+$checks['the provider is declared and scoped to the cache'] =
+    str_contains($manifest, 'androidx.core.content.FileProvider')
+    && str_contains($manifest, '${applicationId}.fileprovider')
+    && str_contains($paths, '<cache-path name="captures" path="captures/" />');
+$checks['a cancelled capture leaves nothing behind'] =
+    str_contains($main, 'if (ok) enqueue(listOf(uri)) else deleteCapture(uri)');
+// Five ways to add something needs labels; a camera glyph beside a film glyph
+// says nothing about which one records.
+$checks['the add actions are labelled, not bare icons'] =
+    str_contains($files, 'SheetAction(Icons.Default.PhotoLibrary, "Photos & videos"')
+    && str_contains($files, 'SheetAction(Icons.Default.PhotoCamera, "Take a photo"')
+    && str_contains($files, 'SheetAction(Icons.Default.Videocam, "Record a video"')
+    && str_contains($files, 'SheetAction(Icons.Default.UploadFile, "Any file"')
+    && str_contains($files, 'SheetAction(Icons.Default.CreateNewFolder, "New folder"');
+
+// --- staging a large video ------------------------------------------------------
+// A picker URI cannot be made persistable, so the bytes are copied -- and a
+// 4 GB clip needs 4 GB free while it is staged.
+$checks['there is room to stage before the copy starts'] =
+    str_contains($uploads, 'object StagingSpace')
+    && str_contains($uploads, 'if (!StagingSpace.hasRoom(free, needed)) return StageResult.NoRoom(needed, free)');
+$checks['a full phone says so instead of failing obscurely'] =
+    str_contains($uploads, 'is NoRoom') || str_contains($uploads, 'StageResult.NoRoom')
+    && str_contains($main, 'Not enough space on this phone');
+$checks['a half-copied file is not left in app storage'] =
+    str_contains($uploads, 'target.delete()');
+
+// --- the tests that need no server ------------------------------------------------
+$checks['the resume and space rules are tested on every build'] =
+    str_contains($pure, 'class ResumePolicyTest') && str_contains($pure, 'class StagingSpaceTest')
+    && !str_contains($pure, 'CLOUDHUB_TEST_URL');
+
 
 $bad = false;
 foreach ($checks as $name => $ok) {

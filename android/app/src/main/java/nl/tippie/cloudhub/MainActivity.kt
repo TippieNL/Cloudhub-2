@@ -10,8 +10,10 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -21,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
+import nl.tippie.cloudhub.work.StageResult
 import nl.tippie.cloudhub.work.UploadQueue
 import nl.tippie.cloudhub.work.UploadWorker
 
@@ -43,19 +46,33 @@ class MainActivity : ComponentActivity() {
     private val pendingUploads = mutableStateListOf<Uri>()
     private var uploadTarget = "/"
 
+    /**
+     * The gallery: Android's own photo picker, showing photos and videos
+     * together. It needs no permission at all -- not READ_MEDIA_IMAGES, not
+     * READ_MEDIA_VIDEO -- because the system runs the picker and hands back
+     * only what was chosen. On older devices the contract falls back to
+     * ACTION_OPEN_DOCUMENT by itself.
+     */
+    private val pickMedia = registerForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_PICKED)
+    ) { uris ->
+        if (uris.isNotEmpty()) enqueue(uris)
+    }
+
+    /** The document browser, kept alongside the gallery: it can offer a PDF. */
     private val pickFiles = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) enqueue(uris)
     }
 
-    private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
-        if (bitmap == null) return@registerForActivityResult
-        // TakePicturePreview hands back a thumbnail-sized bitmap; writing it
-        // out keeps the upload path identical to every other source.
-        lifecycleScope.launch(Dispatchers.IO) {
-            val file = java.io.File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
-            file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, it) }
-            enqueue(listOf(Uri.fromFile(file)))
-        }
+    /** Where the camera was told to write; consumed when it reports success. */
+    private var captureUri: Uri? = null
+
+    private val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        finishCapture(ok)
+    }
+
+    private val recordVideo = registerForActivityResult(ActivityResultContracts.CaptureVideo()) { ok ->
+        finishCapture(ok)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,8 +144,14 @@ class MainActivity : ComponentActivity() {
                                 screen = Screen.SignIn
                             }
                         },
-                        onUpload = { pickFiles.launch("*/*") },
-                        onCamera = { takePhoto.launch(null) },
+                        onPickMedia = {
+                            pickMedia.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                            )
+                        },
+                        onPickFile = { pickFiles.launch("*/*") },
+                        onTakePhoto = { startCapture("jpg") { takePhoto.launch(it) } },
+                        onRecordVideo = { startCapture("mp4") { recordVideo.launch(it) } },
                         onDownload = { download(it) },
                         onShare = { sharing = it },
                     )
@@ -145,7 +168,8 @@ class MainActivity : ComponentActivity() {
                     )
 
                     is Screen.Play -> PlayerScreen(
-                        api = app.api, client = app.client, entry = current.entry,
+                        api = app.api, client = app.client, settings = app.settings,
+                        entry = current.entry,
                         onBack = { screen = Screen.Files },
                     )
                 }
@@ -171,6 +195,45 @@ class MainActivity : ComponentActivity() {
         takeSharedFiles(intent)
     }
 
+    /* ---- camera ----------------------------------------------------------- */
+
+    /**
+     * Point the camera app at a file of ours and launch it.
+     *
+     * The full-resolution frame is written to a FileProvider URI rather than
+     * returned as an extra: an Intent extra can only carry a thumbnail, and a
+     * 150px photo is not worth uploading. Neither capture needs the CAMERA
+     * permission, and recording needs no RECORD_AUDIO either -- the camera app
+     * owns the capture and holds its own permissions.
+     */
+    private fun startCapture(extension: String, launch: (Uri) -> Unit) {
+        val uri = try {
+            val dir = java.io.File(cacheDir, "captures").apply { mkdirs() }
+            val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.$extension")
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not prepare the camera: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+        captureUri = uri
+        runCatching { launch(uri) }.onFailure {
+            captureUri = null
+            Toast.makeText(this, "No camera app is available", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Queue what the camera wrote, or clean up after a cancelled capture. */
+    private fun finishCapture(ok: Boolean) {
+        val uri = captureUri ?: return
+        captureUri = null
+        if (ok) enqueue(listOf(uri)) else deleteCapture(uri)
+    }
+
+    private fun deleteCapture(uri: Uri) {
+        val name = uri.lastPathSegment?.substringAfterLast('/') ?: return
+        runCatching { java.io.File(java.io.File(cacheDir, "captures"), name).delete() }
+    }
+
     /* ---- uploads --------------------------------------------------------- */
 
     /** Files handed over by the Android share sheet. */
@@ -188,11 +251,16 @@ class MainActivity : ComponentActivity() {
     private fun enqueue(uris: List<Uri>) {
         lifecycleScope.launch(Dispatchers.IO) {
             var queued = 0
+            var full: StageResult.NoRoom? = null
+            var unreadable = 0
             for (uri in uris) {
-                val staged = UploadWorker.stage(this@MainActivity, uri, displayName(uri))
-                if (staged != null) {
-                    queue.add(staged.copy(name = displayName(uri), targetPath = uploadTarget))
-                    queued++
+                when (val staged = UploadWorker.stage(this@MainActivity, uri, displayName(uri))) {
+                    is StageResult.Staged -> {
+                        queue.add(staged.upload.copy(name = displayName(uri), targetPath = uploadTarget))
+                        queued++
+                    }
+                    is StageResult.NoRoom -> full = staged
+                    StageResult.Unreadable -> unreadable++
                 }
             }
             withContext(Dispatchers.Main) {
@@ -201,7 +269,17 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this@MainActivity,
                         if (queued == 1) "1 file queued for upload" else "$queued files queued for upload",
                         Toast.LENGTH_SHORT).show()
-                } else {
+                }
+                // Space is the actionable failure, so it is the one that is
+                // named; "nothing could be read" would send you looking in the
+                // wrong place entirely.
+                full?.let {
+                    val needed = if (it.needed >= 0) humanBytes(it.needed) else "that file"
+                    Toast.makeText(this@MainActivity,
+                        "Not enough space on this phone: $needed to copy, ${humanBytes(it.free)} free",
+                        Toast.LENGTH_LONG).show()
+                }
+                if (full == null && unreadable > 0 && queued == 0) {
                     Toast.makeText(this@MainActivity, "Nothing could be read from that", Toast.LENGTH_LONG).show()
                 }
             }
@@ -247,6 +325,11 @@ class MainActivity : ComponentActivity() {
     private fun copyToClipboard(text: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("CloudHub", text))
+    }
+
+    private companion object {
+        /** The photo picker's own ceiling; asking for more than it allows throws. */
+        const val MAX_PICKED = 30
     }
 }
 

@@ -30,6 +30,31 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("grid_view", true)
         set(value) = prefs.edit().putBoolean("grid_view", value).apply()
 
+    /* ---- where playback got to ------------------------------------------
+     *
+     * Kept as one string rather than a key per file, so the whole set can be
+     * pruned in a single write and preferences cannot grow without limit as
+     * more videos are watched.
+     */
+    fun resumePositionOf(path: String): Long = readResumeMap()[path] ?: 0L
+
+    fun rememberResumePosition(path: String, positionMs: Long) {
+        val updated = readResumeMap().toMutableMap()
+        if (positionMs <= 0) updated.remove(path) else updated[path] = positionMs
+        writeResumeMap(ResumePolicy.prune(updated, ResumePolicy.MAX_REMEMBERED))
+    }
+
+    fun forgetResumePosition(path: String) = rememberResumePosition(path, 0L)
+
+    private fun readResumeMap(): Map<String, Long> =
+        runCatching {
+            Json.decodeFromString<Map<String, Long>>(prefs.getString("resume_positions", null) ?: "{}")
+        }.getOrDefault(emptyMap())
+
+    private fun writeResumeMap(value: Map<String, Long>) {
+        runCatching { prefs.edit().putString("resume_positions", Json.encodeToString(value)).apply() }
+    }
+
     fun signOut() = prefs.edit().remove("cookies").apply()
 
     fun forgetServer() = prefs.edit().clear().apply()
@@ -135,4 +160,49 @@ object ServerAddress {
     }
 
     fun isInsecure(url: String) = url.startsWith("http://", ignoreCase = true)
+}
+
+/**
+ * Whether a remembered position is worth returning to, and how many to keep.
+ *
+ * Pure on purpose. SharedPreferences needs a device, but the rules that
+ * actually have edge cases -- the two ends of a video, and eviction -- do not,
+ * so they are separated out and tested on the host.
+ */
+object ResumePolicy {
+
+    /** Below this, starting over is what the viewer wanted anyway. */
+    const val MIN_POSITION_MS = 10_000L
+
+    /** Within this of the end, the video is finished, not paused. */
+    const val END_MARGIN_MS = 15_000L
+
+    /** Enough for a long watchlist; bounded so preferences stay small. */
+    const val MAX_REMEMBERED = 200
+
+    /**
+     * Resuming a film two seconds from the end is worse than starting it, and
+     * so is resuming ten seconds in. Both ends are excluded.
+     *
+     * A duration of zero means the player does not know it yet -- live, or not
+     * prepared -- in which case a stored position is still worth honouring.
+     */
+    fun shouldResume(positionMs: Long, durationMs: Long): Boolean {
+        if (positionMs < MIN_POSITION_MS) return false
+        if (durationMs <= 0) return true
+        return positionMs < durationMs - END_MARGIN_MS
+    }
+
+    /**
+     * Keep the most recent entries.
+     *
+     * Positions are milliseconds into a file, not timestamps, so they cannot
+     * order themselves; insertion order is the only recency available, and
+     * LinkedHashMap preserves it.
+     */
+    fun prune(entries: Map<String, Long>, limit: Int): Map<String, Long> {
+        if (limit <= 0) return emptyMap()
+        if (entries.size <= limit) return entries
+        return entries.entries.drop(entries.size - limit).associate { it.key to it.value }
+    }
 }

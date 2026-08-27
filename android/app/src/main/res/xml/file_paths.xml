@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The camera app needs somewhere to write the photo or clip it just took.
+     Scoped to one cache directory so nothing else in app storage is exposed;
+     the file is deleted once the upload completes. -->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

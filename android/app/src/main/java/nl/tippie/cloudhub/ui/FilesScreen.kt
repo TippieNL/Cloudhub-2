@@ -46,8 +46,10 @@ fun FilesScreen(
     onOpenFile: (FileEntry) -> Unit,
     onOpenTrash: () -> Unit,
     onSignOut: () -> Unit,
-    onUpload: () -> Unit,
-    onCamera: () -> Unit,
+    onPickMedia: () -> Unit,
+    onPickFile: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onRecordVideo: () -> Unit,
     onDownload: (FileEntry) -> Unit,
     onShare: (FileEntry) -> Unit,
 ) {
@@ -105,7 +107,13 @@ fun FilesScreen(
         },
         floatingActionButton = {
             if (state.canWrite && state.selected.isEmpty()) {
-                UploadFab(onUpload = onUpload, onCamera = onCamera, onNewFolder = { showNewFolder = true })
+                UploadFab(
+                    onPickMedia = onPickMedia,
+                    onPickFile = onPickFile,
+                    onTakePhoto = onTakePhoto,
+                    onRecordVideo = onRecordVideo,
+                    onNewFolder = { showNewFolder = true },
+                )
             }
         },
     ) { padding ->
@@ -299,22 +307,43 @@ private fun EmptyFolder(searching: Boolean) {
     }
 }
 
+/**
+ * The add button, and the sheet behind it.
+ *
+ * Five ways to add something is more than a column of bare icons can explain --
+ * a camera glyph and a film glyph side by side tell you nothing about which one
+ * records -- so the button opens the same labelled sheet pattern the file menu
+ * uses.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UploadFab(onUpload: () -> Unit, onCamera: () -> Unit, onNewFolder: () -> Unit) {
+private fun UploadFab(
+    onPickMedia: () -> Unit,
+    onPickFile: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onRecordVideo: () -> Unit,
+    onNewFolder: () -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
-    Column(horizontalAlignment = Alignment.End) {
-        if (open) {
-            SmallFloatingActionButton(onClick = { open = false; onNewFolder() }) {
-                Icon(Icons.Default.CreateNewFolder, "New folder")
-            }
-            Spacer(Modifier.height(8.dp))
-            SmallFloatingActionButton(onClick = { open = false; onCamera() }) {
-                Icon(Icons.Default.PhotoCamera, "Take a photo")
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-        FloatingActionButton(onClick = { if (open) { open = false; onUpload() } else open = true }) {
-            Icon(if (open) Icons.Default.Upload else Icons.Default.Add, "Upload")
+
+    FloatingActionButton(onClick = { open = true }) {
+        Icon(Icons.Default.Add, "Add")
+    }
+
+    if (open) {
+        ModalBottomSheet(onDismissRequest = { open = false }) {
+            Text(
+                "Add to this folder",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            HorizontalDivider()
+            SheetAction(Icons.Default.PhotoLibrary, "Photos & videos", onClick = { open = false; onPickMedia() })
+            SheetAction(Icons.Default.PhotoCamera, "Take a photo", onClick = { open = false; onTakePhoto() })
+            SheetAction(Icons.Default.Videocam, "Record a video", onClick = { open = false; onRecordVideo() })
+            SheetAction(Icons.Default.UploadFile, "Any file", onClick = { open = false; onPickFile() })
+            SheetAction(Icons.Default.CreateNewFolder, "New folder", onClick = { open = false; onNewFolder() })
+            Spacer(Modifier.height(20.dp))
         }
     }
 }

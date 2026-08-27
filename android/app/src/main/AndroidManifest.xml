@@ -4,11 +4,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!--
-      No CAMERA permission. The photo is taken by the camera app through
-      ACTION_IMAGE_CAPTURE, which needs no runtime permission unless this app
-      declares one; declaring it would force a prompt that buys nothing.
-      No storage permission either: downloads go through MediaStore, which
-      grants an app writes to its own Downloads entries.
+      No permissions beyond the network, deliberately.
+
+      CAMERA: the camera app takes the photo or the clip through the capture
+      intent and holds its own permissions; declaring CAMERA here would force a
+      prompt that buys nothing. RECORD_AUDIO likewise for video.
+
+      READ_MEDIA_IMAGES / READ_MEDIA_VIDEO: the system photo picker returns
+      only what the user chose, so reading the gallery wholesale is never
+      needed.
+
+      Storage: downloads go through MediaStore, which grants an app writes to
+      its own Downloads entries.
     -->
 
     <application
@@ -52,5 +59,17 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
+
+        <!-- Gives the camera app a writable URI for the photo or clip it is
+             about to record, without exposing app storage to anything else. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

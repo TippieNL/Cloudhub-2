@@ -134,23 +134,23 @@ fun FileActionsSheet(
         Text(entry.name, style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp), maxLines = 2)
         HorizontalDivider()
-        Action(Icons.Default.OpenInNew, if (entry.isDirectory) "Open" else "Preview", onOpen)
+        SheetAction(Icons.Default.OpenInNew, if (entry.isDirectory) "Open" else "Preview", onOpen)
         if (!entry.isDirectory) {
-            Action(Icons.Default.Download, "Download", onDownload)
-            Action(Icons.Default.Link, "Share link", onShare)
+            SheetAction(Icons.Default.Download, "Download", onDownload)
+            SheetAction(Icons.Default.Link, "Share link", onShare)
         }
         if (canWrite) {
-            Action(Icons.Default.DriveFileRenameOutline, "Rename", onRename)
-            Action(Icons.Default.DriveFileMove, "Move to…", onMove)
-            Action(Icons.Default.ContentCopy, "Copy to…", onCopy)
-            Action(Icons.Default.Delete, "Delete", onDelete, danger = true)
+            SheetAction(Icons.Default.DriveFileRenameOutline, "Rename", onRename)
+            SheetAction(Icons.Default.DriveFileMove, "Move to…", onMove)
+            SheetAction(Icons.Default.ContentCopy, "Copy to…", onCopy)
+            SheetAction(Icons.Default.Delete, "Delete", onDelete, danger = true)
         }
         Spacer(Modifier.height(20.dp))
     }
 }
 
 @Composable
-private fun Action(
+fun SheetAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit,

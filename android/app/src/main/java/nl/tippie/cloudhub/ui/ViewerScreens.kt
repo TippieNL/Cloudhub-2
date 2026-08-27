@@ -17,18 +17,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
-import androidx.media3.common.MediaItem
-import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import nl.tippie.cloudhub.net.CloudHubApi
-import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
 
 /**
@@ -81,52 +73,6 @@ fun ImageViewer(api: CloudHubApi, images: List<FileEntry>, startAt: Int, onBack:
                 )
             }
         }
-    }
-}
-
-/**
- * Video and audio.
- *
- * ExoPlayer fetches through the app's own OkHttp client so the request carries
- * the session cookie, and because the server answers byte ranges with 206
- * (serve_file_range in public/index.php) seeking works with no extra work.
- */
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun PlayerScreen(api: CloudHubApi, client: CloudHubClient, entry: FileEntry, onBack: () -> Unit) {
-    val context = LocalContext.current
-    val player = remember {
-        val factory = OkHttpDataSource.Factory(client.okHttp)
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(factory))
-            .build()
-            .apply {
-                setMediaItem(MediaItem.fromUri(api.streamUrl(entry.path).toString()))
-                prepare()
-                playWhenReady = true
-            }
-    }
-    DisposableEffect(Unit) { onDispose { player.release() } }
-
-    Scaffold(
-        containerColor = Color.Black,
-        topBar = {
-            TopAppBar(
-                title = { Text(entry.name, maxLines = 1) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Black.copy(alpha = 0.6f),
-                    titleContentColor = Color.White,
-                    navigationIconContentColor = Color.White,
-                ),
-            )
-        },
-    ) { padding ->
-        AndroidView(
-            factory = { PlayerView(it).apply { this.player = player; useController = true } },
-            modifier = Modifier.fillMaxSize().padding(padding),
-        )
     }
 }
 

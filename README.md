@@ -232,14 +232,55 @@ app closed.
 ### What it covers
 
 Sign in, browse with thumbnails, full-screen image viewing with pinch-zoom and
-swipe, video and audio playback with seeking, download to the device, upload
-from the camera, the gallery or the Android share sheet, new folder, rename,
-delete to trash, move, copy, recursive search, trash restore and empty, and
-share links.
+swipe, video and audio playback, download to the device, upload from the
+gallery, the camera, a recorded clip, the file browser or the Android share
+sheet, new folder, rename, delete to trash, move, copy, recursive search, trash
+restore and empty, and share links.
 
 **Not covered**, deliberately: Users, Storage usage, Storage servers and the
 security event log — four administrator screens that stay in the browser. There
 is no offline mode; the progressive web app has one.
+
+### The video player
+
+Fullscreen with a rotation to landscape and the system bars out of the way;
+**back un-maximises rather than leaving the video**, which is the thing that
+otherwise makes fullscreen annoying to use. Playback speed, subtitle tracks and
+audio/video track selection come from Media3's own menu. Double-tap the left or
+right of the picture to seek ten seconds, but only while the controls are
+hidden — an overlay on top of the transport controls would swallow every button
+press.
+
+The screen stays awake while a video is playing and stops doing so the moment
+you leave, and the player ducks and pauses for calls and other apps.
+
+Reopen a video you did not finish and it offers to carry on where you stopped,
+with **Start over** in the snackbar if you would rather not. Positions inside
+the first or last few seconds are not offered — resuming a film ten seconds
+from the end is worse than starting it — a finished video is forgotten, and the
+remembered set is capped so preferences cannot grow without limit.
+
+### Adding files from the phone
+
+The **+** button opens a labelled sheet: photos & videos, take a photo, record
+a video, any file, new folder.
+
+"Photos & videos" is Android's own photo picker, showing the gallery with
+photos and videos together and multi-select. "Take a photo" and "Record a
+video" hand off to the camera app, which writes a **full-resolution** file
+through a `FileProvider` — an earlier build used the contract that returns the
+camera's preview thumbnail, so "take a photo" uploaded something around 150
+pixels wide. "Any file" is the document browser, kept because the gallery
+cannot offer a PDF.
+
+None of this needs a permission: the system runs the picker and hands back only
+what was chosen, and the camera app owns the capture and holds its own
+permissions.
+
+Everything joins the same upload queue. Because the bytes are copied on enqueue
+— which is what lets an upload survive the app closing — a 4 GB clip needs 4 GB
+free while it is staged, so the space is checked before the copy starts and a
+full phone is told plainly rather than failing part-way through.
 
 ### How it hangs together
 
@@ -258,10 +299,11 @@ sheet is frequently not persistable.
 
 ### Permissions
 
-The app declares only `INTERNET` and `ACCESS_NETWORK_STATE`. There is no camera
-permission — the photo is taken by the camera app through an intent, which
-needs none unless this app declares one — and no storage permission, because
-downloads go through `MediaStore`.
+The app declares only `INTERNET` and `ACCESS_NETWORK_STATE`. There is no
+`CAMERA` and no `RECORD_AUDIO` — the camera app performs the capture through an
+intent and holds its own permissions — no `READ_MEDIA_IMAGES` or
+`READ_MEDIA_VIDEO`, because the system photo picker returns only what was
+chosen, and no storage permission, because downloads go through `MediaStore`.
 
 At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
 `FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an
@@ -304,7 +346,14 @@ one and resuming it from the server's offset — plus download, rename, move,
 copy, search, trash and restore, and share create and revoke. Without
 `CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
 
-The Compose UI has no such coverage: rendering it needs a device.
+Two decisions that are awkward to reach by hand are pure functions and tested
+without a server or a device: whether a saved position is worth resuming, and
+whether there is room to stage a file before the copy begins. One needs a
+half-watched film and the other needs a full phone.
+
+The Compose UI has no such coverage: rendering it needs a device. Fullscreen,
+the rotation, the double-tap zones, the gallery picker and the camera are only
+provable with the APK on a phone.
 
 ### Signing
 
