@@ -70,6 +70,23 @@ class MainActivity : ComponentActivity() {
         if (uris.isNotEmpty()) enqueue(uris)
     }
 
+    /**
+     * Asked for when an upload is first queued, not at launch.
+     *
+     * A permission prompt with no context is noise; one that appears as you
+     * start an upload explains itself. The answer changes nothing about the
+     * upload -- only whether it can be watched from outside the app.
+     */
+    private val askNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun requestNotificationsOnce() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return
+        if (app.settings.notificationsAsked) return
+        app.settings.notificationsAsked = true
+        askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     /** Where the camera was told to write; consumed when it reports success. */
     private var captureUri: Uri? = null
 
@@ -200,6 +217,7 @@ class MainActivity : ComponentActivity() {
                         onRecordVideo = { startCapture("mp4") { recordVideo.launch(it) } },
                         onDownload = { download(it) },
                         onShare = { sharing = it },
+                        onDismissUploadFailures = { queue.clearFailures() },
                     )
 
                     is Screen.Storage -> StorageScreen(
@@ -361,6 +379,7 @@ class MainActivity : ComponentActivity() {
             }
             withContext(Dispatchers.Main) {
                 if (queued > 0) {
+                    requestNotificationsOnce()
                     UploadWorker.enqueue(this@MainActivity)
                     Toast.makeText(this@MainActivity,
                         if (queued == 1) "1 file queued for upload" else "$queued files queued for upload",

@@ -54,6 +54,16 @@ class Settings(context: Context) {
     /** Forget every remembered position. */
     fun forgetAllResumePositions() = prefs.edit().remove("resume_positions").apply()
 
+    /**
+     * Whether the notification permission has been asked for.
+     *
+     * Asked once. Android stops showing the dialog after two refusals anyway,
+     * and re-prompting on every upload would be worse than not asking at all.
+     */
+    var notificationsAsked: Boolean
+        get() = prefs.getBoolean("notifications_asked", false)
+        set(value) = prefs.edit().putBoolean("notifications_asked", value).apply()
+
     /** Grid or list, remembered per install like the web app does. */
     var gridView: Boolean
         get() = prefs.getBoolean("grid_view", true)

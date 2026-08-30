@@ -109,8 +109,10 @@ fun FilesScreen(
     onRecordVideo: () -> Unit,
     onDownload: (FileEntry) -> Unit,
     onShare: (FileEntry) -> Unit,
+    onDismissUploadFailures: () -> Unit,
 ) {
     val state by model.state.collectAsState()
+    val uploads = rememberUploadState()
     val snackbar = remember { SnackbarHostState() }
     var showNewFolder by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<FileEntry?>(null) }
@@ -166,6 +168,16 @@ fun FilesScreen(
                     onNewFolder = { showNewFolder = true },
                 )
             }
+        },
+        bottomBar = {
+            // Docked rather than floating over the grid: an upload can take
+            // minutes, and a bar that hides the last row of files for all of
+            // them would be worse than no bar.
+            UploadTracker(
+                state = uploads,
+                onDismissFailures = onDismissUploadFailures,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {

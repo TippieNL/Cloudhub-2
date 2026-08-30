@@ -168,7 +168,19 @@ $checks['no media permission is demanded'] =
     !str_contains($declarations, 'READ_MEDIA_IMAGES') && !str_contains($declarations, 'READ_MEDIA_VIDEO');
 $checks['no recording permission is demanded'] =
     !str_contains($declarations, 'android.permission.RECORD_AUDIO');
-$checks['only network permissions are requested'] = substr_count($declarations, '<uses-permission') === 2;
+/*
+ * Network, and one more.
+ *
+ * POST_NOTIFICATIONS arrived with the upload progress notification and is the
+ * first runtime permission this app has asked for. The count is pinned rather
+ * than loosened to "at most a few": the point of this check is that adding one
+ * has to be a decision somebody made on purpose.
+ */
+$checks['only network permissions, and the notification, are requested'] =
+    substr_count($declarations, '<uses-permission') === 3
+    && str_contains($declarations, 'android.permission.INTERNET')
+    && str_contains($declarations, 'android.permission.ACCESS_NETWORK_STATE')
+    && str_contains($declarations, 'android.permission.POST_NOTIFICATIONS');
 $checks['downloads go through MediaStore'] = str_contains($main, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
 
 // --- the share sheet --------------------------------------------------------

@@ -3,6 +3,18 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+        Progress while files upload, so a big video can be watched finishing
+        from the home screen. A runtime permission on Android 13+, asked for
+        when an upload is first queued rather than at launch, and refusing it
+        costs only the notification: the in-app tracker is the same either way.
+
+        Deliberately NOT a foreground service: that would need
+        FOREGROUND_SERVICE_DATA_SYNC and a service type as well, to buy
+        expedited scheduling this app does not need.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!--
       No permissions beyond the network, deliberately.
 

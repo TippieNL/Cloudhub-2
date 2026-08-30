@@ -410,6 +410,41 @@ Everything joins the same upload queue. Because the bytes are copied on enqueue
 free while it is staged, so the space is checked before the copy starts and a
 full phone is told plainly rather than failing part-way through.
 
+### Watching an upload
+
+Queueing files used to end in a toast — "3 files queued" — and then silence
+until they either appeared on the server or did not. The worker had been
+publishing its position on every chunk since uploads were built; nothing read
+it.
+
+A bar now sits at the bottom of the file list whenever anything is in flight,
+with the name of the file being sent, how many are left and the overall
+fraction. Tapping it opens the queue: the file moving with its own bar and byte
+count, the rest waiting.
+
+Progress is counted in **bytes, not files**, and the denominator is the size of
+the batch when it started rather than what is left. Both matter more than they
+sound. A 10 KB note finishing beside a 4 GB video is not half the work; and
+because a finished file is *removed* from the queue, a fraction computed over
+what remains walks backwards every time something completes. Files added while
+a batch is running raise the total instead of overflowing the bar. That
+arithmetic is a pure function with tests, because the alternative is finding
+out on a phone on a slow connection.
+
+Progress also shows outside the app, as an ordinary notification updated as
+chunks land and cancelled when the queue drains. Deliberately not a foreground
+service: `setForeground()` would want `FOREGROUND_SERVICE_DATA_SYNC` and a
+service type on top, to buy expedited scheduling this app does not need. If you
+refuse the notification permission you lose the notification and nothing else —
+the in-app bar and the uploads themselves are unaffected.
+
+**A refused upload no longer vanishes.** When the server rejects a file for
+good — over quota, too large, not allowed — retrying cannot help, so the item
+was dropped and its staged bytes deleted. Silently: you saw "1 file queued", the
+file never arrived, and there was no error anywhere to explain it. Refusals are
+now kept with the server's own wording, listed under the queue, and dismissed
+when you have read them.
+
 ### How it hangs together
 
 One OkHttp client is shared by the API, by the thumbnail loader and by the
@@ -427,11 +462,16 @@ sheet is frequently not persistable.
 
 ### Permissions
 
-The app declares only `INTERNET` and `ACCESS_NETWORK_STATE`. There is no
-`CAMERA` and no `RECORD_AUDIO` — the camera app performs the capture through an
-intent and holds its own permissions — no `READ_MEDIA_IMAGES` or
-`READ_MEDIA_VIDEO`, because the system photo picker returns only what was
-chosen, and no storage permission, because downloads go through `MediaStore`.
+The app declares `INTERNET`, `ACCESS_NETWORK_STATE` and `POST_NOTIFICATIONS`.
+There is no `CAMERA` and no `RECORD_AUDIO` — the camera app performs the
+capture through an intent and holds its own permissions — no
+`READ_MEDIA_IMAGES` or `READ_MEDIA_VIDEO`, because the system photo picker
+returns only what was chosen, and no storage permission, because downloads go
+through `MediaStore`.
+
+`POST_NOTIFICATIONS` is the only one you are ever asked about, and it is asked
+for the first time you queue an upload rather than at launch, where a prompt
+with no context is just noise. Refuse it and uploads work exactly as before.
 
 At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
 `FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an

@@ -2,6 +2,8 @@ package nl.tippie.cloudhub.work
 
 import android.content.Context
 import android.net.Uri
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.work.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -30,6 +32,21 @@ data class QueuedUpload(
     val targetPath: String,
     val size: Long,
     val queuedAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * An upload the server refused for good.
+ *
+ * Over quota, too large or forbidden: retrying cannot help, so the item is
+ * dropped -- but it used to be dropped *silently*, and a file you were told was
+ * queued simply never arrived with nothing anywhere to say why. Kept until it
+ * is dismissed.
+ */
+@Serializable
+data class UploadFailure(
+    val name: String,
+    val reason: String,
+    val at: Long = System.currentTimeMillis(),
 )
 
 /** What staging a picked file did: it worked, the phone is full, or it could not be read. */
@@ -64,6 +81,7 @@ object StagingSpace {
  */
 class UploadQueue(context: Context) {
     private val file = File(context.filesDir, "upload-queue.json")
+    private val failureFile = File(context.filesDir, "upload-failures.json")
     private val json = Json { ignoreUnknownKeys = true }
 
     @Synchronized fun all(): List<QueuedUpload> =
@@ -74,8 +92,33 @@ class UploadQueue(context: Context) {
 
     @Synchronized fun remove(id: String) = write(all().filterNot { it.id == id })
 
+    /* ---- refusals -------------------------------------------------------
+     *
+     * A separate small file rather than a field on the queue: a refused upload
+     * has left the queue by definition, and the tracker still has to be able
+     * to say what happened to it.
+     */
+
+    @Synchronized fun failures(): List<UploadFailure> =
+        if (!failureFile.exists()) emptyList()
+        else runCatching { json.decodeFromString<List<UploadFailure>>(failureFile.readText()) }
+            .getOrDefault(emptyList())
+
+    @Synchronized fun recordFailure(failure: UploadFailure) {
+        // Bounded: a queue stuck against a full quota would otherwise write a
+        // record per attempt until the disk noticed.
+        val kept = (failures() + failure).takeLast(MAX_FAILURES)
+        runCatching { failureFile.writeText(json.encodeToString(kept)) }
+    }
+
+    @Synchronized fun clearFailures() { runCatching { failureFile.delete() } }
+
     private fun write(items: List<QueuedUpload>) {
         runCatching { file.writeText(json.encodeToString(items)) }
+    }
+
+    private companion object {
+        const val MAX_FAILURES = 20
     }
 }
 
@@ -96,6 +139,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         // and saves every write in this run failing with 419.
         runCatching { api.status() }.getOrElse { return Result.retry() }
 
+        ensureChannel(applicationContext)
+        // The batch's size, taken once: files leave the queue as they finish,
+        // so measuring per item would make the notification go backwards.
+        val batchBytes = queue.all().sumOf { it.size.coerceAtLeast(0) }
+        var doneBytes = 0L
+
         for (item in queue.all()) {
             val source = File(item.cachePath)
             if (!source.isFile) {
@@ -114,29 +163,105 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     if (status.received <= offset) return Result.retry()   // no progress; back off
                     offset = status.received
                     setProgress(workDataOf("id" to item.id, "sent" to offset, "total" to item.size))
+                    notify(doneBytes + offset, batchBytes, queue.all().size, item.name)
                 }
 
                 api.uploadComplete(item.id)
                 queue.remove(item.id)
                 source.delete()
+                doneBytes += item.size
             } catch (e: ApiError) {
+                clearNotification()
                 // Over quota, too large or forbidden: retrying changes nothing,
-                // so the item is dropped rather than left cycling forever.
+                // so the item is dropped rather than left cycling forever --
+                // but recorded on the way out. Dropping it silently meant a
+                // file you were told was queued never arrived, with nothing
+                // anywhere to explain it.
                 if (e.isOutOfSpace || e.status == 413 || e.isForbidden) {
+                    queue.recordFailure(
+                        UploadFailure(item.name, e.message ?: "The server refused this file"),
+                    )
                     queue.remove(item.id)
                     source.delete()
                     continue
                 }
                 return Result.retry()
             } catch (e: Exception) {
+                // The notification is ongoing; leaving it up over a network
+                // outage would look like an upload that never moves.
+                clearNotification()
                 return Result.retry()   // the network went away; try again later
             }
         }
+        clearNotification()
         return Result.success()
     }
 
+    /* ---- the notification -------------------------------------------------
+     *
+     * A plain notification, updated as chunks land and cancelled when the queue
+     * empties -- not a foreground service. setForeground() would additionally
+     * need FOREGROUND_SERVICE_DATA_SYNC and a service type on targetSdk 34, and
+     * it buys expedited scheduling this does not need; an ordinary notification
+     * shows the same progress for one permission instead of two.
+     *
+     * Every call is best-effort. POST_NOTIFICATIONS can be refused, and an
+     * upload must not fail because nobody wanted to be told about it.
+     */
+
+    private fun notify(done: Long, total: Long, filesLeft: Int, name: String?) {
+        val manager = NotificationManagerCompat.from(applicationContext)
+        if (!manager.areNotificationsEnabled()) return
+
+        val percent = if (total <= 0) 0 else ((done * 100) / total).toInt().coerceIn(0, 100)
+        val text = buildString {
+            name?.let { append(it) }
+            if (filesLeft > 1) {
+                if (isNotEmpty()) append(" · ")
+                append("$filesLeft files left")
+            }
+        }.ifEmpty { "Uploading" }
+
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle("Uploading to CloudHub — $percent%")
+            .setContentText(text)
+            .setProgress(100, percent, false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        runCatching { manager.notify(NOTIFICATION_ID, notification) }
+    }
+
+    private fun clearNotification() {
+        runCatching { NotificationManagerCompat.from(applicationContext).cancel(NOTIFICATION_ID) }
+    }
+
     companion object {
-        private const val WORK = "cloudhub-uploads"
+        /** The unique work name, also how the tracker finds this worker. */
+        const val WORK = "cloudhub-uploads"
+
+        private const val CHANNEL = "cloudhub-uploads"
+        private const val NOTIFICATION_ID = 4021
+
+        /**
+         * Created once, before anything is posted.
+         *
+         * On API 26+ a notification to a channel that does not exist is
+         * dropped silently, which is a maddening thing to debug.
+         */
+        fun ensureChannel(context: Context) {
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) return
+            val channel = android.app.NotificationChannel(
+                CHANNEL, "Uploads", android.app.NotificationManager.IMPORTANCE_LOW,
+            ).apply { description = "Progress while files are being uploaded" }
+            runCatching {
+                context.getSystemService(android.app.NotificationManager::class.java)
+                    ?.createNotificationChannel(channel)
+            }
+        }
 
         fun enqueue(context: Context) {
             WorkManager.getInstance(context).enqueueUniqueWork(
