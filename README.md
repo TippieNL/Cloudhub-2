@@ -294,6 +294,17 @@ it lives, all from the listing the app already has.
 Folders have no preview image: CloudHub's listing does not carry one, and
 building a mosaic would mean one extra request per folder on screen.
 
+### Colours
+
+The theme names every role it uses, including the ones nothing obviously
+touches. That is not tidiness: `lightColorScheme()` fills anything left unset
+with Material's *baseline* palette, which is purple. `surfaceContainer` is what
+a `DropdownMenu` paints with, so an incomplete scheme gave this blue app a
+lavender overflow menu, and `surfaceTint` put a lilac cast on every raised
+surface. A unit test fails the build if a role is ever left at a tinted
+baseline value again — matching a *neutral* baseline, like pure white for the
+lowest container in a light theme, is a coincidence and allowed.
+
 ### Signing in
 
 A gradient background with two soft colour fields drifting behind a translucent
@@ -346,6 +357,10 @@ back 507. The per-account route never forces a fresh measurement (walking the
 whole store stays an admin action), and it sweeps the ledger exactly as the
 quota check does, so the number on the screen is the number that will refuse an
 upload.
+
+The overflow menu carries an icon on every item and marks the sort actually in
+force — three lines reading "Sort by …" with nothing to tell them apart left you
+unable to see how a folder was sorted without changing it to find out.
 
 **Settings** covers what previously needed a reinstall: the account and its
 role, changing your own password, the server address and how to change it, the

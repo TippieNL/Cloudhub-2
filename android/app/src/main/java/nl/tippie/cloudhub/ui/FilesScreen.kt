@@ -38,15 +38,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PieChart
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SortByAlpha
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
@@ -56,6 +65,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
@@ -65,6 +76,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import nl.tippie.cloudhub.net.CloudHubApi
@@ -126,6 +138,7 @@ fun FilesScreen(
                 folder = state.path.substringAfterLast('/').ifEmpty { "CloudHub" },
                 atRoot = state.path == "/",
                 grid = state.grid,
+                sort = state.sort,
                 scrollBehavior = scrollBehavior,
                 overflowOpen = overflow,
                 onUp = { model.open(state.path.substringBeforeLast('/', "").ifEmpty { "/" }) },
@@ -549,6 +562,7 @@ private fun BrowserTopBar(
     folder: String,
     atRoot: Boolean,
     grid: Boolean,
+    sort: FilesState.Sort,
     scrollBehavior: TopAppBarScrollBehavior,
     overflowOpen: Boolean,
     onUp: () -> Unit,
@@ -595,28 +609,125 @@ private fun BrowserTopBar(
                 }
             }
             IconButton(onClick = { onOverflow(true) }) { Icon(Icons.Default.MoreVert, "More") }
-            DropdownMenu(expanded = overflowOpen, onDismissRequest = { onOverflow(false) }) {
-                DropdownMenuItem(text = { Text("Refresh") },
-                    onClick = { onOverflow(false); onRefresh() })
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Sort by name") },
-                    onClick = { onOverflow(false); onSort(FilesState.Sort.NAME) })
-                DropdownMenuItem(text = { Text("Sort by newest") },
-                    onClick = { onOverflow(false); onSort(FilesState.Sort.NEWEST) })
-                DropdownMenuItem(text = { Text("Sort by largest") },
-                    onClick = { onOverflow(false); onSort(FilesState.Sort.LARGEST) })
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Trash") },
-                    onClick = { onOverflow(false); onTrash() })
-                DropdownMenuItem(text = { Text("Storage") },
-                    onClick = { onOverflow(false); onStorage() })
-                DropdownMenuItem(text = { Text("Settings") },
-                    onClick = { onOverflow(false); onSettings() })
-                HorizontalDivider()
-                DropdownMenuItem(text = { Text("Sign out") },
-                    onClick = { onOverflow(false); onSignOut() })
+            /*
+             * The overflow menu.
+             *
+             * Every item carries an icon, and the sort you are actually on is
+             * marked -- three lines reading "Sort by ..." with nothing to
+             * distinguish them left you unable to tell what the folder was
+             * sorted by without changing it to find out.
+             *
+             * Offset so the menu sits inboard of the screen edge rather than
+             * flush against it.
+             */
+            DropdownMenu(
+                expanded = overflowOpen,
+                onDismissRequest = { onOverflow(false) },
+                offset = DpOffset(x = (-8).dp, y = 4.dp),
+                modifier = Modifier.widthIn(min = 220.dp),
+            ) {
+                MenuItem(Icons.Default.Refresh, "Refresh") { onOverflow(false); onRefresh() }
+
+                MenuHeading("Sort by")
+                SortItem("Name", Icons.Default.SortByAlpha, sort == FilesState.Sort.NAME) {
+                    onOverflow(false); onSort(FilesState.Sort.NAME)
+                }
+                SortItem("Newest", Icons.Default.Schedule, sort == FilesState.Sort.NEWEST) {
+                    onOverflow(false); onSort(FilesState.Sort.NEWEST)
+                }
+                SortItem("Largest", Icons.Default.DataUsage, sort == FilesState.Sort.LARGEST) {
+                    onOverflow(false); onSort(FilesState.Sort.LARGEST)
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                MenuItem(Icons.Default.Delete, "Trash") { onOverflow(false); onTrash() }
+                MenuItem(Icons.Default.PieChart, "Storage") { onOverflow(false); onStorage() }
+                MenuItem(Icons.Default.Settings, "Settings") { onOverflow(false); onSettings() }
+
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                MenuItem(Icons.AutoMirrored.Filled.Logout, "Sign out", danger = true) {
+                    onOverflow(false); onSignOut()
+                }
             }
         },
+    )
+}
+
+/**
+ * One row of the overflow menu.
+ *
+ * A leading icon on every item, so the menu is scannable by shape rather than
+ * by reading four words at a time.
+ */
+@Composable
+private fun MenuItem(
+    icon: ImageVector,
+    label: String,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    DropdownMenuItem(
+        text = {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (danger) MaterialTheme.colorScheme.error else Color.Unspecified,
+            )
+        },
+        leadingIcon = { Icon(icon, null, tint = tint) },
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 14.dp),
+    )
+}
+
+/**
+ * A sort option, with a tick when it is the one in force.
+ *
+ * The trailing slot rather than the leading one: the icons stay in a column so
+ * the list still scans, and the tick reads as state rather than as another
+ * thing to press.
+ */
+@Composable
+private fun SortItem(
+    label: String,
+    icon: ImageVector,
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (active) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            )
+        },
+        leadingIcon = {
+            Icon(
+                icon, null,
+                tint = if (active) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        trailingIcon = {
+            if (active) Icon(Icons.Default.Check, "Sorted by $label", tint = MaterialTheme.colorScheme.primary)
+        },
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 14.dp),
+    )
+}
+
+/** A quiet label over a group, so "Name" is obviously a sort and not a screen. */
+@Composable
+private fun MenuHeading(text: String) {
+    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 2.dp, bottom = 4.dp),
     )
 }
 

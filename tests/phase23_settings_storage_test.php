@@ -24,6 +24,7 @@ $api = $readKt('net/CloudHubApi.kt');
 $main = $readKt('MainActivity.kt');
 $files = $readKt('ui/FilesScreen.kt');
 $meterTests = $read('android/app/src/test/java/nl/tippie/cloudhub/StorageMeterTest.kt');
+$paletteTests = $read('android/app/src/test/java/nl/tippie/cloudhub/ThemePaletteTest.kt');
 
 $checks = [];
 
@@ -92,10 +93,10 @@ $checks['nearly-full is a shared threshold, not a magic number in the UI'] =
 
 $checks['storage is reachable and its own screen'] =
     str_contains($storage, 'fun StorageScreen(')
-    && str_contains($files, 'DropdownMenuItem(text = { Text("Storage") }');
+    && str_contains($files, 'MenuItem(Icons.Default.PieChart, "Storage")');
 $checks['settings is reachable and its own screen'] =
     str_contains($settings, 'fun SettingsScreen(')
-    && str_contains($files, 'DropdownMenuItem(text = { Text("Settings") }');
+    && str_contains($files, 'MenuItem(Icons.Default.Settings, "Settings")');
 // A 403 on the admin report must not replace a screen that was working.
 $checks['a non-admin sees their own figures, not an error'] =
     str_contains($storage, 'if (own.isAdmin)')
@@ -130,6 +131,45 @@ $checks['settings reports the queue and the cache it already has'] =
 $checks['one byte formatter, not two'] =
     str_contains($storage, 'humanBytes(') && !str_contains($storage, 'fun humanBytes')
     && str_contains($settings, 'humanBytes(') && !str_contains($settings, 'fun humanBytes');
+
+/* --- the palette, and the menu it was showing through --------------------------
+ *
+ * Theme.kt set twenty roles and left thirteen to lightColorScheme()'s defaults
+ * -- which are Material's *baseline purple*, not neutrals. surfaceContainer is
+ * what a DropdownMenu paints with, so the overflow menu came out lavender on a
+ * blue app, and surfaceTint lilaced every raised surface. Five releases went
+ * out that way: it compiled perfectly and only showed on one screen.
+ */
+$checks['no colour role is left to Material to fill in'] =
+    str_contains($theme, 'surfaceContainer =') && str_contains($theme, 'surfaceContainerLow =')
+    && str_contains($theme, 'surfaceContainerHigh =') && str_contains($theme, 'surfaceContainerHighest =')
+    && str_contains($theme, 'surfaceContainerLowest =') && str_contains($theme, 'surfaceTint =')
+    && str_contains($theme, 'inverseSurface =') && str_contains($theme, 'tertiary =');
+$checks['a forgotten role fails the build rather than shipping'] =
+    str_contains($paletteTests, 'class ThemePaletteTest')
+    && str_contains($paletteTests, 'fun leftPurple(');
+// White matching the baseline is a coincidence, not a hole; lavender is not.
+$checks['the palette check does not fire on a neutral coincidence'] =
+    str_contains($paletteTests, 'isNeutral()')
+    && str_contains($paletteTests, 'the check itself notices a tinted baseline value');
+$checks['the elevation tint is the brand, not a stranger'] =
+    str_contains($theme, 'surfaceTint = Brand') && str_contains($theme, 'surfaceTint = BrandDark');
+
+/* --- the overflow menu ------------------------------------------------------- */
+
+$checks['every menu item carries an icon'] =
+    str_contains($files, 'private fun MenuItem(')
+    && str_contains($files, 'leadingIcon = { Icon(icon, null, tint = tint) }');
+// Three lines reading "Sort by ..." with nothing to tell them apart left you
+// unable to see what a folder was sorted by without changing it to find out.
+$checks['the sort in force is marked'] =
+    str_contains($files, 'private fun SortItem(')
+    && str_contains($files, 'sort == FilesState.Sort.NAME')
+    && str_contains($files, 'Icons.Default.Check, "Sorted by $label"');
+$checks['the menu is grouped rather than a flat list'] =
+    str_contains($files, 'private fun MenuHeading(') && str_contains($files, 'MenuHeading("Sort by")');
+$checks['the menu does not hug the screen edge'] =
+    str_contains($files, 'offset = DpOffset(x = (-8).dp, y = 4.dp)');
 
 $bad = false;
 foreach ($checks as $name => $ok) {

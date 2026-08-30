@@ -21,17 +21,47 @@ private val BrandDark = Color(0xFF3296E6)
 private val Accent = Color(0xFF6F5BE8)
 private val AccentDark = Color(0xFF8E7CF5)
 
-private val Light = lightColorScheme(
+/*
+ * Every role, not most of them.
+ *
+ * A scheme built with lightColorScheme() keeps Material's *baseline* purple for
+ * anything left unset -- and that baseline is not neutral. surfaceContainer is
+ * what a DropdownMenu paints with, so the overflow menu came out lavender on a
+ * blue app; surfaceTint washes every elevated surface with #6750A4. Leaving a
+ * role out is not "use the default", it is "use somebody else's brand".
+ */
+internal val Light = lightColorScheme(
     primary = Brand,
     onPrimary = Color.White,
     primaryContainer = Color(0xFFD6E9FA),
     onPrimaryContainer = Color(0xFF06375F),
     secondary = Accent,
     onSecondary = Color.White,
+    tertiary = Color(0xFF2F7D63),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFD3EFE4),
+    onTertiaryContainer = Color(0xFF0C3A2C),
     background = Color(0xFFF7F7F8),
     surface = Color(0xFFFFFFFF),
     surfaceVariant = Color(0xFFE9EAEE),
     onSurfaceVariant = Color(0xFF5A5C63),
+    // The elevation tint. Left unset it is Material's purple, which is what
+    // gave every raised surface a lilac cast.
+    surfaceTint = Brand,
+    // The container ramp, lightest to darkest. Menus, sheets and search fields
+    // pick from these, so they are the difference between a component looking
+    // like part of this app or part of the sample one.
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFFAFAFB),
+    surfaceContainer = Color(0xFFF4F5F7),
+    surfaceContainerHigh = Color(0xFFEEEFF2),
+    surfaceContainerHighest = Color(0xFFE8E9ED),
+    surfaceBright = Color(0xFFFFFFFF),
+    surfaceDim = Color(0xFFDEDFE3),
+    inverseSurface = Color(0xFF2E2F33),
+    inverseOnSurface = Color(0xFFF2F2F4),
+    inversePrimary = BrandDark,
+    scrim = Color(0xFF000000),
     outline = Color(0xFF9A9CA3),
     outlineVariant = Color(0xFFD6D7DC),
     onBackground = Color(0xFF18181B),
@@ -42,17 +72,33 @@ private val Light = lightColorScheme(
     onErrorContainer = Color(0xFF6E1610),
 )
 
-private val Dark = darkColorScheme(
+internal val Dark = darkColorScheme(
     primary = BrandDark,
     onPrimary = Color(0xFF04243F),
     primaryContainer = Color(0xFF12456E),
     onPrimaryContainer = Color(0xFFD3E7F9),
     secondary = AccentDark,
     onSecondary = Color(0xFF1B1440),
+    tertiary = Color(0xFF6FCFAA),
+    onTertiary = Color(0xFF04291E),
+    tertiaryContainer = Color(0xFF14503D),
+    onTertiaryContainer = Color(0xFFCDEEE0),
     background = Color(0xFF151515),
     surface = Color(0xFF1D1D1D),
     surfaceVariant = Color(0xFF2C2C2E),
     onSurfaceVariant = Color(0xFFB4B5BA),
+    surfaceTint = BrandDark,
+    surfaceContainerLowest = Color(0xFF101010),
+    surfaceContainerLow = Color(0xFF1A1A1A),
+    surfaceContainer = Color(0xFF212123),
+    surfaceContainerHigh = Color(0xFF2A2A2C),
+    surfaceContainerHighest = Color(0xFF343436),
+    surfaceBright = Color(0xFF393939),
+    surfaceDim = Color(0xFF121212),
+    inverseSurface = Color(0xFFE6E6E8),
+    inverseOnSurface = Color(0xFF1D1D1D),
+    inversePrimary = Brand,
+    scrim = Color(0xFF000000),
     outline = Color(0xFF75767C),
     outlineVariant = Color(0xFF3A3A3D),
     onBackground = Color(0xFFF3F3F3),
