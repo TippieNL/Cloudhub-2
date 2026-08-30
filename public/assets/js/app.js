@@ -855,6 +855,12 @@ async function download(p) {
  * A share link is a public URL: anyone holding it can view the file without an
  * account, so the link, its lifetime and the way to revoke it are all shown
  * explicitly rather than silently copied to the clipboard.
+ *
+ * Two URLs come back and they are not interchangeable. `url` ends in the
+ * file's own name and hands over the file itself, so it works in an <img>
+ * tag, in `curl -O` and wherever a link is judged by its extension -- that is
+ * the one copied. `pageUrl` is the viewer page, offered as "Open preview page"
+ * for when a page reads better than a raw file.
  */
 const shareUI = {
     overlay: $('#share-overlay'),
@@ -921,7 +927,7 @@ async function shareCreate(hours) {
         })).json();
         shareUI.token = d.token;
         shareUI.url.value = d.url;
-        shareUI.open.href = d.url;
+        shareUI.open.href = d.pageUrl || d.url;
         shareUI.note.textContent = formatExpiry(d.expiresAt);
         shareUI.result.hidden = false;
         shareUI.open.hidden = false;

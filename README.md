@@ -23,16 +23,35 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
 
 ## Public share links
 
-Any file can be handed out as a URL that works without an account. Images, GIFs,
-video and audio open in a viewer page; everything else downloads.
+Any file can be handed out as a URL that works without an account.
 
-Three public routes back a token:
+**The link ends in the file's own name** — `…/share/{token}/holiday.mp4` — and
+it hands over the file itself. That is what makes it work in an `<img>` tag, in
+`curl -O`, and in the clients that decide what a link is by looking at its
+extension; it is also the name a browser suggests when the recipient saves it,
+where the old `/raw` suggested a file called `raw`.
+
+The viewer page, with the name, the size, the expiry and a download button, is
+still there under the bare token, and the Share dialog offers it beside the file
+link as **Open preview page**.
 
 | Route | Purpose |
 |---|---|
+| `/share/{token}/holiday.mp4` | The file itself, inline and range-capable — the link handed out |
 | `/share/{token}` | Viewer page for media, direct download otherwise |
-| `/share/{token}/raw` | The bytes, inline and range-capable |
-| `/share/{token}/download` | The bytes, as an attachment |
+| `/share/{token}/download/holiday.mp4` | The bytes, as an attachment |
+| `/share/{token}/raw`, `/share/{token}/download` | The original spellings; links made before names still work |
+
+The name is decoration — the token is the whole credential — but it is not
+allowed to lie: a URL edited to end in `invoice.pdf` is redirected to the name
+the file actually has rather than served under a name of the sender's choosing.
+
+One consequence worth knowing if you deploy behind your own rules: because the
+file's name is now part of the path, `/share/` has to be exempted from the
+"never serve `*.log`, `*.ini`, `*.sql`" rules, or sharing `notes.log` becomes a
+403. The project's `.htaccess`, `router.php` and
+`deploy/nginx-security.conf.example` all do this; a rule of your own needs the
+same exemption.
 
 Possession of the token is the credential, so these routes sit outside the
 authenticated API guard and no session is started for a visitor — a share link

@@ -40,6 +40,20 @@ function dev_content_type(string $file): string
 
 
 
+/*
+ * Public share links, before the deny rules.
+ *
+ * A share URL now ends in the shared file's own name, and the rules below
+ * refuse anything ending .log, .ini, .sql and friends -- so sharing notes.log
+ * would 403 here while working in production, which is the worst way for a
+ * difference between the two to show up. /share/... never names a file under
+ * the project root, so there is nothing here for those rules to protect.
+ */
+if (preg_match('#^/share/[A-Za-z0-9_-]{20,128}(?:/|$)#', $uri)) {
+    require __DIR__ . '/public/index.php';
+    return true;
+}
+
 // The built-in server does not read .htaccess, so mirror its deny rules here.
 // Without this the project root — which is the document root in this layout —
 // hands out .env, the database schema and the PHP sources verbatim.

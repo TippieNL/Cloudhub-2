@@ -54,6 +54,20 @@ final class Client
         return $this->put('/api/uploads/chunk', $bytes, ['id' => $id], ['X-Upload-Offset: '.$offset]);
     }
 
+    /**
+     * A plain GET of a URL exactly as it was handed out.
+     *
+     * Everything else here goes through the portable ?route= form, which never
+     * touches the web server's own path handling -- so it cannot see a share
+     * link refused by a deny rule, or a redirect on a name that does not match
+     * the file. Public share URLs are clean paths given to other people, and
+     * this fetches them the way those people's browsers will.
+     */
+    public function fetchUrl(string $url, array $headers = []): Response
+    {
+        return $this->perform($url, 'GET', array_merge(['Accept: */*'], $headers), null);
+    }
+
     /** A partial fetch, for the streaming route video seeking relies on. */
     public function getRange(string $route, array $query, int $from, int $to): Response
     {
@@ -120,6 +134,11 @@ final class Client
         }
         foreach ($extraHeaders as $header) $headers[] = $header;
 
+        return $this->perform($url, $method, $headers, $payload);
+    }
+
+    private function perform(string $url, string $method, array $headers, ?string $payload): Response
+    {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,

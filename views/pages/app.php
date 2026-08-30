@@ -191,9 +191,10 @@
                 </label>
 
                 <div id="share-result" class="share-result" hidden>
-                    <label class="share-field">Shareable URL
+                    <label class="share-field">Link to the file
                         <input id="share-url" type="text" readonly spellcheck="false">
                     </label>
+                    <p class="muted">Ends in the file&rsquo;s name, and opens the file itself.</p>
                     <p id="share-expiry-note" class="muted"></p>
                 </div>
 
@@ -201,7 +202,7 @@
 
                 <div class="modal-actions">
                     <button id="share-revoke" class="danger-button" type="button" hidden>Revoke</button>
-                    <a id="share-open" class="share-open-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open</a>
+                    <a id="share-open" class="share-open-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open preview page</a>
                     <button id="share-copy" class="primary-button" type="button" disabled>Copy link</button>
                 </div>
             </div>

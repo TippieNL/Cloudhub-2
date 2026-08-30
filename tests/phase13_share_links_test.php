@@ -26,10 +26,17 @@ $checks = [];
 $checks['share routes are outside the authenticated guard'] =
     str_contains($index, "\$isProtectedApi = (str_starts_with(\$path, '/api/')&&!\$isAuthEndpoint) || str_starts_with(\$path, '/webdav')")
     && !str_contains($index, "str_starts_with(\$path, '/share')&&\$isProtectedApi");
-$checks['viewer, raw and download variants are routed'] =
-    (bool)preg_match('#\^/share/\(\[A-Za-z0-9_-\]\{20,128\}\)\(\?:/\(raw\|download\)\)\?\$#', $index);
+/*
+ * Deliberately updated when share URLs gained the file's name: the pattern now
+ * also carries a trailing name, and lives in one constant because the routing
+ * and the "no session for this visitor" test must never disagree.
+ */
+$checks['viewer, raw, download and named variants are routed'] =
+    str_contains($index, "const SHARE_ROUTE = '#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?(?:/([^/]+))?\$#';")
+    && substr_count($index, 'preg_match(SHARE_ROUTE') === 2;
 $checks['anonymous viewers get no session'] =
-    str_contains($index, '$isPublicShare') && str_contains($index, 'if (!$isPublicShare) Auth::startSession($config);');
+    str_contains($index, '$isPublicShare = (bool)preg_match(SHARE_ROUTE, $path);')
+    && str_contains($index, 'if (!$isPublicShare) Auth::startSession($config);');
 
 // --- token, expiry, revocation ------------------------------------------
 $checks['tokens are 256 bits of randomness'] = str_contains($index, 'random_bytes(32)');
@@ -55,8 +62,10 @@ $checks['only image, video and audio render inline'] =
     && str_contains($index, "return 'video'") && str_contains($index, "return 'audio'");
 $checks['svg is never treated as inline media'] =
     (bool)preg_match("/if \(\\\$mime === 'image\/svg\\+xml'\)return 'other';/", $index);
+// Named URLs serve inline too, so the test is the download variant rather
+// than the raw one; what may render inline is still share_media_kind()'s call.
 $checks['non-media is served as an attachment'] =
-    str_contains($index, "\$disposition = (\$variant === 'raw' && \$kind !== 'other')?'inline':'attachment';");
+    str_contains($index, "\$disposition = (\$variant !== 'download' && \$kind !== 'other')?'inline':'attachment';");
 $checks['raw bytes keep the sandbox CSP'] =
     (bool)preg_match("/default-src 'none'; sandbox;.*script-src 'none'/", $index);
 $checks['shared links are not indexable'] = str_contains($index, 'X-Robots-Tag: noindex, nofollow');

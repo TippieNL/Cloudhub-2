@@ -268,6 +268,197 @@ scenario('a revoked link stops working', function () use ($client, $base, $uploa
     check('the link is dead', $raw->status === 404, $raw->describe());
 });
 
+/* ---- share links that carry the file's name -------------------------------
+ *
+ * The link handed out ends in the file's own name and returns the file
+ * itself, so it works in an <img> tag, in `curl -O` and in the clients that
+ * decide what a link is by looking at its extension.
+ *
+ * These go through Client::fetchUrl(), which fetches the URL exactly as the
+ * API handed it out -- a clean path through the web server's own routing,
+ * rather than the ?route= form everything else here uses. That difference is
+ * the point: a share link is a URL given to someone else's browser.
+ */
+
+/** Put a file on the server and hand back its path. */
+$put = function (string $name, string $bytes) use ($client, $scratch): string {
+    $init = $client->post('/api/uploads/init', [
+        'targetPath' => $scratch, 'name' => $name, 'size' => strlen($bytes),
+        'uploadId' => 'named'.bin2hex(random_bytes(8)), 'conflict' => 'overwrite',
+    ]);
+    $id = $init->json['id'] ?? '';
+    if ($id === '') return '';
+    $client->putChunk($id, 0, $bytes);
+    $client->post('/api/uploads/complete', ['id' => $id]);
+    return $scratch.'/'.$name;
+};
+
+scenario('the link ends in the file\'s name and returns the file', function () use ($client, $base, $put) {
+    // Not a real photograph, but named like one: what a browser is told a
+    // shared file is comes from its extension, not from sniffing its bytes.
+    $jpeg = "\xFF\xD8\xFF\xE0".str_repeat("\x42", 2048)."\xFF\xD9";
+    $path = $put('holiday.jpg', $jpeg);
+    check('the photo uploads', $path !== '');
+    if ($path === '') return;
+
+    $made = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24]);
+    $url = $made->json['url'] ?? '';
+    check('a link comes back', $url !== '', $made->describe());
+    check('and it ends in the file name', str_ends_with($url, '/holiday.jpg'), $url);
+    check('the viewer page is offered separately',
+        ($made->json['pageUrl'] ?? '') !== '' && !str_ends_with((string)($made->json['pageUrl'] ?? ''), '.jpg'),
+        (string)($made->json['pageUrl'] ?? ''));
+    if ($url === '') return;
+
+    $anon = new Client($base);
+    $got = $anon->fetchUrl($url);
+    check('an anonymous visitor gets the file', $got->status === 200, $got->describe());
+    check('as an image', $got->header('Content-Type') === 'image/jpeg', (string)$got->header('Content-Type'));
+    check('shown rather than downloaded',
+        str_starts_with((string)$got->header('Content-Disposition'), 'inline'),
+        (string)$got->header('Content-Disposition'));
+    check('and the bytes are the file', $got->body === $jpeg, strlen($got->body).' bytes');
+
+    /*
+     * Link previews and video players fetch these, and a share link is public:
+     * a session started here would put a cookie on every anonymous viewer and
+     * leave a session file per view. The route pattern doing double duty is
+     * what prevents it, and only a real fetch can tell.
+     */
+    check('and no session was started for them', $got->header('Set-Cookie') === null,
+        (string)$got->header('Set-Cookie'));
+
+    // The viewer page is the other half: it loads the picture from the named
+    // URL, which is what makes "Save image as" offer holiday.jpg rather than
+    // the "raw" it used to.
+    $page = $anon->fetchUrl((string)($made->json['pageUrl'] ?? ''));
+    check('the viewer page still renders', $page->status === 200
+        && str_starts_with((string)$page->header('Content-Type'), 'text/html'), $page->describe());
+    check('and loads the picture from its named URL',
+        str_contains($page->body, 'src="'.parse_url($url, PHP_URL_PATH).'"'),
+        substr($page->body, 0, 0).parse_url($url, PHP_URL_PATH));
+    check('the download button carries the name too',
+        str_contains($page->body, '/download/holiday.jpg"'));
+    check('a link preview is pointed at the file itself',
+        str_contains($page->body, '<meta property="og:image" content="'.$url.'">'), $url);
+    // A page that renders with a PHP notice in it is a page nobody looked at.
+    check('and nothing leaked into the page',
+        !str_contains($page->body, 'Warning:') && !str_contains($page->body, 'Notice:'));
+});
+
+scenario('a shared video can still be seeked through the pretty URL', function () use ($client, $base, $put) {
+    $samples = 4000;
+    $pcm = str_repeat("\x00\x00", $samples);
+    $wav = 'RIFF'.pack('V', 36 + strlen($pcm)).'WAVEfmt '.pack('VvvVVvv', 16, 1, 1, 8000, 16000, 2, 16)
+        .'data'.pack('V', strlen($pcm)).$pcm;
+    $path = $put('clip.wav', $wav);
+    if ($path === '') { check('the clip uploads', false); return; }
+
+    $url = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24])->json['url'] ?? '';
+    check('the link ends in .wav', str_ends_with((string)$url, '/clip.wav'), (string)$url);
+    if ($url === '') return;
+
+    $anon = new Client($base);
+    $part = $anon->fetchUrl($url, ['Range: bytes=10-29']);
+    check('a range is 206', $part->status === 206, $part->describe());
+    check('and is exactly the bytes asked for', $part->body === substr($wav, 10, 20),
+        strlen($part->body).' bytes');
+});
+
+scenario('a name that is not the file\'s bounces to the one that is', function () use ($client, $base, $put) {
+    // The token is the credential; the name is decoration -- but decoration is
+    // not allowed to claim the file is a PDF when it is a JPEG.
+    $path = $put('receipt.jpg', str_repeat("\x11", 64));
+    if ($path === '') { check('the file uploads', false); return; }
+
+    $made = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24]);
+    $token = $made->json['token'] ?? '';
+    if ($token === '') { check('a link comes back', false, $made->describe()); return; }
+
+    $anon = new Client($base);
+    $lie = $anon->fetchUrl($base.'/share/'.$token.'/invoice.pdf');
+    check('the made-up name redirects', $lie->status === 302, $lie->describe());
+    check('to the name the file really has',
+        str_ends_with((string)$lie->header('Location'), '/receipt.jpg'), (string)$lie->header('Location'));
+
+    $asked = $anon->fetchUrl($base.'/share/'.$token.'/download/invoice.pdf');
+    check('and a download keeps being a download',
+        $asked->status === 302 && str_contains((string)$asked->header('Location'), '/download/receipt.jpg'),
+        $asked->status.' '.(string)$asked->header('Location'));
+});
+
+scenario('links made before the name was added still work', function () use ($client, $base, $put) {
+    $path = $put('legacy.jpg', str_repeat("\x22", 32));
+    if ($path === '') { check('the file uploads', false); return; }
+    $token = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24])->json['token'] ?? '';
+    if ($token === '') { check('a link comes back', false); return; }
+
+    $anon = new Client($base);
+    foreach (['raw' => 'inline', 'download' => 'attachment'] as $variant => $disposition) {
+        $r = $anon->fetchUrl($base.'/share/'.$token.'/'.$variant);
+        check("/$variant still answers", $r->status === 200, $r->describe());
+        check("/$variant is still $disposition",
+            str_starts_with((string)$r->header('Content-Disposition'), $disposition),
+            (string)$r->header('Content-Disposition'));
+    }
+    $named = $anon->fetchUrl($base.'/share/'.$token.'/download/legacy.jpg');
+    check('and the named download is an attachment',
+        $named->status === 200 && str_contains((string)$named->header('Content-Disposition'), 'legacy.jpg'),
+        $named->status.' '.(string)$named->header('Content-Disposition'));
+});
+
+/*
+ * The trap this round could easily have shipped.
+ *
+ * The root .htaccess, router.php and the nginx example all refuse anything
+ * ending .log, .ini, .sql and friends before the front controller sees it --
+ * rules that protect real files under the project root. Put the shared file's
+ * name in the path and sharing notes.log becomes a 403, on some deployments
+ * and not others. Nothing but a real fetch through the web server finds this.
+ */
+scenario('sharing a file whose extension the server usually refuses', function () use ($client, $base, $put) {
+    $path = $put('notes.log', "started\nfinished\n");
+    if ($path === '') { check('the log uploads', false); return; }
+
+    $url = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24])->json['url'] ?? '';
+    check('the link ends in .log', str_ends_with((string)$url, '/notes.log'), (string)$url);
+    if ($url === '') return;
+
+    $anon = new Client($base);
+    $got = $anon->fetchUrl((string)$url);
+    check('and it is not refused by a deny rule', $got->status === 200, $got->describe());
+    check('a log file is downloaded, never shown',
+        str_starts_with((string)$got->header('Content-Disposition'), 'attachment'),
+        (string)$got->header('Content-Disposition'));
+});
+
+scenario('a name with spaces and brackets survives the URL', function () use ($client, $base, $put) {
+    $bytes = str_repeat("\x33", 128);
+    $path = $put('holiday photo (1).jpg', $bytes);
+    if ($path === '') { check('the file uploads', false); return; }
+
+    $url = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 24])->json['url'] ?? '';
+    check('the name is percent-encoded in the link',
+        str_ends_with((string)$url, '/holiday%20photo%20%281%29.jpg'), (string)$url);
+    if ($url === '') return;
+
+    $got = (new Client($base))->fetchUrl((string)$url);
+    check('and it comes back whole', $got->status === 200 && $got->body === $bytes, $got->describe());
+});
+
+scenario('a revoked link is dead under its pretty name too', function () use ($client, $base, $put) {
+    $path = $put('secret.jpg', str_repeat("\x44", 16));
+    if ($path === '') { check('the file uploads', false); return; }
+    $made = $client->post('/api/shares/create', ['filePath' => $path, 'expiresInHours' => 0]);
+    $token = $made->json['token'] ?? '';
+    $url = $made->json['url'] ?? '';
+    if ($token === '') { check('a link comes back', false, $made->describe()); return; }
+
+    $client->delete('/api/shares/revoke', ['token' => $token]);
+    $got = (new Client($base))->fetchUrl((string)$url);
+    check('the named link is gone', $got->status === 404, $got->describe());
+});
+
 scenario('the share list says who made each link', function () use ($client, $uploaded) {
     $client->post('/api/shares/create', ['filePath' => $uploaded, 'expiresInHours' => 24]);
     $list = $client->get('/api/shares/list');

@@ -17,13 +17,28 @@ $fs = new FileService($config); $basePath = Http::basePath(); $assetBase = Http:
 $frontController = ($basePath === '' ? '/' : $basePath.'/');
 
 /**
+ * Every shape a public share URL takes, in one place.
+ *
+ *   /share/{token}                     the viewer page (a download for non-media)
+ *   /share/{token}/holiday.mp4         the bytes, inline -- the link handed out
+ *   /share/{token}/download/holiday.mp4  the bytes, as an attachment
+ *   /share/{token}/raw, /download      the original spellings, still honoured
+ *
+ * Captures the token, the variant and the trailing name. This pattern is used
+ * both to route the request and to decide that no session may be started for
+ * it: widening one without the other would quietly hand every anonymous
+ * visitor a cookie and leave a session file behind for each view.
+ */
+const SHARE_ROUTE = '#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?(?:/([^/]+))?$#';
+
+/**
  * Public share links are viewed by people who have no account here, and are
  * routinely fetched by link-preview bots. Starting a session for them would
  * hand every anonymous viewer a cookie and leave a session file behind on the
  * server for each visit, so these routes run session-less. They authenticate
  * on the token alone and never read $_SESSION.
  */
-$isPublicShare = (bool)preg_match('#^/share/[A-Za-z0-9_-]{20,128}(?:/(?:raw|download))?$#', $path);
+$isPublicShare = (bool)preg_match(SHARE_ROUTE, $path);
 if (!$isPublicShare) Auth::startSession($config);
 Security::applyHeaders($config);
 Security::assertProductionConfig($config);
@@ -358,9 +373,35 @@ function public_origin(array $config): string {
     return $scheme.'://'.$host;
 }
 
-/** Public URL of a share token, e.g. https://host/base/share/TOKEN. */
+/**
+ * Public URL of a share token's viewer page, e.g. https://host/base/share/TOKEN.
+ *
+ * For media this is the page with the name, size, expiry and download button;
+ * for everything else it is the download itself, since there is no page.
+ */
 function share_url(array $config, string $basePath, string $token): string {
     return public_origin($config).$basePath.'/share/'.$token;
+}
+
+/**
+ * Public URL of the file itself, ending in its own name: .../share/TOKEN/holiday.mp4.
+ *
+ * This is the link that gets handed out. A URL ending in .jpg or .mp4 works in
+ * an <img> tag, in `curl -O` and in the clients that decide what a link is by
+ * looking at its extension -- and the name is what a browser suggests when the
+ * recipient saves it, where the old /raw suggested a file called "raw".
+ *
+ * The name is decoration: the token remains the whole credential, and a name
+ * that does not match the file is redirected rather than served, so a link
+ * cannot be dressed up as something the file is not.
+ */
+function share_file_url(array $config, string $basePath, string $token, string $name): string {
+    return share_url($config, $basePath, $token).'/'.rawurlencode($name);
+}
+
+/** The same file as an attachment: .../share/TOKEN/download/holiday.mp4. */
+function share_download_url(array $config, string $basePath, string $token, string $name): string {
+    return share_url($config, $basePath, $token).'/download/'.rawurlencode($name);
 }
 
 /**
@@ -1105,8 +1146,15 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             AuditLog::write($pdo, 'share.create', 'success', ['path' => $rel, 'expiresInHours' => $hours]);
         }
 
+        /*
+         * `url` is the link to hand out, and it ends in the file's own name so
+         * that it reads as what it is and works where a URL's extension is
+         * what decides. `pageUrl` is the viewer page for anyone who would
+         * rather send a page than a file.
+         */
         return ['token' => $r['token'],
-            'url' => share_url($config, $basePath, (string)$r['token']),
+            'url' => share_file_url($config, $basePath, (string)$r['token'], basename($f)),
+            'pageUrl' => share_url($config, $basePath, (string)$r['token']),
             'name' => basename($f),
             'kind' => share_media_kind($f),
             'expiresAt' => $r['expires_at']?gmdate('c', strtotime((string)$r['expires_at'])):null];
@@ -1124,7 +1172,8 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             'token' => $x['token'],
             'filePath' => $x['file_path'],
             'name' => basename((string)$x['file_path']),
-            'url' => share_url($config, $basePath, (string)$x['token']),
+            'url' => share_file_url($config, $basePath, (string)$x['token'], basename((string)$x['file_path'])),
+            'pageUrl' => share_url($config, $basePath, (string)$x['token']),
             'createdAt' => gmdate('c', strtotime((string)$x['created_at'])),
             'createdBy' => $x['username'] ?? 'unknown',
             'expiresAt' => $x['expires_at']?gmdate('c', strtotime((string)$x['expires_at'])):null,
@@ -1147,19 +1196,37 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
      * API guard: possession of the 256-bit token is the credential, so a
      * recipient never needs an account.
      *
-     *   /share/{token}           human-readable viewer page
-     *   /share/{token}/raw       the bytes, inline and range-capable
-     *   /share/{token}/download  the bytes, as an attachment
+     *   /share/{token}                     human-readable viewer page
+     *   /share/{token}/holiday.mp4         the bytes, inline and range-capable
+     *   /share/{token}/download/holiday.mp4  the bytes, as an attachment
+     *   /share/{token}/raw, /download      the same two, before names were added
      */
-    if (preg_match('#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?$#', $path, $m) && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($m, $fs, $config, $basePath, $assetBase, $method) {
+    if (preg_match(SHARE_ROUTE, $path, $m) && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($m, $fs, $config, $basePath, $assetBase, $method) {
         [$share, $file] = share_resolve($fs, $m[1]);
         $variant = $m[2]??'';
+        $named = $m[3]??'';
         $kind = share_media_kind($file);
+        $name = basename($file);
 
         // Shared links point at private files: keep them out of search results.
         header('X-Robots-Tag: noindex, nofollow');
 
-        if ($variant === '' && $kind !== 'other') {
+        /*
+         * The name in the URL is decoration -- the token is the credential --
+         * but it is not allowed to lie. A link edited to end in invoice.pdf
+         * bounces to the name the file actually has rather than serving under
+         * a name of the sender's choosing. 302, not 301: the file behind a
+         * token is a fact about now, not something to cache forever.
+         */
+        if ($named !== '' && $named !== $name) {
+            $canonical = $variant === 'download'
+                ?share_download_url($config, $basePath, (string)$share['token'], $name)
+                :share_file_url($config, $basePath, (string)$share['token'], $name);
+            header('Location: '.$canonical, true, 302);
+            exit;
+        }
+
+        if ($variant === '' && $named === '' && $kind !== 'other') {
             // Viewer page. Rendered from our own origin, so it gets the normal
             // application CSP rather than the sandbox applied to the bytes.
             $shareFile = [
@@ -1167,8 +1234,11 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
                 'kind' => $kind,
                 'size' => filesize($file)?:0,
                 'mime' => media_mime_type($file),
-                'rawUrl' => $basePath.'/share/'.$share['token'].'/raw',
-                'downloadUrl' => $basePath.'/share/'.$share['token'].'/download',
+                // Named, so that saving the picture out of the page suggests
+                // the file's own name -- /raw suggested a file called "raw".
+                'rawUrl' => $basePath.'/share/'.$share['token'].'/'.rawurlencode($name),
+                'downloadUrl' => $basePath.'/share/'.$share['token'].'/download/'.rawurlencode($name),
+                'fileUrl' => share_file_url($config, $basePath, (string)$share['token'], $name),
                 'pageUrl' => share_url($config, $basePath, (string)$share['token']),
                 'expiresAt' => $share['expires_at']?gmdate('c', strtotime((string)$share['expires_at'])):null,
             ];
@@ -1180,7 +1250,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         // Raw bytes. A sandbox CSP plus nosniff keeps anything script-capable
         // inert even when a browser is talked into rendering it, and the range
         // support is what lets a recipient seek within a shared video.
-        $disposition = ($variant === 'raw' && $kind !== 'other')?'inline':'attachment';
+        $disposition = ($variant !== 'download' && $kind !== 'other')?'inline':'attachment';
         serve_file_range($file, media_mime_type($file), $disposition, $method, [
             'Cache-Control: private,max-age=300',
             "Content-Security-Policy: default-src 'none'; sandbox; img-src 'self' data:; media-src 'self'; style-src 'none'; script-src 'none'",

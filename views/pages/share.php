@@ -6,7 +6,7 @@
  * application shell, its JavaScript, or any authenticated endpoint. Everything
  * it needs arrives in $shareFile; the bytes come from the separate /raw route.
  *
- * @var array  $shareFile  name, kind, size, mime, rawUrl, downloadUrl, pageUrl, expiresAt
+ * @var array  $shareFile  name, kind, size, mime, rawUrl, downloadUrl, fileUrl, pageUrl, expiresAt
  * @var array  $config
  * @var string $basePath
  * @var string $assetBase
@@ -19,6 +19,8 @@ $mime = htmlspecialchars((string)$shareFile['mime'], ENT_QUOTES, 'UTF-8');
 $rawUrl = htmlspecialchars((string)$shareFile['rawUrl'], ENT_QUOTES, 'UTF-8');
 $downloadUrl = htmlspecialchars((string)$shareFile['downloadUrl'], ENT_QUOTES, 'UTF-8');
 $pageUrl = htmlspecialchars((string)$shareFile['pageUrl'], ENT_QUOTES, 'UTF-8');
+// Absolute, and ending in the file's own name: what a link preview fetches.
+$fileUrl = htmlspecialchars((string)$shareFile['fileUrl'], ENT_QUOTES, 'UTF-8');
 
 $bytes = (int)$shareFile['size'];
 $units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -49,10 +51,10 @@ if (!empty($shareFile['expiresAt'])) {
     <meta property="og:url" content="<?= $pageUrl ?>">
     <meta property="og:site_name" content="Cloud File Hub">
     <?php if ($kind === 'image'): ?>
-    <meta property="og:image" content="<?= $pageUrl ?>/raw">
+    <meta property="og:image" content="<?= $fileUrl ?>">
     <meta name="twitter:card" content="summary_large_image">
     <?php elseif ($kind === 'video'): ?>
-    <meta property="og:video" content="<?= $pageUrl ?>/raw">
+    <meta property="og:video" content="<?= $fileUrl ?>">
     <meta property="og:video:type" content="<?= $mime ?>">
     <meta name="twitter:card" content="player">
     <?php else: ?>

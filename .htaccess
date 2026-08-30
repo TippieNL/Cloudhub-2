@@ -1,6 +1,12 @@
 DirectoryIndex index.php
 RewriteEngine On
 
+# Public share links first: a shared file's name is part of the URL now, and
+# /share/... never names a file under this directory, so the deny rules below
+# have nothing to protect there. Without this, sharing notes.log or setup.ini
+# would produce a link that 403s on the extension rule.
+RewriteRule ^share/[A-Za-z0-9_-]{20,128}(?:/|$) index.php [QSA,L]
+
 # Never expose application internals.
 RewriteRule ^(?:config|src|views|database|storage|logs|tests|tools|deploy)(?:/|$) - [F,L,NC]
 RewriteRule ^\.env(?:\..*)?$ - [F,L,NC]
