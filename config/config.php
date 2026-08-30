@@ -17,6 +17,11 @@ return [
  'app_env'=>(string)env('APP_ENV','production'), 'app_url'=>(string)env('APP_URL',''), 'root_dir'=>$root,
  'read_only'=>env_bool('READ_ONLY'), 'allow_delete'=>env_bool('ALLOW_DELETE',true), 'allow_overwrite'=>env_bool('ALLOW_OVERWRITE',true),
  'trash_enabled'=>env_bool('TRASH_ENABLED',true), 'trash_retention_days'=>(int)env('TRASH_RETENTION_DAYS',30),
+ // Overwriting a file keeps the previous contents. They are real bytes on real
+ // disk, so they are capped both ways and counted against storage and quota.
+ 'versions_enabled'=>env_bool('VERSIONS_ENABLED',true),
+ 'version_retention_days'=>(int)env('VERSION_RETENTION_DAYS',30),
+ 'max_versions_per_file'=>(int)env('MAX_VERSIONS_PER_FILE',10),
  'storage_limit_gb'=>(float)env('STORAGE_LIMIT_GB',0), 'user_quota_gb'=>(float)env('USER_QUOTA_GB',0),
  'usage_cache_seconds'=>(int)env('USAGE_CACHE_SECONDS',300),
  'https_enabled'=>env_bool('HTTPS_ENABLED'), 'require_https'=>env_bool('REQUIRE_HTTPS',false),

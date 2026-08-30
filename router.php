@@ -11,6 +11,35 @@ declare(strict_types=1);
 
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
+/**
+ * What a static file under public/ should be served as.
+ *
+ * Only the handful of types this application actually ships; anything else
+ * falls back to the sniffer, which is fine for the media it is good at.
+ */
+function dev_content_type(string $file): string
+{
+    static $byExtension = [
+        'css' => 'text/css',
+        'js' => 'text/javascript',
+        'mjs' => 'text/javascript',
+        'json' => 'application/json',
+        'webmanifest' => 'application/manifest+json',
+        'svg' => 'image/svg+xml',
+        'png' => 'image/png',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'ico' => 'image/x-icon',
+        'woff2' => 'font/woff2',
+    ];
+    $extension = strtolower((string)pathinfo($file, PATHINFO_EXTENSION));
+    return $byExtension[$extension] ?? (mime_content_type($file) ?: 'application/octet-stream');
+}
+
+
+
 // The built-in server does not read .htaccess, so mirror its deny rules here.
 // Without this the project root — which is the document root in this layout —
 // hands out .env, the database schema and the PHP sources verbatim.
@@ -35,7 +64,15 @@ if ($uri !== '/') {
     if ($publicDir !== false && $aliased !== false && is_file($aliased)
         && str_starts_with($aliased, $publicDir.DIRECTORY_SEPARATOR)
         && strtolower((string)pathinfo($aliased, PATHINFO_EXTENSION)) !== 'php') {
-        header('Content-Type: '.(mime_content_type($aliased) ?: 'application/octet-stream'));
+        /*
+         * Typed from the extension, not sniffed.
+         *
+         * mime_content_type() looks at the bytes, and a stylesheet is bytes of
+         * text -- so it answers "text/plain", and a browser refuses to apply a
+         * stylesheet served as text/plain in standards mode. The development
+         * server was handing out the whole application unstyled.
+         */
+        header('Content-Type: '.dev_content_type($aliased));
         header('Content-Length: '.filesize($aliased));
         readfile($aliased);
         return true;

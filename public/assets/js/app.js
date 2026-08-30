@@ -906,8 +906,8 @@ function formatExpiry(iso) {
  * Create a link, or fetch the one this file already has.
  *
  * `hours` omitted means "whatever the server already has, else the configured
- * default" -- the server reuses any live link for the file, so asking for a
- * specific lifetime on open would claim a lifetime the link may not have.
+ * default"; naming a lifetime returns the link with that lifetime, creating one
+ * if this file has none.
  */
 async function shareCreate(hours) {
     shareUI.copy.disabled = true;
@@ -934,6 +934,119 @@ async function shareCreate(hours) {
     }
 }
 
+/* ---- previous versions ----------------------------------------------------
+ *
+ * Overwriting a file keeps what was there. This is where you get it back.
+ * Reachable by anyone who can read the file: a viewer can look at and download
+ * an earlier version of something they can already open, but restoring and
+ * discarding are writes and the server refuses them without the capability.
+ */
+async function showVersions(path) {
+    const name = path.split('/').pop() || path;
+    let d;
+    try {
+        d = await (await api('/api/files/versions?path=' + encodeURIComponent(path))).json();
+    } catch (e) {
+        toast(e.message);
+        return;
+    }
+
+    if (!d.enabled) {
+        await askConfirm('Previous versions', 'This server does not keep previous versions.', 'Close');
+        return;
+    }
+
+    const canWrite = S.role === 'editor' || S.role === 'admin';
+    const kept = d.versions || [];
+    const body = kept.length
+        ? `<p class="muted">Kept when this file was replaced. ${
+            d.maxPerFile > 0 ? `The last ${d.maxPerFile} are kept` : 'All are kept'
+        }${d.retentionDays > 0 ? `, for ${d.retentionDays} days` : ''}.</p>` +
+          kept.map(v => `<div class="server">
+            <strong>${new Date(v.keptAt).toLocaleString()}</strong>
+            <span class="muted">${fmt(v.bytes)}${v.keptBy ? ' · replaced by ' + esc(v.keptBy) : ''}</span>
+            <div class="actions">
+                <button data-vdown="${esc(v.id)}">Download</button>
+                ${canWrite ? `<button data-vrestore="${esc(v.id)}">Restore</button>
+                <button data-vdrop="${esc(v.id)}" class="danger-text">Discard</button>` : ''}
+            </div>
+          </div>`).join('')
+        : '<p class="muted">No previous versions. One is kept each time this file is replaced by an upload of the same name.</p>';
+
+    const overlay = versionsOverlay();
+    overlay.querySelector('[data-versions-name]').textContent = name;
+    const list = overlay.querySelector('[data-versions-list]');
+    list.innerHTML = body;
+    overlay.hidden = false;
+
+    list.querySelectorAll('[data-vdown]').forEach(b => b.addEventListener('click', async () => {
+        // Through api() and a blob, like download(): a plain link would not
+        // carry the session on an install served from a subdirectory.
+        try {
+            const r = await api('/api/files/versions/download?path=' + encodeURIComponent(path)
+                + '&id=' + encodeURIComponent(b.dataset.vdown));
+            const blob = await r.blob(), u = URL.createObjectURL(blob), a = document.createElement('a');
+            a.href = u;
+            a.download = name;
+            a.click();
+            URL.revokeObjectURL(u);
+        } catch (e) {
+            toast(e.message);
+        }
+    }));
+    list.querySelectorAll('[data-vrestore]').forEach(b => b.addEventListener('click', async () => {
+        if (!await askConfirm('Restore this version',
+            'The file as it is now will itself be kept as a version, so this can be undone.', 'Restore')) return;
+        try {
+            const r = await (await api('/api/files/versions/restore', {
+                method: 'POST', body: { path, id: b.dataset.vrestore },
+            })).json();
+            toast(r.message);
+        } catch (e) {
+            toast(e.message);
+        }
+        overlay.hidden = true;
+        await loadFiles();
+    }));
+    list.querySelectorAll('[data-vdrop]').forEach(b => b.addEventListener('click', async () => {
+        if (!await askConfirm('Discard this version', 'These contents cannot be recovered afterwards.', 'Discard')) return;
+        try {
+            await api('/api/files/versions', { method: 'DELETE', body: { path, id: b.dataset.vdrop } });
+        } catch (e) {
+            toast(e.message);
+        }
+        showVersions(path);
+    }));
+}
+
+/** Built once, on first use: most sessions never open it. */
+function versionsOverlay() {
+    let overlay = document.getElementById('versions-overlay');
+    if (overlay) return overlay;
+    overlay = document.createElement('div');
+    overlay.id = 'versions-overlay';
+    // The upload dialog's classes: a scrim that respects [hidden], and a card
+    // that scrolls when a file has a long history.
+    overlay.className = 'modal-overlay';
+    overlay.hidden = true;
+    overlay.innerHTML = `<div class="upload-dialog">
+        <div class="modal-heading">
+            <div>
+                <h2>Previous versions</h2>
+                <p data-versions-name></p>
+            </div>
+            <button class="icon-button" data-versions-close aria-label="Close">&times;</button>
+        </div>
+        <div data-versions-list></div>
+        <div class="modal-actions"><button data-versions-close>Close</button></div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => {
+        if (e.target === overlay || e.target.hasAttribute('data-versions-close')) overlay.hidden = true;
+    });
+    return overlay;
+}
+
 async function share(p) {
     shareUI.path = p;
     shareReset();
@@ -944,20 +1057,17 @@ async function share(p) {
 }
 
 /**
- * Changing the lifetime replaces the link: the server reuses any live link for
- * a file, so the old token has to go before a new lifetime can take effect.
- * The previous URL stops working, which is the honest outcome to show.
+ * Changing the lifetime asks for a link with that lifetime.
+ *
+ * This used to revoke the existing token first, because the server returned
+ * any live link for the file and ignored the lifetime asked for -- so without
+ * destroying the old link a new one could never take effect. The server now
+ * matches on the requested lifetime, so asking is enough, and a link someone
+ * already has keeps working.
  */
 shareUI.expiry.addEventListener('change', async () => {
     if (!shareUI.path || shareUI.expiry.value === '') return;
-    const hours = Number(shareUI.expiry.value) || 0;
-    if (shareUI.token) {
-        try {
-            await api('/api/shares/revoke', { method: 'DELETE', body: { token: shareUI.token } });
-        } catch {}
-        shareUI.token = null;
-    }
-    await shareCreate(hours);
+    await shareCreate(Number(shareUI.expiry.value) || 0);
     shareUI.expiry.value = '';
 });
 
@@ -1139,7 +1249,7 @@ function showContextMenu(path, x, y) {
     const f = currentEntries().find(item => item.path === path);
     const menu = $('#file-context');
     if (!f) return;
-    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
+    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : '<button data-cmd="versions">Previous versions</button>'}${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
     menu.hidden = false;
     menu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(y, window.innerHeight - 240)}px`;
@@ -1153,6 +1263,7 @@ function showContextMenu(path, x, y) {
         if (c === 'rename') ren(path);
         if (c === 'move') relocate([path], 'move');
         if (c === 'copy') relocate([path], 'copy');
+        if (c === 'versions') showVersions(path);
         if (c === 'keep') keepOffline(path);
         if (c === 'unkeep') dropOffline(path);
         if (c === 'delete') del(path);

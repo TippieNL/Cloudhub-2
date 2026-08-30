@@ -623,6 +623,9 @@ if ($path === '/api/files/delete' && $method === 'DELETE') api_try(function()use
     $meta = $fs->trash($p, Auth::user()['username'] ?? null);
     ledger()->forget($meta['originalPath']);
     $fs->trashPurgeExpired((int)$config['trash_retention_days']);
+    // Swept here too, for the same reason: no cron is guaranteed on a
+    // self-hosted install, so the sweeps ride an action that already happens.
+    $fs->versionsPurgeExpired((int)$config['version_retention_days']);
     AuditLog::write(db(), 'file.trash', 'success', ['path' => $meta['originalPath'], 'id' => $meta['id']]);
     return ['success' => true, 'trashed' => true, 'id' => $meta['id'], 'message' => 'Moved to trash'];
 });
@@ -780,6 +783,53 @@ if ($path === '/api/trash/purge' && $method === 'POST') api_try(function()use($f
     AuditLog::write(db(), 'file.purge', 'success', ['entries' => $n, 'all' => $all]);
     return ['success' => true, 'purged' => $n,
         'message' => $n === 1?'Permanently deleted 1 item':'Permanently deleted '.$n.' items'];
+});
+/* ---- previous versions ------------------------------------------------------
+ *
+ * Overwriting a file keeps what was there. These read that history back.
+ * Reads need only the read capability -- a viewer can see and download a
+ * previous version of a file they can already read -- while restoring and
+ * discarding are writes and go through the global write gate.
+ */
+if ($path === '/api/files/versions' && $method === 'GET') api_try(function()use($fs, $config) {
+    release_session_lock();
+    $rel = $fs->relative($fs->existing((string)($_GET['path']??'')));
+    return ['enabled' => (bool)$config['versions_enabled'],
+        'retentionDays' => (int)$config['version_retention_days'],
+        'maxPerFile' => (int)$config['max_versions_per_file'],
+        'versions' => $fs->versionList($rel)];
+});
+if ($path === '/api/files/versions/download' && $method === 'GET') api_try(function()use($fs) {
+    release_session_lock();
+    $rel = $fs->relative($fs->existing((string)($_GET['path']??'')));
+    $id = (string)($_GET['id']??'');
+    $file = $fs->versionPayload($rel, $id);
+    header('Content-Type: '.mime_type($file));
+    header('Content-Disposition: attachment; filename="'.str_replace(['"', "\r", "\n"], '_', basename($file)).'"');
+    header('Content-Length: '.filesize($file));
+    readfile($file);
+    exit;
+});
+if ($path === '/api/files/versions/restore' && $method === 'POST') api_try(function()use($fs, $config) {
+    $fs->writable();
+    $b = Http::body();
+    $rel = $fs->relative($fs->existing(Http::string($b, 'path', 1, 4096)));
+    $done = $fs->versionRestore($rel, Http::string($b, 'id', 1, 64),
+        Auth::user()['username'] ?? null, (int)$config['max_versions_per_file']);
+    // The restored file is a different size from the one it replaced, so the
+    // ledger has to be told or a quota drifts from what is on disk.
+    ledger()->sweep($fs);
+    AuditLog::write(db(), 'file.version.restore', 'success', ['path' => $rel, 'version' => $done['restored']]);
+    return ['success' => true, 'path' => $rel, 'message' => 'Restored the previous version'];
+});
+if ($path === '/api/files/versions' && $method === 'DELETE') api_try(function()use($fs) {
+    $fs->writable();
+    $b = Http::body();
+    $rel = $fs->relative($fs->existing(Http::string($b, 'path', 1, 4096)));
+    $id = Http::string($b, 'id', 1, 64);
+    if (!$fs->versionDelete($rel, $id))throw new RuntimeException('Version not found', 404);
+    AuditLog::write(db(), 'file.version.delete', 'success', ['path' => $rel, 'version' => $id]);
+    return ['success' => true, 'message' => 'Version discarded'];
 });
 if ($path === '/api/files/rename' && $method === 'POST') api_try(function()use($fs, $config) {
     $fs->writable(); $b = Http::body(); $a = $fs->existing((string)($b['oldPath']??'')); $z = $fs->destination((string)($b['newPath']??'')); if (!file_exists($a))throw new RuntimeException('Source not found', 404); if (file_exists($z)&&!$config['allow_overwrite'])throw new RuntimeException('Destination already exists', 409);
@@ -988,17 +1038,30 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         $hours = Http::optionalInt($b, 'expiresInHours', 0, 8760, (int)$config['share_expiry_hours']);
         $pdo = db();
 
-        // Reuse a live link for the same file so repeated shares stay stable,
-        // unless the caller asked for a different lifetime.
-        $s = $pdo->prepare('SELECT token,expires_at FROM share_links WHERE file_path=? AND (expires_at IS NULL OR expires_at>UTC_TIMESTAMP()) LIMIT 1');
-        $s->execute([$rel]);
+        /*
+         * Reuse a live link for the same file so repeated shares stay stable --
+         * but only one asked for with the same lifetime.
+         *
+         * Matching on expires_hours rather than on the remaining time is what
+         * makes that work: a link created three minutes ago for 24 hours has 23
+         * hours and 57 minutes left, and asking for 24 hours again should reuse
+         * it rather than pile up a second token. Comparing the stored intent
+         * gets both cases right.
+         *
+         * This route previously ignored the requested lifetime entirely
+         * whenever any live link existed, so asking for an hour on a file
+         * already shared for a month handed back the month-long token.
+         */
+        $s = $pdo->prepare('SELECT token,expires_at FROM share_links
+            WHERE file_path=? AND expires_hours=? AND (expires_at IS NULL OR expires_at>UTC_TIMESTAMP()) LIMIT 1');
+        $s->execute([$rel, $hours]);
         $r = $s->fetch(PDO::FETCH_ASSOC);
 
         if (!$r) {
             $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
             $exp = $hours > 0?gmdate('Y-m-d H:i:s', time()+$hours*3600):null;
-            $s = $pdo->prepare('INSERT INTO share_links(token,file_path,expires_at) VALUES(?,?,?)');
-            $s->execute([$token, $rel, $exp]);
+            $s = $pdo->prepare('INSERT INTO share_links(token,file_path,expires_at,expires_hours,created_by) VALUES(?,?,?,?,?)');
+            $s->execute([$token, $rel, $exp, $hours, Auth::user()['id'] ?? null]);
             $r = ['token' => $token, 'expires_at' => $exp];
             AuditLog::write($pdo, 'share.create', 'success', ['path' => $rel, 'expiresInHours' => $hours]);
         }
@@ -1013,14 +1076,20 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         Authorization::requireAdmin();
         $pdo = db();
         $pdo->exec('DELETE FROM share_links WHERE expires_at IS NOT NULL AND expires_at<UTC_TIMESTAMP()');
-        $rows = $pdo->query('SELECT token,file_path,created_at,expires_at FROM share_links ORDER BY created_at DESC')->fetchAll(PDO::FETCH_ASSOC);
+        // Left-joined so a link whose creator has since been deleted still
+        // lists, rather than vanishing from the admin's view of what is shared.
+        $rows = $pdo->query('SELECT s.token,s.file_path,s.created_at,s.expires_at,s.expires_hours,u.username
+            FROM share_links s LEFT JOIN users u ON u.id = s.created_by
+            ORDER BY s.created_at DESC')->fetchAll(PDO::FETCH_ASSOC);
         return array_map(fn($x) => [
             'token' => $x['token'],
             'filePath' => $x['file_path'],
             'name' => basename((string)$x['file_path']),
             'url' => share_url($config, $basePath, (string)$x['token']),
             'createdAt' => gmdate('c', strtotime((string)$x['created_at'])),
+            'createdBy' => $x['username'] ?? 'unknown',
             'expiresAt' => $x['expires_at']?gmdate('c', strtotime((string)$x['expires_at'])):null,
+            'expiresInHours' => $x['expires_hours'] === null?null:(int)$x['expires_hours'],
         ], $rows);
     });
     if ($path === '/api/shares/revoke' && $method === 'DELETE') api_try(function() {

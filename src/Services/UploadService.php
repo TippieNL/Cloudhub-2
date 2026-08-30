@@ -172,7 +172,25 @@ final class UploadService
                 throw new RuntimeException('Overwrite is disabled by server configuration', 403);
             }
             if ($policy === 'overwrite' && is_dir($dest)) throw new RuntimeException('Destination is a directory', 409);
-            if ($policy === 'overwrite' && is_file($dest) && !unlink($dest)) throw new RuntimeException('Unable to replace existing file', 500);
+            /*
+             * The outgoing file is kept, not unlinked.
+             *
+             * This line used to destroy the previous contents outright: the
+             * trash covered deleting a file, but replacing one lost it with no
+             * way back. keepVersion() renames it into .versions, which is the
+             * same filesystem and so cannot half-finish.
+             */
+            if ($policy === 'overwrite' && is_file($dest)) {
+                if (($this->config['versions_enabled'] ?? true)) {
+                    $this->files->keepVersion(
+                        $dest,
+                        $_SESSION['username'] ?? null,
+                        (int)($this->config['max_versions_per_file'] ?? 0),
+                    );
+                } elseif (!unlink($dest)) {
+                    throw new RuntimeException('Unable to replace existing file', 500);
+                }
+            }
         }
 
         if (!rename($part, $dest)) {

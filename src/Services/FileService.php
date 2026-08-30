@@ -17,7 +17,7 @@ final class FileService {
   * Without this the trash could be browsed and hard-deleted through the
   * ordinary file routes, which defeats the point of having a trash.
   */
- public const RESERVED_ROOT_NAMES=['.trash','.thumbnails'];
+ public const RESERVED_ROOT_NAMES=['.trash','.thumbnails','.versions'];
 
  private string $root;
  public function __construct(private array $config) {
@@ -247,9 +247,14 @@ final class FileService {
    $trash['entries']++;
   }
 
+  // Versions are measured rather than summed from metadata: unlike the trash
+  // they *are* ordinary bytes on the disk, they count against a quota, and the
+  // storage page is where you find out what your history costs.
+  $versions=$this->versionsUsage();
+
   return ['bytes'=>$acc['bytes'],'files'=>$acc['files'],'folders'=>$folders,
    'largest'=>array_slice($largest,0,$largestCount),
-   'byType'=>$acc['byType'],'trash'=>$trash,
+   'byType'=>$acc['byType'],'trash'=>$trash,'versions'=>$versions,
    'diskTotal'=>(int)(@disk_total_space($this->root)?:0),
    'diskFree'=>(int)(@disk_free_space($this->root)?:0),
    'measuredAt'=>gmdate('c')];
@@ -434,5 +439,181 @@ final class FileService {
   if($rel==='')return false;$cur=$this->root;
   foreach(explode('/',$rel) as $part){$cur.='/'.$part;if(is_link($cur))return true;if(!file_exists($cur))break;}
   return false;
+ }
+
+ /* ---- previous versions --------------------------------------------------
+  *
+  * The trash covers deleting a file. Nothing covered *replacing* one: an
+  * upload with the same name and the overwrite policy unlinked what was there,
+  * and the previous contents were simply gone.
+  *
+  * Same shape as the trash, and for the same reasons: inside the storage root
+  * so archiving is an atomic same-filesystem rename, and a payload
+  * subdirectory so a file called "meta.json" cannot collide with the
+  * bookkeeping.
+  *
+  *   .versions/<key>/<id>/meta.json      what it was and when
+  *   .versions/<key>/<id>/payload/<name> the bytes themselves
+  *
+  * <key> is a hash of the file's path, so listing one file's history is a
+  * directory read rather than a walk of every version ever kept. Versions
+  * follow the path: renaming or moving a file leaves its history behind, the
+  * same way the trash already behaves.
+  */
+
+ private const VERSION_ID='/^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$/';
+
+ public function versionsRoot(): string {return $this->root.'/.versions';}
+
+ /** Where one file's history lives. Hashed, so any path is a safe directory name. */
+ private function versionKey(string $relative): string {
+  return substr(hash('sha256','/'.ltrim($relative,'/')),0,32);
+ }
+
+ /**
+  * Archive the file currently at $realPath, and return what was recorded.
+  *
+  * Called instead of unlinking when an upload overwrites. Returns null when
+  * there is nothing to keep, so the caller can carry on regardless.
+  */
+ public function keepVersion(string $realPath,?string $actor=null,?int $maxVersions=null): ?array {
+  $realPath=str_replace('\\','/',$realPath);$this->assertContained($realPath);
+  if(!is_file($realPath)||is_link($realPath))return null;
+
+  $original=$this->relative($realPath);
+  $bytes=(int)(filesize($realPath)?:0);
+  $id=gmdate('Ymd-His').'-'.bin2hex(random_bytes(4));
+  $entry=$this->versionsRoot().'/'.$this->versionKey($original).'/'.$id;
+  if(!mkdir($entry.'/payload',0775,true))throw new RuntimeException('Unable to open the version store',500);
+
+  $name=basename($realPath);
+  if(!rename($realPath,$entry.'/payload/'.$name)){
+   $this->deleteTree($entry);
+   throw new RuntimeException('Unable to keep the previous version of '.$name,500);
+  }
+
+  /*
+   * Milliseconds as well as the ISO stamp.
+   *
+   * The id carries only whole seconds, so several rewrites inside one second
+   * share a prefix and differ by random bytes -- sorting on the id then orders
+   * them arbitrarily, and "newest first" is a coin toss. That is not a corner
+   * case: a sync client saving repeatedly does exactly this, and it decides
+   * which version the cap throws away.
+   */
+  $meta=['id'=>$id,'name'=>$name,'path'=>$original,'bytes'=>$bytes,
+   'keptAt'=>gmdate('c'),'keptAtMs'=>(int)round(microtime(true)*1000),'keptBy'=>$actor];
+  file_put_contents($entry.'/meta.json',json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT));
+
+  // Trimmed here rather than only on the sweep, so a file rewritten every
+  // night cannot grow its history without bound between sweeps.
+  if($maxVersions!==null&&$maxVersions>0)$this->trimVersions($original,$maxVersions);
+  return $meta;
+ }
+
+ /** @return list<array> newest first */
+ public function versionList(string $relative): array {
+  $dir=$this->versionsRoot().'/'.$this->versionKey($relative);
+  if(!is_dir($dir))return [];
+  $out=[];
+  foreach(scandir($dir)?:[] as $id){
+   if($id==='.'||$id==='..'||!preg_match(self::VERSION_ID,$id))continue;
+   $meta=$this->versionMeta($relative,$id);
+   if($meta!==null)$out[]=$meta;
+  }
+  // The id is the tie-break, so the order is at least stable for entries kept
+  // before the millisecond stamp existed.
+  usort($out,fn($a,$b)=>((int)($b['keptAtMs']??0)<=>(int)($a['keptAtMs']??0))
+   ?:strcmp((string)$b['id'],(string)$a['id']));
+  return $out;
+ }
+
+ /** The archived file itself, for streaming back. */
+ public function versionPayload(string $relative,string $id): string {
+  $meta=$this->versionMeta($relative,$id);
+  if($meta===null)throw new RuntimeException('Version not found',404);
+  $file=$this->versionsRoot().'/'.$this->versionKey($relative).'/'.$id.'/payload/'.$meta['name'];
+  if(!is_file($file))throw new RuntimeException('Version contents are missing',404);
+  return $file;
+ }
+
+ /**
+  * Put a version back, keeping what it replaces.
+  *
+  * Restoring is itself a change, so the current file is archived on the way --
+  * otherwise recovering the wrong version would destroy the right one.
+  */
+ public function versionRestore(string $relative,string $id,?string $actor=null,?int $maxVersions=null): array {
+  $source=$this->versionPayload($relative,$id);
+  $target=$this->destination($relative);
+  if(is_dir($target))throw new RuntimeException('A folder is in the way',409);
+  if(is_file($target))$this->keepVersion($target,$actor,$maxVersions);
+  if(!rename($source,$target)){
+   if(!copy($source,$target))throw new RuntimeException('Unable to restore that version',500);
+   @unlink($source);
+  }
+  $this->deleteTree($this->versionsRoot().'/'.$this->versionKey($relative).'/'.$id);
+  return ['path'=>$relative,'restored'=>$id];
+ }
+
+ public function versionDelete(string $relative,string $id): bool {
+  if(!preg_match(self::VERSION_ID,$id))throw new RuntimeException('Unknown version',404);
+  $dir=$this->versionsRoot().'/'.$this->versionKey($relative).'/'.$id;
+  if(!is_dir($dir))return false;
+  $this->deleteTree($dir);
+  return true;
+ }
+
+ /** Drop the oldest until only $keep remain. */
+ public function trimVersions(string $relative,int $keep): int {
+  if($keep<=0)return 0;
+  $all=$this->versionList($relative);
+  $n=0;
+  foreach(array_slice($all,$keep) as $meta){
+   $this->deleteTree($this->versionsRoot().'/'.$this->versionKey($relative).'/'.$meta['id']);
+   $n++;
+  }
+  return $n;
+ }
+
+ /**
+  * Drop versions older than $days, across every file.
+  *
+  * Runs beside the trash sweep. Empty key directories go too, or the store
+  * accumulates a directory per file ever overwritten.
+  */
+ public function versionsPurgeExpired(int $days): int {
+  if($days<=0)return 0;
+  $root=$this->versionsRoot();if(!is_dir($root))return 0;
+  $cutoff=time()-$days*86400;$n=0;
+  foreach(scandir($root)?:[] as $key){
+   if($key==='.'||$key==='..')continue;
+   $keyDir=$root.'/'.$key;if(!is_dir($keyDir))continue;
+   foreach(scandir($keyDir)?:[] as $id){
+    if($id==='.'||$id==='..'||!preg_match(self::VERSION_ID,$id))continue;
+    $meta=@json_decode((string)@file_get_contents($keyDir.'/'.$id.'/meta.json'),true);
+    $at=strtotime((string)($meta['keptAt']??''));
+    if($at!==false&&$at<$cutoff){$this->deleteTree($keyDir.'/'.$id);$n++;}
+   }
+   $rest=array_diff(scandir($keyDir)?:[],['.','..']);
+   if(!$rest)@rmdir($keyDir);
+  }
+  return $n;
+ }
+
+ /** What the whole history costs on disk, for the storage dashboard. */
+ public function versionsUsage(): array {
+  $root=$this->versionsRoot();
+  if(!is_dir($root))return ['bytes'=>0,'files'=>0];
+  $measured=$this->measure($root);
+  return ['bytes'=>$measured['bytes'],'files'=>$measured['files']];
+ }
+
+ private function versionMeta(string $relative,string $id): ?array {
+  if(!preg_match(self::VERSION_ID,$id))return null;
+  $file=$this->versionsRoot().'/'.$this->versionKey($relative).'/'.$id.'/meta.json';
+  if(!is_file($file))return null;
+  $meta=json_decode((string)file_get_contents($file),true);
+  return is_array($meta)?$meta:null;
  }
 }

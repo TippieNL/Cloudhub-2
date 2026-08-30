@@ -89,14 +89,31 @@ demand.
 
 ## Tests
 
+Two suites, and both run on every push (`.github/workflows/ci.yml`):
+
 ```bash
-php tests/run.php
+php tests/run.php        # 28 scripts pinning decisions in the source
+php tests/http/run.php   # the API, over real HTTP against a real database
 ```
 
-The suite is plain PHP check scripts — no framework or Composer install is
-needed. A script fails the run if it exits non-zero or emits any
-warning/notice. The database-schema checks read `database/migrate.php` rather
-than connecting, so no MySQL server is required.
+The first is plain PHP check scripts — no framework or Composer install is
+needed, and a script fails the run if it exits non-zero or emits any
+warning/notice. They are regression pins: they assert the source still *reads*
+a certain way, which is what stops a later edit quietly undoing a decision, and
+they have caught real reverts. The database-schema checks read
+`database/migrate.php` rather than connecting, so this suite needs no MySQL.
+
+The second asserts the application *works*. It starts its own server, signs in,
+and makes real requests — sign-in and CSRF rejection, a chunked upload and a
+byte-range fetch, share links created, reused and revoked, versions kept and
+restored, trash and restore, and a viewer being refused a write. This one does
+need a migrated database and an admin account, which the workflow sets up.
+
+CI brings a MariaDB service container rather than a lighter stand-in: the
+schema is MySQL-specific throughout — `information_schema` probes,
+`ENGINE=InnoDB`, `ENUM`, prefix indexes — and testing a dialect nobody deploys
+would prove very little. The Android job runs the JVM tests against that same
+server, so the 13 live API tests run instead of skipping.
 
 ## Required PHP extensions
 
@@ -393,6 +410,28 @@ write failed that way, since uploads are PUTs and deletes are DELETEs.
 If a request is ever redirected in a way that drops it, the app now says so
 instead of passing the confusing 404 through.
 
+## Previous versions
+
+Deleting a file puts it in the trash. **Replacing** one used to lose it: an
+upload of the same name with the overwrite policy unlinked what was there, and
+the previous contents were gone.
+
+Now the outgoing file is kept. **Previous versions** in a file's menu lists what
+was replaced, with the date, the size and who replaced it; any version can be
+downloaded, restored, or discarded. Restoring keeps the current file as a
+version too, so recovering the wrong one does not destroy the right one.
+
+The history lives in `.versions/` inside the storage root — the same trick the
+trash uses, so archiving is an atomic same-filesystem rename, and it is
+invisible to every file route. Ten versions per file are kept for thirty days
+(`MAX_VERSIONS_PER_FILE`, `VERSION_RETENTION_DAYS`), swept alongside the trash.
+Unlike the trash they are ordinary bytes on the disk and **count toward storage
+and quota** — the Storage page shows what the history costs. `VERSIONS_ENABLED=0`
+turns the whole thing off and restores the old behaviour.
+
+Versions follow the *path*: renaming or moving a file leaves its history behind
+under the old path, the same way the trash already behaves.
+
 ### Certificates
 
 The app never accepts an untrusted certificate silently. The platform trust
@@ -402,6 +441,7 @@ certificate's SHA-256 fingerprint and, if you accept, pins *that certificate*:
 a different one for the same host asks again.
 
 ### Testing
+
 
 The half of the app that talks to the server is tested for real, on the host,
 with no emulator:

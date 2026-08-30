@@ -135,10 +135,22 @@ addColumn($pdo, 'file_metadata', 'uploaded_by', 'INT UNSIGNED NULL');
 
 addColumn($pdo, 'share_links', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
 addColumn($pdo, 'share_links', 'expires_at', 'TIMESTAMP NULL DEFAULT NULL');
+/*
+ * The lifetime that was *asked for*, not just when the link dies.
+ *
+ * Creating a share reuses a live link for the same file, and without this it
+ * could only compare remaining time -- so a link made three minutes ago for 24
+ * hours would not match a fresh request for 24 hours, and asking for one hour
+ * would silently hand back a month-long token. Left NULL on rows that predate
+ * the column, which simply means they are never reused.
+ */
+addColumn($pdo, 'share_links', 'expires_hours', 'INT NULL DEFAULT NULL');
+addColumn($pdo, 'share_links', 'created_by', 'INT UNSIGNED NULL DEFAULT NULL');
 
 if (!indexExists($pdo, 'storage_servers', 'idx_storage_active')) $pdo->exec('ALTER TABLE storage_servers ADD INDEX idx_storage_active (is_active)');
 if (!indexExists($pdo, 'storage_servers', 'idx_storage_default')) $pdo->exec('ALTER TABLE storage_servers ADD INDEX idx_storage_default (is_default)');
 if (!indexExists($pdo, 'share_links', 'idx_share_expires')) $pdo->exec('ALTER TABLE share_links ADD INDEX idx_share_expires (expires_at)');
+if (!indexExists($pdo, 'share_links', 'idx_share_creator')) $pdo->exec('ALTER TABLE share_links ADD INDEX idx_share_creator (created_by)');
 if (!indexExists($pdo, 'file_metadata', 'idx_file_server')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server (server_id)');
 if (!indexExists($pdo, 'file_metadata', 'idx_file_server_path')) $pdo->exec('ALTER TABLE file_metadata ADD INDEX idx_file_server_path (server_id, file_path(190))');
 // Per-user usage is a SUM grouped by this column on every upload attempt.

@@ -1,0 +1,123 @@
+#
+name: CI
+
+# Nothing ran automatically before this: 27 PHP scripts and 78 JVM tests only
+# ever ran when someone remembered to. The database is a service container
+# rather than a stand-in, because the schema is MySQL-specific throughout --
+# information_schema probes, ENGINE=InnoDB, ENUM, prefix indexes -- and testing
+# a dialect nobody deploys would prove very little.
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    name: PHP server
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: cloud_file_hub
+          MARIADB_USER: cloudhub
+          MARIADB_PASSWORD: change-me
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, gd, zip, curl
+          coverage: none
+
+      - name: Configure
+        run: |
+          cp .env.example .env
+          sed -i 's/^DB_HOST=.*/DB_HOST=127.0.0.1/' .env
+
+      - name: Migrate
+        run: php database/migrate.php
+
+      - name: Create the test accounts
+        run: |
+          printf 'smoke-test-pass-123\n'  | php tools/create-admin.php admin  admin
+          printf 'viewer-test-pass-123\n' | php tools/create-admin.php viewer viewer
+
+      # The static checks: 27 scripts pinning decisions a later edit could
+      # quietly undo. They assert the source reads a certain way.
+      - name: Check scripts
+        run: php tests/run.php
+
+      # And the ones that assert it works, over real HTTP against the database
+      # above. This starts its own server.
+      - name: API over HTTP
+        run: php tests/http/run.php
+
+  android:
+    name: Android client
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: cloud_file_hub
+          MARIADB_USER: cloudhub
+          MARIADB_PASSWORD: change-me
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, gd, zip, curl
+          coverage: none
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure and migrate
+        run: |
+          cp .env.example .env
+          sed -i 's/^DB_HOST=.*/DB_HOST=127.0.0.1/' .env
+          php database/migrate.php
+          printf 'smoke-test-pass-123\n' | php tools/create-admin.php admin admin
+
+      # Backgrounded so the JVM tests have something to talk to. Without
+      # CLOUDHUB_TEST_URL the 13 live API tests skip, and skipping them here
+      # would defeat the point of running them at all.
+      - name: Serve
+        run: |
+          php -S 127.0.0.1:8900 -t public router.php > /tmp/cloudhub-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf "http://127.0.0.1:8900/?route=%2Fapi%2Fauth%2Fstatus" > /dev/null && exit 0
+            sleep 0.25
+          done
+          echo "the server never answered"; cat /tmp/cloudhub-server.log; exit 1
+
+      - name: Unit and live API tests
+        working-directory: android
+        env:
+          CLOUDHUB_TEST_URL: http://127.0.0.1:8900
+        run: gradle :app:testReleaseUnitTest --no-daemon
+
+      - name: Test report
+        if: failure()
+        run: cat android/app/build/reports/tests/testReleaseUnitTest/index.html || true
