@@ -26,3 +26,6 @@ Thumbs.db
 /android/keystore.jks
 /android/keystore.properties
 /android/.kotlin/
+
+# The measured-usage cache, written by storage_report() and rebuilt on demand.
+/storage/.cache/

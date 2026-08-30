@@ -136,3 +136,53 @@ data class ServerConfigInfo(
     val maxUploadFiles: Int = 20,
     val chunkMb: Int = 8,
 )
+
+/** What one account is using, from /api/storage/me -- readable by anyone. */
+@Serializable
+data class MyStorage(
+    val usedBytes: Long = 0,
+    val quotaBytes: Long = 0,
+    val storeUsedBytes: Long = 0,
+    val storageLimitBytes: Long = 0,
+    val diskFreeBytes: Long = 0,
+    val diskTotalBytes: Long = 0,
+    val files: Int = 0,
+    val folders: Int = 0,
+    val trash: StorageBucket = StorageBucket(),
+    val versions: StorageBucket = StorageBucket(),
+    val cached: Boolean = false,
+    val measuredAt: String? = null,
+    val isAdmin: Boolean = false,
+)
+
+@Serializable
+data class StorageBucket(val bytes: Long = 0, val files: Int = 0, val entries: Int = 0)
+
+/** The whole-server report from /api/storage/usage. Admins only. */
+@Serializable
+data class ServerStorage(
+    val bytes: Long = 0,
+    val files: Int = 0,
+    val folders: Int = 0,
+    val diskFree: Long = 0,
+    val diskTotal: Long = 0,
+    val trash: StorageBucket = StorageBucket(),
+    val versions: StorageBucket = StorageBucket(),
+    val storageLimitBytes: Long = 0,
+    val userQuotaBytes: Long = 0,
+    val cached: Boolean = false,
+    val measuredAt: String? = null,
+    val byUser: List<AccountUsage> = emptyList(),
+    val largest: List<LargestFile> = emptyList(),
+)
+
+@Serializable
+data class AccountUsage(
+    val userId: Int? = null,
+    val username: String? = null,
+    val bytes: Long = 0,
+    val files: Int = 0,
+)
+
+@Serializable
+data class LargestFile(val path: String = "", val bytes: Long = 0)

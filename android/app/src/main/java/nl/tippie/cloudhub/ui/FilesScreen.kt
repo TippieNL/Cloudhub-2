@@ -88,6 +88,8 @@ fun FilesScreen(
     model: FilesViewModel,
     onOpenFile: (FileEntry) -> Unit,
     onOpenTrash: () -> Unit,
+    onOpenStorage: () -> Unit,
+    onOpenSettings: () -> Unit,
     onSignOut: () -> Unit,
     onPickMedia: () -> Unit,
     onPickFile: () -> Unit,
@@ -132,6 +134,8 @@ fun FilesScreen(
                 onRefresh = { model.refresh() },
                 onSort = { model.setSort(it) },
                 onTrash = onOpenTrash,
+                onStorage = onOpenStorage,
+                onSettings = onOpenSettings,
                 onSignOut = onSignOut,
             )
         },
@@ -553,6 +557,8 @@ private fun BrowserTopBar(
     onRefresh: () -> Unit,
     onSort: (FilesState.Sort) -> Unit,
     onTrash: () -> Unit,
+    onStorage: () -> Unit,
+    onSettings: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     TopAppBar(
@@ -602,6 +608,11 @@ private fun BrowserTopBar(
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text("Trash") },
                     onClick = { onOverflow(false); onTrash() })
+                DropdownMenuItem(text = { Text("Storage") },
+                    onClick = { onOverflow(false); onStorage() })
+                DropdownMenuItem(text = { Text("Settings") },
+                    onClick = { onOverflow(false); onSettings() })
+                HorizontalDivider()
                 DropdownMenuItem(text = { Text("Sign out") },
                     onClick = { onOverflow(false); onSignOut() })
             }

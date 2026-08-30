@@ -358,6 +358,57 @@ scenario('only so many versions are kept', function () use ($client, $scratch) {
     check('and the newest is first', str_contains($newest, 'revision 11'), trim($newest));
 });
 
+/* ---- storage ------------------------------------------------------------------- */
+
+scenario('an ordinary account can see its own storage', function () use ($base) {
+    /*
+     * /api/storage/usage is admin-only, so before this endpoint a user with a
+     * quota had no way to see how much of it they had used -- they found out
+     * when an upload came back 507.
+     */
+    $viewer = new Client($base);
+    $in = $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+    if (!$in->ok()) { check('the viewer account signs in', false, $in->describe()); return; }
+
+    $admin = $viewer->get('/api/storage/usage');
+    check('the whole-server view stays admin-only', $admin->status === 403, $admin->describe());
+
+    $mine = $viewer->get('/api/storage/me');
+    check('but a viewer can read their own', $mine->ok(), $mine->describe());
+    foreach (['usedBytes', 'quotaBytes', 'storageLimitBytes', 'diskFreeBytes', 'diskTotalBytes'] as $key) {
+        check("it reports $key", array_key_exists($key, $mine->json ?? []), json_encode($mine->json));
+    }
+    check('the disk figures are real', (int)($mine->json['diskTotalBytes'] ?? 0) > 0,
+        (string)($mine->json['diskTotalBytes'] ?? 'missing'));
+});
+
+scenario('an anonymous visitor cannot read storage', function () use ($base) {
+    $anon = new Client($base);
+    check('own storage needs a session', $anon->get('/api/storage/me')->status === 401);
+});
+
+scenario('the per-account view cannot force a tree walk', function () use ($client) {
+    // Measuring walks the whole store. A route every account can call must not
+    // be a way to make the server do that on demand.
+    $first = $client->get('/api/storage/me');
+    check('it answers', $first->ok(), $first->describe());
+    check('and reports the cached measurement', ($first->json['cached'] ?? null) !== null, json_encode($first->json));
+
+    $forced = $client->get('/api/storage/me', ['refresh' => '1']);
+    check('refresh is ignored rather than honoured',
+        ($forced->json['cached'] ?? false) === ($first->json['cached'] ?? false)
+        || ($forced->json['cached'] ?? false) === true,
+        'cached went from '.json_encode($first->json['cached'] ?? null).' to '.json_encode($forced->json['cached'] ?? null));
+});
+
+scenario('an admin still sees the whole server', function () use ($client) {
+    $r = $client->get('/api/storage/usage');
+    check('the admin report is readable', $r->ok(), $r->describe());
+    check('with a per-account breakdown', is_array($r->json['byUser'] ?? null), json_encode(array_keys($r->json ?? [])));
+    check('and what the version history costs', isset($r->json['versions']['bytes']),
+        json_encode($r->json['versions'] ?? null));
+});
+
 /* ---- trash ------------------------------------------------------------------ */
 
 scenario('deleting goes to the trash and comes back', function () use ($client, $uploaded) {

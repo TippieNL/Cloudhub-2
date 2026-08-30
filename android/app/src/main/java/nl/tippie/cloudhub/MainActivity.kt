@@ -37,6 +37,8 @@ private sealed interface Screen {
     data object SignIn : Screen
     data object Files : Screen
     data object Trash : Screen
+    data object Storage : Screen
+    data object SettingsScreen : Screen
     data class Images(val images: List<FileEntry>, val index: Int) : Screen
     data class Play(val entry: FileEntry) : Screen
 }
@@ -90,7 +92,10 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         setContent {
-            CloudHubTheme {
+            // Read before the theme is applied, because it decides the theme.
+            var theme by remember { mutableStateOf(ThemeChoice.of(app.settings.themeChoice)) }
+
+            CloudHubTheme(theme) {
                 // Transparent bars mean the icons have to be told which way to
                 // contrast; without this they are white on a near-white
                 // background in light mode and invisible.
@@ -176,6 +181,8 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onOpenTrash = { screen = Screen.Trash },
+                        onOpenStorage = { screen = Screen.Storage },
+                        onOpenSettings = { screen = Screen.SettingsScreen },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
@@ -193,6 +200,33 @@ class MainActivity : ComponentActivity() {
                         onRecordVideo = { startCapture("mp4") { recordVideo.launch(it) } },
                         onDownload = { download(it) },
                         onShare = { sharing = it },
+                    )
+
+                    is Screen.Storage -> StorageScreen(
+                        api = app.api,
+                        onBack = { screen = Screen.Files },
+                    )
+
+                    is Screen.SettingsScreen -> SettingsScreen(
+                        api = app.api,
+                        settings = app.settings,
+                        user = state.user,
+                        appVersion = appVersion(),
+                        queuedUploads = queue.all().size,
+                        cacheBytes = thumbnailCacheBytes(),
+                        theme = theme,
+                        onTheme = { theme = it; app.settings.themeChoice = it.name },
+                        onClearCache = { clearThumbnailCache() },
+                        onChangeServer = { screen = Screen.Setup },
+                        onOpenStorage = { screen = Screen.Storage },
+                        onSignOut = {
+                            lifecycleScope.launch {
+                                runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
+                                app.settings.signOut()
+                                screen = Screen.SignIn
+                            }
+                        },
+                        onBack = { screen = Screen.Files },
                     )
 
                     is Screen.Trash -> TrashScreen(
@@ -232,6 +266,29 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         takeSharedFiles(intent)
+    }
+
+    /* ---- what settings reports ------------------------------------------- */
+
+    private fun appVersion(): String = runCatching {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        "${info.versionName} (${androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info)})"
+    }.getOrDefault("unknown")
+
+    /**
+     * What Coil's disk cache is holding.
+     *
+     * Measured rather than tracked: the loader writes to it in the background
+     * and nothing else here would know when it grew.
+     */
+    private fun thumbnailCacheBytes(): Long = runCatching {
+        java.io.File(cacheDir, "image_cache").walkBottomUp()
+            .filter { it.isFile }.sumOf { it.length() }
+    }.getOrDefault(0L)
+
+    private fun clearThumbnailCache() {
+        runCatching { app.newImageLoader().diskCache?.clear() }
+        runCatching { app.newImageLoader().memoryCache?.clear() }
     }
 
     /* ---- camera ----------------------------------------------------------- */

@@ -64,6 +64,34 @@ private val Dark = darkColorScheme(
 )
 
 /**
+ * Which theme to use, when the phone's own setting is not the last word.
+ *
+ * The app followed the system with no way to override it. Resolving the
+ * three-way choice is a pure function so the rule can be tested: "system"
+ * defers, and the other two do not.
+ */
+enum class ThemeChoice {
+    SYSTEM, LIGHT, DARK;
+
+    companion object {
+        fun of(name: String?): ThemeChoice =
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: SYSTEM
+
+        fun resolve(choice: ThemeChoice, systemDark: Boolean): Boolean = when (choice) {
+            SYSTEM -> systemDark
+            LIGHT -> false
+            DARK -> true
+        }
+    }
+
+    val label: String get() = when (this) {
+        SYSTEM -> "Follow the system"
+        LIGHT -> "Light"
+        DARK -> "Dark"
+    }
+}
+
+/**
  * Whether the device has asked for less movement.
  *
  * Read once per composition tree and passed down, because every animated part
@@ -85,7 +113,7 @@ object Motion {
 }
 
 @Composable
-fun CloudHubTheme(content: @Composable () -> Unit) {
+fun CloudHubTheme(choice: ThemeChoice = ThemeChoice.SYSTEM, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val reduceMotion = remember(context) {
         val scale = runCatching {
@@ -100,7 +128,7 @@ fun CloudHubTheme(content: @Composable () -> Unit) {
 
     CompositionLocalProvider(LocalReduceMotion provides reduceMotion) {
         MaterialTheme(
-            colorScheme = if (isSystemInDarkTheme()) Dark else Light,
+            colorScheme = if (ThemeChoice.resolve(choice, isSystemInDarkTheme())) Dark else Light,
             content = content,
         )
     }

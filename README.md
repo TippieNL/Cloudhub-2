@@ -326,6 +326,34 @@ Launching with a session that is still good no longer flashes the login form:
 the app shows the mark while it asks the server, then goes where the answer
 says.
 
+### Settings and Storage
+
+Both live in the overflow menu.
+
+**Storage** answers one question first: how much is left, in words, above a
+bar. What "left" measures against is whichever ceiling actually applies —
+your own quota if one is set, otherwise the whole-store limit, otherwise the
+disk itself. That last case matters on a self-hosted box: with no limit
+configured the drive *is* the ceiling, and calling it unlimited while the disk
+fills up would be a comfortable lie. Past 90% the bar turns red. Below it:
+files and folders, what the trash holds, and what the version history costs.
+Admins also get the per-account breakdown and a recalculate button.
+
+Every account can see its own figures, over a new **`GET /api/storage/me`**.
+`/api/storage/usage` is admin-only, so before this a user with a quota had no
+way to see how much of it they had used — they found out when an upload came
+back 507. The per-account route never forces a fresh measurement (walking the
+whole store stays an admin action), and it sweeps the ledger exactly as the
+quota check does, so the number on the screen is the number that will refuse an
+upload.
+
+**Settings** covers what previously needed a reinstall: the account and its
+role, changing your own password, the server address and how to change it, the
+theme (system, light or dark — the app used to follow the phone with no
+override), whether folders open as a grid or a list, how many videos have a
+saved position and a way to forget them, the thumbnail cache with a way to
+clear it, how many uploads are still queued, and signing out.
+
 ### The video player
 
 Fullscreen with a rotation to landscape and the system bars out of the way;

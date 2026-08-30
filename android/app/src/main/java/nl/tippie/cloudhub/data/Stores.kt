@@ -38,6 +38,22 @@ class Settings(context: Context) {
             if (value.isNullOrBlank()) prefs.edit().remove("remembered_username").apply()
             else prefs.edit().putString("remembered_username", value).apply()
 
+    /**
+     * Which theme to use: follow the system, or override it.
+     *
+     * Stored as the enum's own name so the value is readable in the
+     * preferences file and survives reordering the enum.
+     */
+    var themeChoice: String?
+        get() = prefs.getString("theme_choice", null)
+        set(value) = prefs.edit().putString("theme_choice", value).apply()
+
+    /** How many videos have a remembered position, for the settings screen. */
+    fun rememberedPositionCount(): Int = readResumeMap().size
+
+    /** Forget every remembered position. */
+    fun forgetAllResumePositions() = prefs.edit().remove("resume_positions").apply()
+
     /** Grid or list, remembered per install like the web app does. */
     var gridView: Boolean
         get() = prefs.getBoolean("grid_view", true)

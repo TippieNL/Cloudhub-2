@@ -80,6 +80,29 @@ class CloudHubApi(
 
     suspend fun config(): ServerConfigInfo = get("/api/files/config") { decode(it) }
 
+    /* ---- storage --------------------------------------------------------- */
+
+    /** This account's own usage. Any signed-in account may read it. */
+    suspend fun myStorage(): MyStorage = get("/api/storage/me") { decode(it) }
+
+    /**
+     * The whole-server report. Admins only, and the only place a fresh
+     * measurement can be asked for -- it walks the entire store.
+     */
+    suspend fun serverStorage(refresh: Boolean = false): ServerStorage =
+        if (refresh) get("/api/storage/usage", "refresh" to "1") { decode(it) }
+        else get("/api/storage/usage") { decode(it) }
+
+    /**
+     * Change the signed-in account's own password.
+     *
+     * Exempt from the write capability on the server, deliberately: a viewer
+     * must be able to rotate their own credentials.
+     */
+    suspend fun changePassword(current: String, replacement: String): SimpleResult =
+        post("/api/users/me/password",
+            mapOf("currentPassword" to current, "newPassword" to replacement)) { decode(it) }
+
     /* ---- browsing -------------------------------------------------------- */
 
     suspend fun list(path: String): List<FileEntry> =
