@@ -343,6 +343,35 @@ $checks['the card stops growing on a tablet'] =
 $checks['the mark is the launcher icon, not a stock glyph'] =
     str_contains($brand, 'fun BrandMark') && !str_contains($brand, 'Icons.Default.CloudUpload')
     && str_contains($signIn, 'BrandMark(') && str_contains($files, 'BrandMark(');
+/*
+ * The mark came out as a lattice rather than a cloud: adding the cloud and the
+ * arrow to one path under EvenOdd knocks out every region covered an even
+ * number of times, which includes each overlap between the cloud's own bumps.
+ * The arrow has to be subtracted as a shape.
+ */
+$checks['the arrow is subtracted from the cloud, not parity-knocked'] =
+    str_contains($brand, 'Path.combine(PathOperation.Difference, cloud, arrow)')
+    && !str_contains($brand, 'PathFillType.EvenOdd');
+
+// --- the sign-in card ---------------------------------------------------------------
+// White at 72% over a pale gradient is grey, and a hard drop shadow is the most
+// dated thing a card can wear.
+$checks['the card reads as paper, not as a grey scrim'] =
+    str_contains($signIn, 'surface.copy(alpha = 0.90f)')
+    && str_contains($signIn, 'shadowElevation = 2.dp');
+$checks['fields sit on the card rather than being cut into it'] =
+    str_contains($signIn, 'focusedContainerColor = fill')
+    && str_contains($signIn, 'onSurface.copy(alpha = 0.10f)');
+// The address is shown so you can check which server gets your password;
+// percent-escapes make that harder, not easier.
+$checks['the server address is readable, not percent-encoded'] =
+    str_contains($signInVm, 'fun displayServer(url: String): String')
+    && str_contains($signIn, 'displayServer(serverUrl)');
+// URLDecoder is a form decoder and would read + as a space.
+$checks['a plus in a folder name survives being displayed'] =
+    str_contains($signInVm, 'trimmed.replace("+", "%2B")');
+$checks['an address that cannot be tidied is still shown'] =
+    str_contains($signInVm, '.getOrDefault(trimmed)');
 
 // --- animation ------------------------------------------------------------------
 $checks['the entrance is staggered from one driver'] =

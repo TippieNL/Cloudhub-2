@@ -76,6 +76,31 @@ object SignInForm {
 }
 
 /**
+ * The server address as a person should read it.
+ *
+ * The scheme and any trailing slash carry nothing worth the width, and the
+ * percent-escapes actively get in the way: a CloudHub installed in a folder
+ * with a space in its name showed as "Cloud%20File%20Hub". This line exists so
+ * you can check which server you are about to hand a password to, and encoding
+ * makes that harder rather than easier.
+ *
+ * Display only -- the stored URL is never rewritten from this.
+ */
+fun displayServer(url: String): String {
+    val trimmed = url.trim()
+        .removePrefix("https://")
+        .removePrefix("http://")
+        .trimEnd('/')
+    // URLDecoder is a form decoder, so it would also turn a literal + in a
+    // folder name into a space -- a wrong answer about which server this is.
+    // Escaping it first makes it round-trip back to itself.
+    val plusSafe = trimmed.replace("+", "%2B")
+    // A malformed escape is shown as typed rather than throwing: an address
+    // that cannot be tidied is still worth reading.
+    return runCatching { java.net.URLDecoder.decode(plusSafe, "UTF-8") }.getOrDefault(trimmed)
+}
+
+/**
  * Sign-in, kept off the screen.
  *
  * The composable renders [state] and calls [submit]; it holds no credentials

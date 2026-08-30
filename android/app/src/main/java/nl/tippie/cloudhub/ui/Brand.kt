@@ -14,7 +14,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.graphicsLayer
 
 /**
@@ -63,12 +63,17 @@ fun BrandMark(modifier: Modifier = Modifier) {
             addRect(Rect(p(46f, 44f), p(58f, 72f)))
         }
 
-        // Knocked out, so the two shapes cannot merge into a blob at any size.
-        val mark = Path().apply {
-            fillType = PathFillType.EvenOdd
-            addPath(cloud)
-            addPath(arrow)
-        }
+        /*
+         * The arrow is subtracted from the cloud as a shape.
+         *
+         * Adding both to one path and setting EvenOdd knocks out every region
+         * covered an even number of times -- which includes each place two of
+         * the cloud's bumps overlap, and where the slab crosses them. The mark
+         * came out as a lattice rather than a cloud. Difference removes the
+         * arrow and nothing else; the cloud keeps its default non-zero fill, so
+         * its bumps merge the way they are meant to.
+         */
+        val mark = Path.combine(PathOperation.Difference, cloud, arrow)
         drawPath(mark, brush = Brush.linearGradient(listOf(scheme.primary, scheme.secondary)))
     }
 }

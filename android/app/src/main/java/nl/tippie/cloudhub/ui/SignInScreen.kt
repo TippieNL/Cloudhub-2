@@ -63,6 +63,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -177,31 +178,41 @@ fun SignInScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Staggered(entrance, step = 0) {
-                    BrandMark(Modifier.size(72.dp))
+                    BrandMark(Modifier.size(76.dp))
                 }
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(26.dp))
 
                 Staggered(entrance, step = 1) {
                     Text(
                         "CloudHub",
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.SemiBold,
-                        letterSpacing = (-0.5).sp,
+                        letterSpacing = (-1).sp,
                     )
                 }
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(10.dp))
 
                 Staggered(entrance, step = 2) {
-                    Text(
-                        // The one line on this screen carrying information:
-                        // which server you are about to hand a password to.
-                        serverUrl.removePrefix("https://").removePrefix("http://").trimEnd('/'),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
+                    // The one line on this screen carrying information: which
+                    // server you are about to hand a password to. Set in a
+                    // quiet pill so it reads as a label rather than as a
+                    // caption nobody was meant to look at.
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f),
+                    ) {
+                        Text(
+                            displayServer(serverUrl),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                        )
+                    }
                 }
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(30.dp))
 
                 Staggered(entrance, step = 3, modifier = cardWidth) {
                     GlassCard(
@@ -209,7 +220,7 @@ fun SignInScreen(
                             .fillMaxWidth()
                             .graphicsLayer { translationX = shake.value }
                     ) {
-                        Column(Modifier.padding(24.dp)) {
+                        Column(Modifier.padding(horizontal = 24.dp, vertical = 28.dp)) {
                             AnimatedField(
                                 value = username,
                                 onValueChange = { username = it; model.editing() },
@@ -229,7 +240,7 @@ fun SignInScreen(
                                     onNext = { focus.moveFocus(FocusDirection.Down) },
                                 ),
                             )
-                            Spacer(Modifier.height(14.dp))
+                            Spacer(Modifier.height(16.dp))
 
                             AnimatedField(
                                 value = password,
@@ -269,13 +280,13 @@ fun SignInScreen(
                                 )
                             }
 
-                            Spacer(Modifier.height(6.dp))
+                            Spacer(Modifier.height(10.dp))
                             RememberRow(
                                 checked = remember,
                                 enabled = !busy,
                                 onChange = { remember = it },
                             )
-                            Spacer(Modifier.height(16.dp))
+                            Spacer(Modifier.height(22.dp))
 
                             SubmitButton(state = state, onClick = ::submit)
                         }
@@ -381,20 +392,22 @@ private fun DrawScope.blob(
 /* ---- the card ------------------------------------------------------------ */
 
 /**
- * Glass: a translucent surface over the live gradient, with a hairline edge.
+ * The card: paper resting on the gradient.
  *
- * Not a blurred screenshot -- the gradient moves, so a captured blur would
- * either be stale or cost a readback every frame.
+ * Nearly opaque rather than a 72% scrim -- white at 72% over a pale gradient is
+ * simply grey, and a grey slab was the loudest thing on the screen. The lift
+ * comes from a wide, very soft shadow instead of a hard drop shadow, which is
+ * the most dated thing a card can wear.
  */
 @Composable
 private fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
+        tonalElevation = 0.dp,
+        shadowElevation = 2.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)),
         content = content,
     )
 }
@@ -446,14 +459,25 @@ private fun AnimatedField(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
 
+    // A hairline at rest, the brand colour on focus. The outline used to be the
+    // heaviest edge anywhere on the screen, which drew the eye to the boxes
+    // rather than to what goes in them.
     val border by animateColorAsState(
         when {
             isError -> MaterialTheme.colorScheme.error
             focused -> MaterialTheme.colorScheme.primary
-            else -> MaterialTheme.colorScheme.outlineVariant
+            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
         },
         tween(220),
         label = "border",
+    )
+    // Filled a shade *lighter* than the card, so a field reads as sitting on
+    // the paper rather than as a box cut out of it.
+    val fill by animateColorAsState(
+        if (focused) MaterialTheme.colorScheme.surface
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        tween(220),
+        label = "fill",
     )
 
     OutlinedTextField(
@@ -468,11 +492,14 @@ private fun AnimatedField(
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
         trailingIcon = trailing,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = border,
             unfocusedBorderColor = border,
             errorBorderColor = border,
+            focusedContainerColor = fill,
+            unfocusedContainerColor = fill,
+            errorContainerColor = fill,
         ),
         modifier = Modifier.fillMaxWidth(),
     )
@@ -537,10 +564,10 @@ private fun SubmitButton(state: SignInUiState, onClick: () -> Unit) {
         // a second press is refused by the view model, not by the widget.
         enabled = true,
         interactionSource = interaction,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(18.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 52.dp)
+            .heightIn(min = 56.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale },
     ) {
         AnimatedContent(

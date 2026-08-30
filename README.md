@@ -290,6 +290,11 @@ Under **Accessibility > Remove animations** all of that stops: the background
 holds still, nothing shakes, and the form is simply there. The states still
 change — instantly.
 
+The server's address is shown under the title, percent-decoded — a CloudHub
+installed in a folder with a space in its name reads as `Cloud File Hub`, not
+`Cloud%20File%20Hub`. It is there so you can check which server is about to get
+your password, and encoding made that harder.
+
 **Remember my username** stores the name and nothing else. It is deliberately
 not "keep me signed in", which the app does anyway: the session cookie already
 survives a restart, so a box promising it would be describing something that

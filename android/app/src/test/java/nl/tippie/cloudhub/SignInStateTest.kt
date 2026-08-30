@@ -13,6 +13,7 @@ import nl.tippie.cloudhub.ui.SignInError
 import nl.tippie.cloudhub.ui.SignInForm
 import nl.tippie.cloudhub.ui.SignInUiState
 import nl.tippie.cloudhub.ui.SignInViewModel
+import nl.tippie.cloudhub.ui.displayServer
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -209,5 +210,64 @@ class ReduceMotionTest {
         assertFalse(Motion.reduced(0.5f))
         assertFalse(Motion.reduced(2f))
         assertFalse(Motion.reduced(10f))
+    }
+}
+
+/**
+ * The server address, as shown under the title.
+ *
+ * It is the one line on the sign-in screen carrying information -- which server
+ * is about to receive a password -- so it has to be readable. A CloudHub in a
+ * folder with a space in its name was rendering as "Cloud%20File%20Hub".
+ */
+class DisplayServerTest {
+
+    @Test
+    fun `percent escapes are decoded`() {
+        assertEquals(
+            "100.90.78.46:8000/Cloud File Hub",
+            displayServer("http://100.90.78.46:8000/Cloud%20File%20Hub"),
+        )
+    }
+
+    @Test
+    fun `the scheme is dropped`() {
+        assertEquals("files.example.com", displayServer("https://files.example.com"))
+        assertEquals("files.example.com", displayServer("http://files.example.com"))
+    }
+
+    @Test
+    fun `a trailing slash goes`() {
+        // The app stores the address with the slash the front controller needs;
+        // showing it adds nothing.
+        assertEquals("files.example.com", displayServer("https://files.example.com/"))
+        assertEquals("example.com/hub", displayServer("https://example.com/hub/"))
+    }
+
+    @Test
+    fun `an already-clean address is left alone`() {
+        assertEquals("files.example.com", displayServer("files.example.com"))
+        assertEquals("192.168.1.4:8080", displayServer("192.168.1.4:8080"))
+    }
+
+    @Test
+    fun `surrounding whitespace is trimmed`() {
+        assertEquals("files.example.com", displayServer("  https://files.example.com/  "))
+    }
+
+    @Test
+    fun `a plus in a folder name stays a plus`() {
+        // URLDecoder is a *form* decoder and would read + as a space, which is
+        // the wrong answer about which server this is.
+        assertEquals("example.com/C++ notes", displayServer("https://example.com/C++%20notes"))
+        assertEquals("example.com/a+b", displayServer("https://example.com/a+b"))
+    }
+
+    @Test
+    fun `a malformed escape is shown as typed rather than throwing`() {
+        // A lone % is not a valid escape. An address that cannot be tidied is
+        // still worth reading, and a crash on the sign-in screen is not a fix.
+        assertEquals("example.com/100%", displayServer("https://example.com/100%"))
+        assertEquals("example.com/a%zz", displayServer("https://example.com/a%zz"))
     }
 }
