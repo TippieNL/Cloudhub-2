@@ -157,7 +157,9 @@ final class Client
         if ($raw === false) {
             $error = curl_error($ch);
             curl_close($ch);
-            throw new \RuntimeException("$method $route failed: $error");
+            // The URL, not the route: this is also reached from fetchUrl(),
+            // where there is no route to name.
+            throw new \RuntimeException("$method $url failed: $error");
         }
         $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $headerSize = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);

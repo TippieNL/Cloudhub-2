@@ -77,8 +77,13 @@ $checks['the copied link is the file, the Open link is the page'] =
 // Saving the picture out of the viewer page used to suggest a file called
 // "raw", because that was the last segment of the URL it came from.
 $checks['the viewer page loads the media from its named URL'] =
-    str_contains($index, "'rawUrl' => \$basePath.'/share/'.\$share['token'].'/'.rawurlencode(\$name)")
-    && str_contains($index, "'downloadUrl' => \$basePath.'/share/'.\$share['token'].'/download/'.rawurlencode(\$name)");
+    str_contains($index, "'rawUrl' => Http::encodePath(\$basePath).'/share/'.\$share['token'].'/'.rawurlencode(\$name)")
+    && str_contains($index, "'downloadUrl' => Http::encodePath(\$basePath).'/share/'.\$share['token'].'/download/'.rawurlencode(\$name)");
+// An install in a folder called "Cloud File Hub" otherwise hands out links
+// with real spaces in them: chat clients cut those short at the space.
+$checks['a base path with spaces in it is encoded'] =
+    str_contains($index, "return public_origin(\$config).Http::encodePath(\$basePath).'/share/'.\$token;")
+    && str_contains((string)@file_get_contents($root.'/src/Helpers/Http.php'), 'public static function encodePath(');
 $checks['link previews point at the named file'] =
     str_contains($view, '<meta property="og:image" content="<?= $fileUrl ?>">')
     && str_contains($view, '<meta property="og:video" content="<?= $fileUrl ?>">');

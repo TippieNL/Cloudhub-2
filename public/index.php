@@ -380,7 +380,9 @@ function public_origin(array $config): string {
  * for everything else it is the download itself, since there is no page.
  */
 function share_url(array $config, string $basePath, string $token): string {
-    return public_origin($config).$basePath.'/share/'.$token;
+    // Encoded: an install in a folder called "Cloud File Hub" otherwise hands
+    // out links with real spaces in them, which chat clients cut short.
+    return public_origin($config).Http::encodePath($basePath).'/share/'.$token;
 }
 
 /**
@@ -1236,8 +1238,8 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
                 'mime' => media_mime_type($file),
                 // Named, so that saving the picture out of the page suggests
                 // the file's own name -- /raw suggested a file called "raw".
-                'rawUrl' => $basePath.'/share/'.$share['token'].'/'.rawurlencode($name),
-                'downloadUrl' => $basePath.'/share/'.$share['token'].'/download/'.rawurlencode($name),
+                'rawUrl' => Http::encodePath($basePath).'/share/'.$share['token'].'/'.rawurlencode($name),
+                'downloadUrl' => Http::encodePath($basePath).'/share/'.$share['token'].'/download/'.rawurlencode($name),
                 'fileUrl' => share_file_url($config, $basePath, (string)$share['token'], $name),
                 'pageUrl' => share_url($config, $basePath, (string)$share['token']),
                 'expiresAt' => $share['expires_at']?gmdate('c', strtotime((string)$share['expires_at'])):null,
