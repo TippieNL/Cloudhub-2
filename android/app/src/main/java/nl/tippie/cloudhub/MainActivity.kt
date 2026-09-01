@@ -23,6 +23,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.activity.compose.BackHandler
 import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
@@ -137,10 +138,34 @@ class MainActivity : ComponentActivity() {
                     },
                 )
 
-                var screen by remember {
-                    mutableStateOf<Screen>(
+                /*
+                 * Where the app is, and how it got there.
+                 *
+                 * A stack rather than a single value, because Back has to
+                 * return you to the screen you came from: opening Storage from
+                 * Settings and pressing Back used to drop you at the file list,
+                 * having forgotten Settings entirely. The rules for what Back
+                 * does from any given place are in ui/BackRules.kt.
+                 */
+                val stack = remember {
+                    mutableStateListOf<Screen>(
                         if (app.settings.serverUrl.isNullOrBlank()) Screen.Setup else Screen.Restoring
                     )
+                }
+                val screen = stack.last()
+                /** Open a screen, remembering the one it was opened from. */
+                fun go(next: Screen) {
+                    val updated = BackRules.pushed(stack.toList(), next)
+                    stack.clear(); stack.addAll(updated)
+                }
+                /** Back: to the previous screen, or nothing if this is the first. */
+                fun back() {
+                    val updated = BackRules.popped(stack.toList())
+                    stack.clear(); stack.addAll(updated)
+                }
+                /** Sign in, sign out, change server: a new beginning, no history. */
+                fun reset(next: Screen) {
+                    stack.clear(); stack.add(next)
                 }
                 var sharing by remember { mutableStateOf<FileEntry?>(null) }
                 val state by model.state.collectAsState()
@@ -154,18 +179,46 @@ class MainActivity : ComponentActivity() {
                     if (screen is Screen.Restoring) {
                         val ok = runCatching { withContext(Dispatchers.IO) { app.api.status() }.authenticated }
                             .getOrDefault(false)
-                        if (ok) { screen = Screen.Files; model.start() } else screen = Screen.SignIn
+                        if (ok) { reset(Screen.Files); model.start() } else reset(Screen.SignIn)
                     }
                 }
 
                 LaunchedEffect(state.path) { uploadTarget = state.path }
+
+                /*
+                 * One handler for the whole app, consulted before Android's
+                 * own. Disabled at the root, which is what lets the system
+                 * close the app normally -- including the predictive-back
+                 * animation on Android 13 and up. The player registers its own
+                 * while fullscreen; a nested handler is asked first, so
+                 * un-maximising still wins over leaving the video.
+                 */
+                val outcome = BackRules.next(
+                    BackRules.Where(
+                        depth = stack.size,
+                        onFiles = screen is Screen.Files,
+                        selection = state.selected.size,
+                        searching = state.filtering,
+                        folder = state.path,
+                    )
+                )
+                BackHandler(enabled = outcome != BackRules.Outcome.LEAVE_THE_APP) {
+                    when (outcome) {
+                        BackRules.Outcome.CLEAR_SELECTION -> model.clearSelection()
+                        BackRules.Outcome.CLEAR_SEARCH -> model.clearSearch()
+                        BackRules.Outcome.GO_UP_A_FOLDER -> model.open(BackRules.parentOf(state.path))
+                        BackRules.Outcome.PREVIOUS_SCREEN -> back()
+                        // Never reached: the handler is disabled for this.
+                        BackRules.Outcome.LEAVE_THE_APP -> Unit
+                    }
+                }
 
                 when (val current = screen) {
                     is Screen.Setup -> SetupScreen(
                         api = app.api,
                         initial = app.settings.serverUrl,
                         onTrust = { app.pins.trust(it) },
-                        onReady = { app.useServer(it); screen = Screen.SignIn },
+                        onReady = { app.useServer(it); reset(Screen.SignIn) },
                     )
 
                     is Screen.Restoring -> RestoringScreen()
@@ -176,36 +229,37 @@ class MainActivity : ComponentActivity() {
                         rememberedUsername = app.settings.rememberedUsername,
                         onSignedIn = { username, remember ->
                             app.settings.rememberedUsername = if (remember) username else null
-                            screen = Screen.Files
+                            reset(Screen.Files)
                             model.start()
                             UploadWorker.enqueue(this@MainActivity)
                         },
-                        onChangeServer = { screen = Screen.Setup },
+                        onChangeServer = { go(Screen.Setup) },
                     )
 
                     is Screen.Files -> FilesScreen(
                         api = app.api,
                         model = model,
                         onOpenFile = { entry ->
-                            screen = when (entry.kind) {
+                            when (entry.kind) {
                                 FileEntry.Kind.IMAGE -> {
                                     val images = state.visible.filter { it.kind == FileEntry.Kind.IMAGE }
-                                    Screen.Images(images, images.indexOfFirst { it.path == entry.path })
+                                    go(Screen.Images(images, images.indexOfFirst { it.path == entry.path }))
                                 }
-                                FileEntry.Kind.VIDEO, FileEntry.Kind.AUDIO -> Screen.Play(entry)
+                                FileEntry.Kind.VIDEO, FileEntry.Kind.AUDIO -> go(Screen.Play(entry))
                                 // Anything with no viewer of its own is handed
-                                // to whatever app on the phone does handle it.
-                                else -> { openExternally(entry); current }
+                                // to whatever app on the phone does handle it,
+                                // which is not a screen of ours to go back from.
+                                else -> openExternally(entry)
                             }
                         },
-                        onOpenTrash = { screen = Screen.Trash },
-                        onOpenStorage = { screen = Screen.Storage },
-                        onOpenSettings = { screen = Screen.SettingsScreen },
+                        onOpenTrash = { go(Screen.Trash) },
+                        onOpenStorage = { go(Screen.Storage) },
+                        onOpenSettings = { go(Screen.SettingsScreen) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
-                                screen = Screen.SignIn
+                                reset(Screen.SignIn)
                             }
                         },
                         onPickMedia = {
@@ -223,7 +277,7 @@ class MainActivity : ComponentActivity() {
 
                     is Screen.Storage -> StorageScreen(
                         api = app.api,
-                        onBack = { screen = Screen.Files },
+                        onBack = { back() },
                     )
 
                     is Screen.SettingsScreen -> SettingsScreen(
@@ -238,33 +292,33 @@ class MainActivity : ComponentActivity() {
                         onTheme = { theme = it; app.settings.themeChoice = it.name },
                         onClearCache = { clearThumbnailCache() },
                         onClearVideoCache = { MediaCache.clear(this@MainActivity) },
-                        onChangeServer = { screen = Screen.Setup },
-                        onOpenStorage = { screen = Screen.Storage },
+                        onChangeServer = { go(Screen.Setup) },
+                        onOpenStorage = { go(Screen.Storage) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
-                                screen = Screen.SignIn
+                                reset(Screen.SignIn)
                             }
                         },
-                        onBack = { screen = Screen.Files },
+                        onBack = { back() },
                     )
 
                     is Screen.Trash -> TrashScreen(
                         api = app.api,
                         canWrite = state.canWrite,
-                        onBack = { screen = Screen.Files; model.refresh() },
+                        onBack = { back(); model.refresh() },
                     )
 
                     is Screen.Images -> ImageViewer(
                         api = app.api, images = current.images, startAt = current.index,
-                        onBack = { screen = Screen.Files },
+                        onBack = { back() },
                     )
 
                     is Screen.Play -> PlayerScreen(
                         api = app.api, client = app.client, settings = app.settings,
                         entry = current.entry,
-                        onBack = { screen = Screen.Files },
+                        onBack = { back() },
                     )
                 }
 

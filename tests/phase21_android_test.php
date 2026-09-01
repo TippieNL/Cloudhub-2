@@ -414,10 +414,13 @@ $checks['only the username is ever remembered'] =
 // --- the launch path ----------------------------------------------------------------
 // Rendering sign-in before the session check answers meant an already signed-in
 // launch flashed a half-animated login form on its way to the files.
+// The spelling changed when screens became a stack -- a session that resolves
+// to sign-in starts a new history rather than being pushed on top of the
+// restore screen, or Back would return to a screen that was never really there.
 $checks['the login screen is not shown before the session check answers'] =
     str_contains($main, 'data object Restoring : Screen')
     && str_contains($main, 'if (screen is Screen.Restoring)')
-    && str_contains($main, 'else screen = Screen.SignIn');
+    && str_contains($main, 'else reset(Screen.SignIn)');
 $checks['the app draws edge to edge'] =
     str_contains($main, 'WindowCompat.setDecorFitsSystemWindows(window, false)')
     && str_contains($themes, '@android:color/transparent');

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -49,7 +50,25 @@ fun ImageViewer(api: CloudHubApi, images: List<FileEntry>, startAt: Int, onBack:
             )
         },
     ) { padding ->
-        HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().padding(padding)) { page ->
+        /*
+         * The pager's own swipe, kept out of the system's way.
+         *
+         * With gesture navigation the strips down each side of the screen
+         * belong to Android: a swipe that starts there is Back, whatever the
+         * app underneath thinks. In a gallery, where swiping sideways is the
+         * whole interaction, a photo swiped from the very edge would leave the
+         * viewer instead of turning the page.
+         *
+         * systemGestureExclusion() asks for those strips back, and the system
+         * grants at most 200dp of height per edge -- so Back by gesture still
+         * works above and below the excluded band, as do the toolbar arrow and
+         * the three-button Back. This is a carousel, the case the API exists
+         * for, not a way of switching the gesture off.
+         */
+        HorizontalPager(
+            state = pager,
+            modifier = Modifier.fillMaxSize().padding(padding).systemGestureExclusion(),
+        ) { page ->
             var scale by remember(page) { mutableFloatStateOf(1f) }
             var offsetX by remember(page) { mutableFloatStateOf(0f) }
             var offsetY by remember(page) { mutableFloatStateOf(0f) }

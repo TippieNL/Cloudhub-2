@@ -407,6 +407,43 @@ the first or last few seconds are not offered — resuming a film ten seconds
 from the end is worse than starting it — a finished video is forgotten, and the
 remembered set is capped so preferences cannot grow without limit.
 
+### Going back
+
+The app had one back handler in it — the video player's, and only while
+fullscreen. Everywhere else, Back reached the Activity and finished it: three
+folders deep, in Settings, or looking at a photo, a Back press **closed
+CloudHub**. Under gesture navigation that press is a swipe in from the edge of
+the screen, easy to make by accident and impossible to tell apart from a swipe
+meant for the app, so it looked like the app quit at random.
+
+Back now undoes one thing at a time, in the order they were done:
+
+| Where you are | What Back does |
+|---|---|
+| Files, with a selection | Clears the selection |
+| Files, with a search | Clears the search |
+| Files, in a subfolder | Goes up one folder |
+| Any screen opened from another | Returns to the one it was opened from |
+| A video, fullscreen | Un-maximises, as before |
+| The root of the file list | **Closes the app**, exactly as Android does everywhere else |
+
+That last row matters as much as the others: an app you cannot leave is worse
+than one that leaves too easily. At the root the handler is simply disabled, so
+the system does its own thing — including the predictive-back animation, which
+the app now opts into with `android:enableOnBackInvokedCallback`.
+
+Screens are a stack rather than a single value, so opening Storage from
+Settings and pressing Back returns to Settings — it used to drop you at the
+file list, having forgotten Settings entirely. Signing in or out clears the
+stack: Back must not walk into a session that has ended.
+
+The photo viewer is the one place with a genuine gesture conflict: swiping
+sideways is the whole interaction, and Android owns the strips down each edge.
+The pager asks for them back with `systemGestureExclusion()`, which the system
+grants up to 200dp of height per edge — so a photo swiped from the very edge
+turns the page, while Back by gesture still works above and below that band,
+along with the toolbar arrow and three-button Back.
+
 ### What playback costs
 
 Three things used to make watching a video more expensive than it needed to be.
