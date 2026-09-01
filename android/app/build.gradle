@@ -25,8 +25,8 @@ android {
         // scoped-storage-free MediaStore writes stop being needed.
         minSdk 24
         targetSdk 34
-        versionCode 11
-        versionName "2.9"
+        versionCode 12
+        versionName "3.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -88,6 +88,10 @@ dependencies {
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-ui:1.4.1'
     implementation 'androidx.media3:media3-datasource-okhttp:1.4.1'
+    // The index behind the player's disk cache (data/MediaCache.kt). Arrives
+    // transitively with the exoplayer artifact; named here because the code
+    // uses it directly.
+    implementation 'androidx.media3:media3-database:1.4.1'
 
     // Uploads outlive the app being closed.
     implementation 'androidx.work:work-runtime-ktx:2.9.1'

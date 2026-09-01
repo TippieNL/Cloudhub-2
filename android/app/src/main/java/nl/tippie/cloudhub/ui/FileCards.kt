@@ -39,10 +39,14 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import coil.compose.AsyncImagePainter
 import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
+import coil.request.CachePolicy
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 
@@ -355,12 +359,15 @@ private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
         )
 
         FileEntry.Kind.VIDEO -> Box(modifier, contentAlignment = Alignment.Center) {
-            ThumbnailImage(
-                url = if (entry.hasThumbnail) api.thumbnailUrl(entry).toString()
-                else api.streamUrl(entry.path).toString(),
-                description = entry.name,
-                modifier = Modifier.fillMaxSize(),
-            )
+            if (entry.hasThumbnail) {
+                ThumbnailImage(
+                    url = api.thumbnailUrl(entry).toString(),
+                    description = entry.name,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                VideoFrameThumbnail(api, entry, Modifier.fillMaxSize())
+            }
             Surface(
                 shape = RoundedCornerShape(50),
                 color = Color.Black.copy(alpha = 0.45f),
@@ -402,6 +409,107 @@ private fun ThumbnailImage(url: String, description: String, modifier: Modifier)
             )
             else -> SubcomposeAsyncImageContent()
         }
+    }
+}
+
+/**
+ * A video the server has no frame for, drawn by decoding one here.
+ *
+ * The tile used to be handed the video's own URL, which meant fetching the
+ * whole video to draw a picture the size of a stamp -- over the connection
+ * playback wants. Two things change that: only the first few megabytes are
+ * asked for, and the frame that comes out is handed back to the server, so
+ * this happens once for a file rather than once per device per folder view.
+ *
+ * A file whose index sits at the end of the container cannot be decoded from
+ * a prefix. Those fall back to the old behaviour, but only while the file is
+ * small enough for that to be a fair trade; a 4 GB film gets the icon.
+ */
+@Composable
+private fun VideoFrameThumbnail(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
+    val context = LocalContext.current
+    val progress = rememberShimmer()
+    var wholeFile by remember(entry.path) { mutableStateOf(false) }
+    val range = if (wholeFile) null else VideoThumbnails.rangeHeader(entry.size)
+
+    val request = remember(entry.path, entry.modified, range) {
+        ImageRequest.Builder(context)
+            .data(api.streamUrl(entry.path).toString())
+            .crossfade(true)
+            .apply {
+                if (range != null) {
+                    setHeader("Range", range)
+                    // A prefix must never be filed under the whole file's key:
+                    // the next reader of that entry would get a truncated
+                    // video and no way to know it.
+                    diskCachePolicy(CachePolicy.DISABLED)
+                    memoryCacheKey("frame:${'$'}{entry.path}|${'$'}{entry.modified}")
+                }
+            }
+            .build()
+    }
+
+    SubcomposeAsyncImage(
+        model = request,
+        contentDescription = entry.name,
+        contentScale = ContentScale.Crop,
+        modifier = modifier,
+    ) {
+        when (val state = painter.state) {
+            is AsyncImagePainter.State.Loading ->
+                SkeletonBlock(progress, Modifier.fillMaxSize(), corner = 0.dp)
+
+            is AsyncImagePainter.State.Error -> {
+                // Decoding from the prefix failed. Try the whole file once,
+                // for a file where that is affordable.
+                LaunchedEffect(entry.path, range) {
+                    if (range != null && VideoThumbnails.mayFetchWholeFile(entry.size)) wholeFile = true
+                }
+                Icon(
+                    Icons.Default.PlayArrow, null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+
+            is AsyncImagePainter.State.Success -> {
+                SubcomposeAsyncImageContent()
+                LaunchedEffect(entry.path, entry.modified) {
+                    contributeFrame(api, entry, state)
+                }
+            }
+
+            else -> SubcomposeAsyncImageContent()
+        }
+    }
+}
+
+/**
+ * Hand the decoded frame to the server.
+ *
+ * Best effort on purpose: a thumbnail nobody could store is a thumbnail, not
+ * an error, and the tile on screen is already drawn. The server keeps the
+ * first one it is given, so a race between two devices costs one wasted POST.
+ */
+private suspend fun contributeFrame(api: CloudHubApi, entry: FileEntry, state: AsyncImagePainter.State.Success) {
+    if (!VideoThumbnails.markContributed(entry.path)) return
+    runCatching {
+        val encoded = withContext(Dispatchers.IO) {
+            val frame = state.result.drawable.toBitmap()
+            val (width, height) = VideoThumbnails.scaledSize(frame.width, frame.height)
+            if (width <= 0 || height <= 0) return@withContext null
+            val scaled = if (width == frame.width && height == frame.height) frame
+            else android.graphics.Bitmap.createScaledBitmap(frame, width, height, true)
+
+            val bytes = java.io.ByteArrayOutputStream()
+            @Suppress("DEPRECATION")
+            val format = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
+                android.graphics.Bitmap.CompressFormat.WEBP_LOSSY
+            else android.graphics.Bitmap.CompressFormat.WEBP
+            if (!scaled.compress(format, VideoThumbnails.QUALITY, bytes)) return@withContext null
+            android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
+        }
+        if (encoded != null) api.contributeVideoThumbnail(entry.path, encoded)
     }
 }
 

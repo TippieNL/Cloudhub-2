@@ -268,6 +268,95 @@ scenario('a revoked link stops working', function () use ($client, $base, $uploa
     check('the link is dead', $raw->status === 404, $raw->describe());
 });
 
+/* ---- playback ---------------------------------------------------------------
+ *
+ * What a player does between opening a video and finishing it: read a little,
+ * seek, come back tomorrow and check whether the file it cached is still the
+ * file on the server.
+ */
+
+scenario('a cached video is revalidated rather than fetched again', function () use ($client, $scratch) {
+    $bytes = str_repeat("\x00\x11\x22\x33", 4096);
+    $init = $client->post('/api/uploads/init', [
+        'targetPath' => $scratch, 'name' => 'cached.wav', 'size' => strlen($bytes),
+        'uploadId' => 'cache'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite',
+    ]);
+    $id = $init->json['id'] ?? '';
+    if ($id === '') { check('the clip uploads', false, $init->describe()); return; }
+    $client->putChunk($id, 0, $bytes);
+    $client->post('/api/uploads/complete', ['id' => $id]);
+    $media = $scratch.'/cached.wav';
+
+    $first = $client->get('/api/files/stream', ['path' => $media]);
+    $etag = (string)$first->header('ETag');
+    $modified = (string)$first->header('Last-Modified');
+    check('the response carries an ETag', $etag !== '', $first->describe());
+    check('and a Last-Modified', $modified !== '');
+
+    // The whole point: a player that already has the file asks whether it is
+    // still good, and is told in a few bytes rather than the whole video.
+    $again = $client->get('/api/files/stream', ['path' => $media], ['If-None-Match: '.$etag]);
+    check('an unchanged file is 304', $again->status === 304, $again->describe());
+    check('and sends no body at all', $again->body === '', strlen($again->body).' bytes');
+
+    $byDate = $client->get('/api/files/stream', ['path' => $media], ['If-Modified-Since: '.$modified]);
+    check('the date form works too', $byDate->status === 304, $byDate->describe());
+
+    $stale = $client->get('/api/files/stream', ['path' => $media], ['If-None-Match: "0-0"']);
+    check('a stale validator still gets the file', $stale->status === 200 && $stale->body === $bytes,
+        $stale->describe());
+});
+
+/*
+ * If-Range is the header that stops a resumed download stitching two
+ * different videos together -- a file replaced between two range requests
+ * cannot be detected by any player, so the server has to answer for it.
+ */
+scenario('resuming a range only continues the same file', function () use ($client, $scratch) {
+    $bytes = str_repeat("\x44\x55", 8192);
+    $init = $client->post('/api/uploads/init', [
+        'targetPath' => $scratch, 'name' => 'resumed.wav', 'size' => strlen($bytes),
+        'uploadId' => 'ifrange'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite',
+    ]);
+    $id = $init->json['id'] ?? '';
+    if ($id === '') { check('the clip uploads', false, $init->describe()); return; }
+    $client->putChunk($id, 0, $bytes);
+    $client->post('/api/uploads/complete', ['id' => $id]);
+    $media = $scratch.'/resumed.wav';
+
+    $etag = (string)$client->get('/api/files/stream', ['path' => $media])->header('ETag');
+    if ($etag === '') { check('an ETag is issued', false); return; }
+
+    $ok = $client->get('/api/files/stream', ['path' => $media], ['Range: bytes=100-199', 'If-Range: '.$etag]);
+    check('the same file continues as a range', $ok->status === 206 && $ok->body === substr($bytes, 100, 100),
+        $ok->describe());
+
+    $changed = $client->get('/api/files/stream', ['path' => $media], ['Range: bytes=100-199', 'If-Range: "0-0"']);
+    check('a file that changed is sent whole instead',
+        $changed->status === 200 && $changed->body === $bytes, $changed->describe());
+
+    /*
+     * A player seeking holds the file *and* wants bytes from the middle of
+     * it. Answering "still fresh" to that is true and useless: it asked for
+     * bytes, and 304 has none, so playback stops at the seek.
+     */
+    $seeking = $client->get('/api/files/stream', ['path' => $media],
+        ['Range: bytes=100-199', 'If-None-Match: '.$etag]);
+    check('a seek by a client that has the file still gets bytes',
+        $seeking->status === 206 && $seeking->body === substr($bytes, 100, 100), $seeking->describe());
+});
+
+scenario('seeking still works, and says what it sent', function () use ($client, $scratch) {
+    // The behaviour the validators must not have broken.
+    $media = $scratch.'/resumed.wav';
+    $part = $client->getRange('/api/files/stream', ['path' => $media], 10, 29);
+    check('a range is still 206', $part->status === 206, $part->describe());
+    check('with the range named back',
+        str_starts_with((string)$part->header('Content-Range'), 'bytes 10-29/'),
+        (string)$part->header('Content-Range'));
+    check('and an ETag to resume against', (string)$part->header('ETag') !== '');
+});
+
 /* ---- share links that carry the file's name -------------------------------
  *
  * The link handed out ends in the file's own name and returns the file

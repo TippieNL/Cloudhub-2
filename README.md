@@ -407,6 +407,43 @@ the first or last few seconds are not offered — resuming a film ten seconds
 from the end is worse than starting it — a finished video is forgotten, and the
 remembered set is capped so preferences cannot grow without limit.
 
+### What playback costs
+
+Three things used to make watching a video more expensive than it needed to be.
+
+**Every tile fetched a whole video.** A video the server has no cached frame
+for is drawn by decoding a frame on the device — and a frame can only be
+decoded from bytes that have arrived, so handing the tile the video's URL meant
+fetching the video. A folder of ten holiday clips was gigabytes of traffic to
+draw ten thumbnails, over the same connection playback wanted. Tiles now ask
+for the first few megabytes, and the frame that comes out is **handed back to
+the server**, so it happens once for a file rather than once per device per
+folder view — the web client benefits from the same frame. A file whose index
+sits at the end of the container cannot be decoded from a prefix; those fall
+back to fetching the file, but only while it is small enough for that to be a
+fair trade. A 4 GB film gets the icon.
+
+**Nothing was kept.** Skipping back ten seconds re-fetched ten seconds that had
+just arrived, and re-opening a film downloaded it again from the start — which
+resume makes worse, dropping you halfway into a file the player then has to
+reach from scratch. Playback now reads through a disk cache, evicted
+least-recently-used, keyed on the file *and its modification time* so that
+replacing a video does not play the old one out of the cache for good. Settings
+shows what it holds and empties it.
+
+**Playback waited.** Media3's defaults buffer 2.5 seconds of video before
+showing anything and keep nothing behind the playhead — sensible over the
+public internet, pure waiting from a server on your own network. CloudHub
+starts on one second, and keeps thirty seconds behind for the skip back.
+
+On the server, media responses now carry an **ETag and Last-Modified**, so a
+client holding a file asks whether it is still good instead of fetching it
+again to find out; an unchanged 200 MB video answers in **0 bytes**. `If-Range`
+is honoured too, so a resumed download cannot be stitched together from two
+different videos if the file is replaced mid-transfer — and a seek is never
+answered with "still fresh", which has no bytes in it and would stop playback
+where the seek was.
+
 ### Adding files from the phone
 
 The **+** button opens a labelled sheet: photos & videos, take a photo, record

@@ -32,11 +32,14 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.data.ResumePolicy
 import nl.tippie.cloudhub.data.Settings
 import nl.tippie.cloudhub.net.CloudHubApi
@@ -94,8 +97,38 @@ fun PlayerScreen(
     }
 
     val player = remember {
+        /*
+         * Read through a disk cache, so bytes are fetched once.
+         *
+         * Skipping back ten seconds used to re-fetch ten seconds that had just
+         * arrived, and re-opening a film downloaded it again from the start --
+         * which resume makes worse, dropping you halfway into a file the
+         * player then has to reach from scratch.
+         *
+         * FLAG_IGNORE_CACHE_ON_ERROR: a cache that cannot be written must cost
+         * a cache, never the video.
+         */
+        val source = CacheDataSource.Factory()
+            .setCache(MediaCache.get(context))
+            .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(client.okHttp)))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(source))
+            // Media3's defaults are written for the public internet: 2.5
+            // seconds of video buffered before anything is shown, and nothing
+            // kept behind the playhead. See ui/PlaybackTuning.kt.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        PlaybackTuning.MIN_BUFFER_MS,
+                        PlaybackTuning.MAX_BUFFER_MS,
+                        PlaybackTuning.BUFFER_FOR_PLAYBACK_MS,
+                        PlaybackTuning.BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                    )
+                    .setBackBuffer(PlaybackTuning.BACK_BUFFER_MS, /* retainBackBufferFromKeyframe = */ true)
+                    .build()
+            )
             // Ten seconds is what the double-tap zones promise, so the buttons
             // and the gestures must agree.
             .setSeekBackIncrementMs(SEEK_STEP_MS)
@@ -111,7 +144,15 @@ fun PlayerScreen(
             )
             .build()
             .apply {
-                setMediaItem(MediaItem.fromUri(api.streamUrl(entry.path).toString()))
+                setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(api.streamUrl(entry.path).toString())
+                        // Keyed on the URL alone, replacing a file with a
+                        // different video of the same name would play the old
+                        // one out of the cache for good.
+                        .setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))
+                        .build()
+                )
                 prepare()
                 playWhenReady = true
             }

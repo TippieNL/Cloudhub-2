@@ -44,9 +44,11 @@ fun SettingsScreen(
     appVersion: String,
     queuedUploads: Int,
     cacheBytes: Long,
+    videoCacheBytes: Long,
     theme: ThemeChoice,
     onTheme: (ThemeChoice) -> Unit,
     onClearCache: () -> Unit,
+    onClearVideoCache: () -> Unit,
     onChangeServer: () -> Unit,
     onOpenStorage: () -> Unit,
     onSignOut: () -> Unit,
@@ -146,6 +148,16 @@ fun SettingsScreen(
             Tappable("Clear the thumbnail cache") {
                 onClearCache()
                 scope.launch { snackbar.showSnackbar("Thumbnail cache cleared") }
+            }
+            // Video kept so that skipping back, or watching something twice,
+            // costs the network once. It evicts itself least-recent-first, but
+            // a cache with no way to see or empty it is a cache you resent.
+            var video by remember { mutableStateOf(videoCacheBytes) }
+            Line("Cached video", if (video == 0L) "Nothing yet" else humanBytes(video))
+            Tappable("Clear the video cache") {
+                onClearVideoCache()
+                video = 0
+                scope.launch { snackbar.showSnackbar("Video cache cleared") }
             }
             // Worth surfacing: an upload runs under WorkManager and survives
             // the app closing, so a queue can be non-empty with nothing on

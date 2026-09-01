@@ -105,6 +105,24 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
     $size = filesize($file);
     if ($size === false)throw new RuntimeException('Unable to determine file size', 500);
 
+    /*
+     * Validators, so a player holding the bytes can ask whether they are still
+     * good rather than fetching them again to find out.
+     *
+     * Modification time and size identify the contents well enough here:
+     * replacing a file changes one or both, and an overwrite keeps the
+     * previous version rather than editing in place. Without these, the
+     * Cache-Control lifetime below is all a client has -- when it lapses the
+     * whole video comes down the wire again to prove it has not changed.
+     */
+    $modified = filemtime($file) ?: 0;
+    $etag = sprintf('"%x-%x"', $modified, $size);
+    $lastModified = gmdate('D, d M Y H:i:s', $modified).' GMT';
+    $validators = static function() use ($etag, $lastModified): void {
+        header('ETag: '.$etag);
+        header('Last-Modified: '.$lastModified);
+    };
+
     $unsatisfiable = static function() use ($size): never {
         http_response_code(416);
         header('Content-Range: bytes */'.$size);
@@ -117,6 +135,39 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
     $status = 200;
 
     $range = trim((string)($_SERVER['HTTP_RANGE']??''));
+
+    /*
+     * If-Range: continue this download only if the file is the one the client
+     * started. A file replaced between two range requests would otherwise be
+     * stitched together from two different videos, which is not a failure any
+     * player can detect. Not matching means the range is ignored and the whole
+     * file is sent, which is what the header is for.
+     */
+    $ifRange = trim((string)($_SERVER['HTTP_IF_RANGE']??''));
+    if ($range !== '' && $ifRange !== '' && $ifRange !== $etag && $ifRange !== $lastModified) {
+        $range = '';
+    }
+
+    /*
+     * A conditional request with nothing to send back. Only when no range is
+     * asked for: a client resuming part of a file says so with If-Range above,
+     * and answering that with 304 would strand it.
+     */
+    if ($range === '') {
+        $noneMatch = trim((string)($_SERVER['HTTP_IF_NONE_MATCH']??''));
+        $since = trim((string)($_SERVER['HTTP_IF_MODIFIED_SINCE']??''));
+        $fresh = $noneMatch !== ''
+            ? ($noneMatch === '*' || in_array($etag, array_map('trim', explode(',', $noneMatch)), true))
+            : ($since !== '' && ($stamp = strtotime($since)) !== false && $stamp >= $modified);
+        if ($fresh) {
+            http_response_code(304);
+            $validators();
+            header('Accept-Ranges: bytes');
+            foreach ($extraHeaders as $header)header($header);
+            exit;
+        }
+    }
+
     if ($range !== '') {
         if (!preg_match('/^bytes=(\d*)-(\d*)$/', $range, $m))$unsatisfiable();
         $first = $m[1];
@@ -144,6 +195,7 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
     header('Accept-Ranges: bytes');
     header('Content-Length: '.$length);
     header('X-Content-Type-Options: nosniff');
+    $validators();
     foreach ($extraHeaders as $header)header($header);
     if ($status === 206)header('Content-Range: bytes '.$start.'-'.$end.'/'.$size);
 

@@ -23,6 +23,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
 import nl.tippie.cloudhub.work.StageResult
@@ -232,9 +233,11 @@ class MainActivity : ComponentActivity() {
                         appVersion = appVersion(),
                         queuedUploads = queue.all().size,
                         cacheBytes = thumbnailCacheBytes(),
+                        videoCacheBytes = MediaCache.sizeBytes(this@MainActivity),
                         theme = theme,
                         onTheme = { theme = it; app.settings.themeChoice = it.name },
                         onClearCache = { clearThumbnailCache() },
+                        onClearVideoCache = { MediaCache.clear(this@MainActivity) },
                         onChangeServer = { screen = Screen.Setup },
                         onOpenStorage = { screen = Screen.Storage },
                         onSignOut = {

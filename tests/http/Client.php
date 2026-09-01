@@ -28,9 +28,10 @@ final class Client
     /** Forget the session, as closing the browser would. */
     public function reset(): void { $this->cookies = []; $this->csrf = ''; }
 
-    public function get(string $route, array $query = []): Response
+    /** @param string[] $headers extra request headers, e.g. a conditional one */
+    public function get(string $route, array $query = [], array $headers = []): Response
     {
-        return $this->send('GET', $route, $query, null);
+        return $this->send('GET', $route, $query, null, $headers);
     }
 
     public function post(string $route, array $body, array $query = []): Response
