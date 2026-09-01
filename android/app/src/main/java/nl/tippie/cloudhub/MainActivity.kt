@@ -246,6 +246,24 @@ class MainActivity : ComponentActivity() {
                  * on return, which is what a navigation library would do here.
                  */
                 val screenState = rememberSaveableStateHolder()
+                /*
+                 * A popped screen's state is finished with.
+                 *
+                 * Kept, it outranks the arguments the screen is next opened
+                 * with: the viewer remembers which photo is on show, so
+                 * opening the next photo restored the page from last time and
+                 * showed the previous photo. Done after composition rather
+                 * than in back(), because the screen on its way out saves its
+                 * state as it is disposed -- removing it first would simply be
+                 * undone.
+                 */
+                val known = remember { mutableSetOf<String>() }
+                LaunchedEffect(stack.map { it.key }) {
+                    val live = stack.map { it.key }.toSet()
+                    BackRules.forgotten(known, live).forEach { screenState.removeState(it) }
+                    known.clear()
+                    known.addAll(live)
+                }
                 // A signed-out session's screens are not worth restoring into
                 // the next one's, and could show the previous account's place.
                 LaunchedEffect(state.user?.username) {

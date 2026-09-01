@@ -85,4 +85,20 @@ object BackRules {
     /** The stack after Back. The root is never popped; leaving is Android's job. */
     fun <T> popped(stack: List<T>): List<T> =
         if (stack.size <= 1) stack else stack.dropLast(1)
+
+    /**
+     * Screens whose saved state is finished with.
+     *
+     * A screen keeps its state -- a scroll position, a pager's page -- while
+     * you are away on another one. But a *popped* screen is over, and the next
+     * visit is a new one, opened with its own arguments: keeping the old state
+     * means the arguments lose. That is not hypothetical. The photo viewer
+     * remembers which photo is on show; held across visits, opening the next
+     * photo restored the page from last time and showed the previous photo
+     * instead of the one just tapped.
+     *
+     * The file list is the root and is never popped, so where you were in it
+     * survives, which is the whole point of keeping any of this.
+     */
+    fun forgotten(known: Set<String>, live: Set<String>): Set<String> = known - live
 }

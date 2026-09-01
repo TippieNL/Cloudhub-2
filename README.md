@@ -459,6 +459,12 @@ walking up out of a subfolder lands where you were in the parent rather than at
 its top. The memory is bounded at 32 folders, dropped oldest-first, since the
 folder you just left is the one you are most likely to return to.
 
+A screen that has been *closed*, though, is finished with, and its state is
+dropped: kept, it would outrank the arguments the screen is next opened with.
+The photo viewer remembers which photo is on show, so holding that across
+visits made opening the next photo show the previous one. The file list is the
+root and is never closed, which is what lets your place in it survive.
+
 Closing a photo or a video also brings the list back **to that file**: swipe
 through thirty photos and Back lands on the one you ended at, not the one you
 opened. Only when it is off screen, though — scrolling a file that is already

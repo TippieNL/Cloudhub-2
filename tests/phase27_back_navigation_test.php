@@ -147,6 +147,22 @@ $checks['and the list comes back to it'] =
     str_contains($files, 'ScrollMemory.indexOfPath(entries.map { it.path }, revealPath)')
     && str_contains($files, 'ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())')
     && str_contains($memoryTests, 'a photo already on screen is left where it is');
+/*
+ * ...but a screen that has been closed is over.
+ *
+ * Kept, its state outranks the arguments the screen is next opened with. The
+ * viewer remembers which photo is on show, so opening the next photo restored
+ * the page from last time and showed the previous photo instead.
+ */
+$checks['a closed screen does not keep its state for the next visit'] =
+    str_contains($rules, 'fun forgotten(known: Set<String>, live: Set<String>): Set<String> = known - live')
+    && str_contains($main, 'BackRules.forgotten(known, live).forEach { screenState.removeState(it) }')
+    && str_contains($tests, "a popped screen's state is not kept for the next visit");
+// Done after composition: the screen on its way out saves its state as it is
+// disposed, so removing it any earlier is simply undone.
+$checks['the state is dropped after the screen has gone, not before'] =
+    str_contains($main, 'LaunchedEffect(stack.map { it.key }) {')
+    && !str_contains($main, 'screenState.removeState(leaving');
 // Someone else's place is not yours.
 $checks['signing out drops the remembered place'] =
     str_contains($main, 'screenState.removeState(Screen.Files.key)');

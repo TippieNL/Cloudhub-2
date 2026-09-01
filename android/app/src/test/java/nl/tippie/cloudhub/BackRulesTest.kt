@@ -138,6 +138,44 @@ class BackRulesTest {
         assertEquals(listOf("files", "settings"), stack)
     }
 
+    /* ---- state that outlives its screen ------------------------------------
+     *
+     * A screen keeps its state while you are away on another one. A popped
+     * screen, though, is over: the next visit opens with its own arguments,
+     * and state kept from last time outranks them. That is what made the photo
+     * viewer show the previous photo -- it remembers which page is on show, so
+     * opening the next photo restored the page from the visit before.
+     */
+
+    @Test
+    fun `a popped screen's state is not kept for the next visit`() {
+        // Opened a photo, went back, opened another: the viewer must not start
+        // on the page the last visit ended on.
+        assertEquals(setOf("images"), BackRules.forgotten(setOf("files", "images"), setOf("files")))
+    }
+
+    @Test
+    fun `a screen you are still on keeps its state`() {
+        // Watching a video: the file list underneath must not be forgotten, or
+        // coming back lands at the top again.
+        assertEquals(emptySet(), BackRules.forgotten(setOf("files", "play:/a.mp4"), setOf("files", "play:/a.mp4")))
+    }
+
+    @Test
+    fun `the file list is never forgotten`() {
+        // It is the root and is never popped, which is what lets where you
+        // were in it survive a video.
+        assertEquals(emptySet(), BackRules.forgotten(setOf("files"), setOf("files")))
+    }
+
+    @Test
+    fun `several screens closed at once are all forgotten`() {
+        assertEquals(
+            setOf("settings", "storage"),
+            BackRules.forgotten(setOf("files", "settings", "storage"), setOf("files")),
+        )
+    }
+
     @Test
     fun `the first screen is never popped`() {
         // Leaving the app is Android's to do, not something to fake by
