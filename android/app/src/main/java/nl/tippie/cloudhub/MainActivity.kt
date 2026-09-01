@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
@@ -31,18 +32,33 @@ import nl.tippie.cloudhub.work.StageResult
 import nl.tippie.cloudhub.work.UploadQueue
 import nl.tippie.cloudhub.work.UploadWorker
 
-/** Where the app is; small enough that a navigation library would be ceremony. */
+/**
+ * Where the app is; small enough that a navigation library would be ceremony.
+ *
+ * Each screen carries a key, which is what the state holder files its scroll
+ * position and its text fields under. It is the identity of the screen rather
+ * than of the visit, so leaving for a video and coming back finds the same
+ * drawer of state.
+ */
 private sealed interface Screen {
-    data object Setup : Screen
+    val key: String
+
+    data object Setup : Screen { override val key = "setup" }
     /** Checking whether the stored session is still good; see the effect below. */
-    data object Restoring : Screen
-    data object SignIn : Screen
-    data object Files : Screen
-    data object Trash : Screen
-    data object Storage : Screen
-    data object SettingsScreen : Screen
-    data class Images(val images: List<FileEntry>, val index: Int) : Screen
-    data class Play(val entry: FileEntry) : Screen
+    data object Restoring : Screen { override val key = "restoring" }
+    data object SignIn : Screen { override val key = "signin" }
+    data object Files : Screen { override val key = "files" }
+    data object Trash : Screen { override val key = "trash" }
+    data object Storage : Screen { override val key = "storage" }
+    data object SettingsScreen : Screen { override val key = "settingsscreen" }
+    data class Images(val images: List<FileEntry>, val index: Int) : Screen {
+        override val key get() = "images"
+    }
+    data class Play(val entry: FileEntry) : Screen {
+        // Per video: two films should not share a drawer of state just
+        // because both of them are "the player".
+        override val key get() = "play:${entry.path}"
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -168,6 +184,12 @@ class MainActivity : ComponentActivity() {
                     stack.clear(); stack.add(next)
                 }
                 var sharing by remember { mutableStateOf<FileEntry?>(null) }
+                /*
+                 * The file a viewer was closed on, so the list comes back to
+                 * it. Swiping through thirty photos and pressing Back should
+                 * land on the last one looked at, not the one opened.
+                 */
+                var reveal by remember { mutableStateOf<String?>(null) }
                 val state by model.state.collectAsState()
 
                 // Straight to the files if the stored session is still good.
@@ -213,6 +235,24 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                /*
+                 * Keeps each screen's state while you are on another one.
+                 *
+                 * A list's scroll position belongs to the composable that owns
+                 * it, and opening a video takes that composable out of the
+                 * composition -- so scrolling to the fortieth clip, watching
+                 * it, and coming back put you at the first. The holder keeps
+                 * the drawer of saved state per screen key and hands it back
+                 * on return, which is what a navigation library would do here.
+                 */
+                val screenState = rememberSaveableStateHolder()
+                // A signed-out session's screens are not worth restoring into
+                // the next one's, and could show the previous account's place.
+                LaunchedEffect(state.user?.username) {
+                    if (state.user == null) screenState.removeState(Screen.Files.key)
+                }
+
+                screenState.SaveableStateProvider(screen.key) {
                 when (val current = screen) {
                     is Screen.Setup -> SetupScreen(
                         api = app.api,
@@ -273,6 +313,8 @@ class MainActivity : ComponentActivity() {
                         onDownload = { download(it) },
                         onShare = { sharing = it },
                         onDismissUploadFailures = { queue.clearFailures() },
+                        revealPath = reveal,
+                        onRevealed = { reveal = null },
                     )
 
                     is Screen.Storage -> StorageScreen(
@@ -312,14 +354,15 @@ class MainActivity : ComponentActivity() {
 
                     is Screen.Images -> ImageViewer(
                         api = app.api, images = current.images, startAt = current.index,
-                        onBack = { back() },
+                        onBack = { photo -> reveal = photo; back() },
                     )
 
                     is Screen.Play -> PlayerScreen(
                         api = app.api, client = app.client, settings = app.settings,
                         entry = current.entry,
-                        onBack = { back() },
+                        onBack = { reveal = current.entry.path; back() },
                     )
+                }
                 }
 
                 sharing?.let { entry ->

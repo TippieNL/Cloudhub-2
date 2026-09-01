@@ -31,6 +31,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -110,6 +115,9 @@ fun FilesScreen(
     onDownload: (FileEntry) -> Unit,
     onShare: (FileEntry) -> Unit,
     onDismissUploadFailures: () -> Unit,
+    /** A file to come back to -- the photo or video just closed. */
+    revealPath: String? = null,
+    onRevealed: () -> Unit = {},
 ) {
     val state by model.state.collectAsState()
     val uploads = rememberUploadState()
@@ -230,6 +238,8 @@ fun FilesScreen(
                 onMenu = { menuFor = it },
                 onRetry = model::retry,
                 onNewFolder = { showNewFolder = true },
+                revealPath = revealPath,
+                onRevealed = onRevealed,
             )
         }
     }
@@ -301,6 +311,8 @@ private fun BrowserContent(
     onMenu: (FileEntry) -> Unit,
     onRetry: () -> Unit,
     onNewFolder: () -> Unit,
+    revealPath: String?,
+    onRevealed: () -> Unit,
 ) {
     val shown = state.shown
     // Held briefly past the answer so a fast folder does not flash a skeleton
@@ -322,7 +334,7 @@ private fun BrowserContent(
             Shown.ERROR -> LoadFailed(state.loadError, onRetry)
             Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
             Shown.NO_MATCHES -> NoMatches(state.query)
-            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu)
+            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, revealPath, onRevealed)
         }
     }
 }
@@ -399,9 +411,78 @@ private fun EntryList(
     onOpen: (FileEntry) -> Unit,
     onLongPress: (String) -> Unit,
     onMenu: (FileEntry) -> Unit,
+    revealPath: String? = null,
+    onRevealed: () -> Unit = {},
 ) {
     val entries = state.visible
     val searching = state.searchResults != null
+
+    /*
+     * Where this folder was when you left it.
+     *
+     * The list states below are saveable, so the screen holder keeps them
+     * while you are watching a video -- but there is one of them for every
+     * folder, so it can only describe the folder on screen. The memory is what
+     * makes walking up a folder land where you were rather than at the top.
+     */
+    val memory = rememberSaveable(saver = ScrollMemorySaver) { ScrollMemory() }
+    val grid = rememberLazyGridState()
+    val list = rememberLazyListState()
+    /*
+     * Read through functions rather than into values.
+     *
+     * snapshotFlow re-runs when state read *inside* its block changes; a
+     * position captured out here would be one value the flow never sees change,
+     * so the folder would be recorded once, at the top, and nowhere else.
+     */
+    val firstVisible = { if (state.grid) grid.firstVisibleItemIndex else list.firstVisibleItemIndex }
+    val offset = { if (state.grid) grid.firstVisibleItemScrollOffset else list.firstVisibleItemScrollOffset }
+    val lastVisible = {
+        // Branched whole: the two layout infos have no common item type, so
+        // asking one question of both does not compile.
+        if (state.grid) (grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible())
+        else (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible())
+    }
+
+    // Restoration happens once per folder, and recording waits for it: a
+    // recorder running first would write "the top" over the place being
+    // restored, every time.
+    var restored by remember(state.path) { mutableStateOf(false) }
+
+    LaunchedEffect(state.path, state.grid) {
+        // An empty list cannot be scrolled; wait for the folder to arrive.
+        snapshotFlow { state.visible.size }.first { it > 0 }
+        val place = memory.placeOf(state.path)
+        if (place != null) {
+            if (state.grid) grid.scrollToItem(place.index, place.offset)
+            else list.scrollToItem(place.index, place.offset)
+        }
+        restored = true
+    }
+
+    LaunchedEffect(state.path, state.grid) {
+        snapshotFlow { Triple(firstVisible(), offset(), state.visible.size) }
+            .collect { (index, at, size) ->
+                if (restored && size > 0) memory.remember(state.path, index, at)
+            }
+    }
+
+    /*
+     * Come back to the file you were on.
+     *
+     * Swiping through thirty photos and pressing Back should land on the last
+     * one looked at, not the one opened -- but only when it is off screen,
+     * since scrolling a file that is already visible up to the top edge is a
+     * jump for no reason.
+     */
+    LaunchedEffect(revealPath, entries.size, restored) {
+        if (revealPath == null || !restored || entries.isEmpty()) return@LaunchedEffect
+        val target = ScrollMemory.indexOfPath(entries.map { it.path }, revealPath)
+        if (ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())) {
+            if (state.grid) grid.scrollToItem(target) else list.scrollToItem(target)
+        }
+        onRevealed()
+    }
     // Reset when the folder changes, so opening a folder plays the stagger
     // again rather than showing an already-arrived screen.
     val entrance = remember(state.path) { Animatable(0f) }
@@ -415,7 +496,7 @@ private fun EntryList(
     if (state.grid) {
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
-            state = rememberLazyGridState(),
+            state = grid,
             contentPadding = PaddingValues(GRID_PADDING),
             horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
             verticalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -435,6 +516,7 @@ private fun EntryList(
         }
     } else {
         LazyColumn(
+            state = list,
             contentPadding = PaddingValues(vertical = 6.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -450,6 +532,27 @@ private fun EntryList(
         }
     }
 }
+
+/**
+ * The remembered folders, written down.
+ *
+ * Flat on purpose -- path, index, offset repeating -- because a Saver has to
+ * survive being written to a Bundle, and a map of data classes does not.
+ */
+private val ScrollMemorySaver = listSaver<ScrollMemory, Any>(
+    save = { memory ->
+        memory.snapshot().flatMap { (path, place) -> listOf(path, place.index, place.offset) }
+    },
+    restore = { flat ->
+        val places = LinkedHashMap<String, ScrollMemory.Place>()
+        flat.chunked(3).forEach { row ->
+            if (row.size == 3) {
+                places[row[0] as String] = ScrollMemory.Place(row[1] as Int, row[2] as Int)
+            }
+        }
+        ScrollMemory(places)
+    },
+)
 
 private val GRID_MIN_CELL = 158.dp
 private val GRID_PADDING = 14.dp

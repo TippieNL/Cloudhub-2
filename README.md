@@ -444,6 +444,26 @@ grants up to 200dp of height per edge — so a photo swiped from the very edge
 turns the page, while Back by gesture still works above and below that band,
 along with the toolbar arrow and three-button Back.
 
+### Coming back where you left off
+
+Scrolling to the fortieth clip in a folder, watching it, and pressing Back put
+you back at the first. A list's scroll position belongs to the composable that
+owns it, and opening a video or a photo takes that composable out of the
+composition entirely, so the position went with it. The same single position
+was also shared by every folder, which meant it could only ever describe the
+one on screen.
+
+Screens now keep their state while you are on another one, filed under the
+screen's own key, and the file list remembers a position **per folder** — so
+walking up out of a subfolder lands where you were in the parent rather than at
+its top. The memory is bounded at 32 folders, dropped oldest-first, since the
+folder you just left is the one you are most likely to return to.
+
+Closing a photo or a video also brings the list back **to that file**: swipe
+through thirty photos and Back lands on the one you ended at, not the one you
+opened. Only when it is off screen, though — scrolling a file that is already
+visible up to the top edge is a jump for no reason.
+
 ### What playback costs
 
 Three things used to make watching a video more expensive than it needed to be.

@@ -33,7 +33,13 @@ import nl.tippie.cloudhub.net.FileEntry
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ImageViewer(api: CloudHubApi, images: List<FileEntry>, startAt: Int, onBack: () -> Unit) {
+fun ImageViewer(
+    api: CloudHubApi,
+    images: List<FileEntry>,
+    startAt: Int,
+    /** Handed the photo on show when it closes, so the folder comes back to it. */
+    onBack: (String?) -> Unit,
+) {
     val pager = rememberPagerState(initialPage = startAt.coerceIn(0, maxOf(0, images.size - 1))) { images.size }
 
     Scaffold(
@@ -41,7 +47,11 @@ fun ImageViewer(api: CloudHubApi, images: List<FileEntry>, startAt: Int, onBack:
         topBar = {
             TopAppBar(
                 title = { Text(images.getOrNull(pager.currentPage)?.name.orEmpty(), maxLines = 1) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } },
+                navigationIcon = {
+                    IconButton(onClick = { onBack(images.getOrNull(pager.currentPage)?.path) }) {
+                        Icon(Icons.Default.ArrowBack, "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Black.copy(alpha = 0.6f),
                     titleContentColor = Color.White,

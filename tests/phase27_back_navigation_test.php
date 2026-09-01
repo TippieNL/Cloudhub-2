@@ -74,15 +74,82 @@ $checks['screens are a stack, not a single value'] =
 // no history behind it, so Back falls through to the Activity.
 $checks['no screen is assigned behind the stack\'s back'] =
     !preg_match('/\bscreen = Screen\./', $main);
+// Counted as "every onBack ends in back()" rather than by literal spelling:
+// two of them also record the file to come back to, and a screen whose Back
+// does anything but pop is one you cannot leave properly.
 $checks['opening a screen pushes and leaving it pops'] =
     substr_count($main, 'go(Screen.') >= 6
-    && substr_count($main, 'onBack = { back()') >= 4;
+    && preg_match_all('/onBack = \{[^}]*back\(\)/', $main) >= 5;
 // Signing in or out is a new beginning: Back must not walk into the session
 // that just ended.
 $checks['signing in and out clears the history'] =
     str_contains($main, 'fun reset(next: Screen)')
     && str_contains($main, 'reset(Screen.SignIn)')
     && str_contains($main, 'reset(Screen.Files)');
+
+/* --- coming back where you left off ----------------------------------------
+ *
+ * A list's scroll position belongs to the composable that owns it, and opening
+ * a video takes that composable out of the composition -- so scrolling to the
+ * fortieth clip, watching it, and pressing Back landed you at the first.
+ */
+$files = $readKt('ui/FilesScreen.kt');
+$memory = $readKt('ui/ScrollMemory.kt');
+$viewerScreens = $readKt('ui/ViewerScreens.kt');
+$memoryTests = (string)@file_get_contents($root.'/android/app/src/test/java/nl/tippie/cloudhub/ScrollMemoryTest.kt');
+
+$checks['a screen\'s state is kept while you are on another one'] =
+    str_contains($main, 'val screenState = rememberSaveableStateHolder()')
+    && str_contains($main, 'screenState.SaveableStateProvider(screen.key)');
+// Filed under the screen, not under the visit, or the drawer handed back on
+// return is a different one.
+$checks['every screen has a stable key to file it under'] =
+    str_contains($main, 'private sealed interface Screen {')
+    && str_contains($main, 'val key: String')
+    && str_contains($main, 'override val key = "files"');
+// The list state has to be the one the effects read; created inline, it is a
+// different object each time and nothing can restore it.
+$checks['the list keeps a scroll position that can be restored'] =
+    str_contains($files, 'val grid = rememberLazyGridState()')
+    && str_contains($files, 'val list = rememberLazyListState()')
+    && str_contains($files, 'state = grid,')
+    && str_contains($files, 'state = list,')
+    && !str_contains($files, 'state = rememberLazyGridState()');
+$checks['a position is kept per folder, with tests'] =
+    str_contains($memory, 'class ScrollMemory')
+    && str_contains($files, 'memory.remember(state.path, index, at)')
+    && str_contains($files, 'memory.placeOf(state.path)')
+    && str_contains($memoryTests, 'each folder keeps its own place');
+// Recording before restoring writes "the top" over the place being restored,
+// every single time.
+// snapshotFlow re-runs on state read *inside* its block: a position captured
+// outside is one value the flow never sees change, so the folder would be
+// recorded once, at the top, and never again.
+$checks['the position is read inside the flow, not captured outside it'] =
+    str_contains($files, 'snapshotFlow { Triple(firstVisible(), offset(), state.visible.size) }');
+$checks['recording waits until the place has been restored'] =
+    str_contains($files, 'if (restored && size > 0) memory.remember')
+    && str_contains($files, 'restored = true');
+// A folder that has not arrived cannot be scrolled.
+$checks['restoring waits for the folder to arrive'] =
+    str_contains($files, 'snapshotFlow { state.visible.size }.first { it > 0 }');
+$checks['what is remembered survives the screen being rebuilt'] =
+    str_contains($files, 'rememberSaveable(saver = ScrollMemorySaver)')
+    && str_contains($files, 'private val ScrollMemorySaver = listSaver<ScrollMemory, Any>');
+// Swiping through thirty photos and coming back should land on the one you
+// ended at, not the one you opened.
+$checks['the viewer says which file it was closed on'] =
+    str_contains($viewerScreens, 'onBack: (String?) -> Unit')
+    && str_contains($viewerScreens, 'onBack(images.getOrNull(pager.currentPage)?.path)')
+    && str_contains($main, 'onBack = { photo -> reveal = photo; back() }')
+    && str_contains($main, 'onBack = { reveal = current.entry.path; back() }');
+$checks['and the list comes back to it'] =
+    str_contains($files, 'ScrollMemory.indexOfPath(entries.map { it.path }, revealPath)')
+    && str_contains($files, 'ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())')
+    && str_contains($memoryTests, 'a photo already on screen is left where it is');
+// Someone else's place is not yours.
+$checks['signing out drops the remembered place'] =
+    str_contains($main, 'screenState.removeState(Screen.Files.key)');
 
 /* --- the gestures that conflict --------------------------------------------
  *
