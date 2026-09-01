@@ -112,6 +112,15 @@ fun PlayerScreen(
             .setCache(MediaCache.get(context))
             .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .apply {
+                // A film bigger than the cache cannot be held by it, and
+                // trying churns the whole cache while it plays -- including
+                // evicting spans still being read, which is how a large video
+                // stops playing rather than merely playing uncached. Those
+                // read through: no writes, but anything already cached is
+                // still served from there.
+                if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)
+            }
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))

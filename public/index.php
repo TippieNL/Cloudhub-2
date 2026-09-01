@@ -89,6 +89,24 @@ function media_mime_type(string $f): string {
 }
 
 /**
+ * The most one range request will serve.
+ *
+ * A player asks for "bytes=0-" and, given the chance, holds one request open
+ * for the length of the film. That is fine on a server with a worker per
+ * request and fatal on one without: PHP's built-in server -- which is what
+ * `php -S` gives you, and what a lot of small installations run -- handles one
+ * request at a time, so a single large video blocks *everything else*,
+ * including the player's own next request. Measured: with a video streaming,
+ * an ordinary file listing never answered at all.
+ *
+ * Answering a shorter range than was asked for is exactly what HTTP allows,
+ * and every media client already handles it -- it is the same shape as a
+ * connection that closed early. The player simply asks for the next piece,
+ * and between pieces the server is free.
+ */
+const MEDIA_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
  * Stream a file to the browser, honouring a single HTTP byte range.
  *
  * Media players request ranges to read metadata, start playback quickly and
@@ -104,6 +122,20 @@ function media_mime_type(string $f): string {
 function serve_file_range(string $file, string $mime, string $disposition, string $method, array $extraHeaders = []): never {
     $size = filesize($file);
     if ($size === false)throw new RuntimeException('Unable to determine file size', 500);
+    /*
+     * A file too big for this PHP to describe.
+     *
+     * PHP's integer is signed and the size comes straight from stat(), so on a
+     * 32-bit build -- which is what an Android or NAS package often is -- a
+     * file over 2 GB comes back negative or wrapped. Left alone that becomes a
+     * nonsense Content-Length and a video that never starts, with nothing
+     * anywhere saying why. Better to name it.
+     */
+    if ($size < 0) {
+        throw new RuntimeException(
+            'This file is larger than 2 GB and this server runs a 32-bit build of PHP, which cannot address it. '
+            .'A 64-bit PHP serves it correctly.', 500);
+    }
 
     /*
      * Validators, so a player holding the bytes can ask whether they are still
@@ -186,6 +218,16 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
             if ($start >= $size || $start > $end)$unsatisfiable();
         }
         $status = 206;
+
+        /*
+         * Serve at most one chunk per request. A download that asked for no
+         * range is untouched -- a 200 promises the whole file and must keep
+         * that promise -- so this only shortens an answer to a client that
+         * already knows how to ask for the rest.
+         */
+        if ($end-$start+1 > MEDIA_RANGE_CHUNK_BYTES) {
+            $end = $start+MEDIA_RANGE_CHUNK_BYTES-1;
+        }
     }
 
     $length = $size === 0?0:($end-$start+1);

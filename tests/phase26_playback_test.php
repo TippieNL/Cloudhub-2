@@ -55,6 +55,33 @@ $checks['both are covered over real HTTP'] =
     str_contains($http, 'a cached video is revalidated rather than fetched again')
     && str_contains($http, 'resuming a range only continues the same file');
 
+/* --- one request is not a whole film ---------------------------------------
+ *
+ * A player asks for "bytes=0-" and holds one request open for the length of
+ * the film. PHP's built-in server -- `php -S`, which many installations run --
+ * serves one request at a time, so that single request blocks everything else:
+ * measured, an ordinary file listing never answered at all while a video
+ * streamed. Answering a shorter range is what HTTP allows and what media
+ * clients already handle.
+ */
+$checks['a range request serves at most one chunk'] =
+    str_contains($index, 'const MEDIA_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;')
+    && str_contains($index, 'if ($end-$start+1 > MEDIA_RANGE_CHUNK_BYTES) {');
+// A 200 promises the whole file. Cutting that short would truncate every
+// download of a large file -- a far worse bug than the one being fixed.
+$checks['a download with no range is never shortened'] =
+    (bool)preg_match('/\$status = 206;\s*\n\s*\n\s*\/\*.*?\*\/\s*\n\s*if \(\$end-\$start\+1 > MEDIA_RANGE_CHUNK_BYTES\)/s', $index)
+    && str_contains($http, 'a fetch with no range is still the whole file');
+$checks['the chunking is exercised over real HTTP'] =
+    str_contains($http, 'one request does not carry a whole film')
+    && str_contains($http, 'the rest follows from where it stopped');
+// PHP's integer is signed: on a 32-bit build a file over 2 GB comes back
+// negative, and the result is a nonsense Content-Length and a video that
+// never starts with nothing saying why.
+$checks['a 32-bit server says so instead of serving nonsense'] =
+    str_contains($index, 'if ($size < 0) {')
+    && str_contains($index, '32-bit build of PHP');
+
 /* --- the player: bytes fetched once ---------------------------------------- */
 
 $checks['playback reads through a disk cache'] =
@@ -69,6 +96,12 @@ $checks['a broken cache does not break playback'] =
 $checks['the cache key follows the file, not just its name'] =
     str_contains($player, 'setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))')
     && str_contains($tests, "a replaced file is not played from the old file's cache");
+// A film bigger than the cache cannot be held by it: playing it evicts the
+// spans it just wrote, and the evictor can drop one while it is being read.
+$checks['a file too big for the cache is not written to it'] =
+    str_contains($tuning, 'fun mayCache(sizeBytes: Long): Boolean = sizeBytes in 1..(CACHE_BYTES / 4)')
+    && str_contains($player, 'if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)')
+    && str_contains($tests, 'a film bigger than the cache is not written to it');
 $checks['one cache object for the process'] =
     str_contains($cache, 'object MediaCache')
     && str_contains($cache, '@Synchronized')

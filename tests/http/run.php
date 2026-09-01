@@ -346,6 +346,71 @@ scenario('resuming a range only continues the same file', function () use ($clie
         $seeking->status === 206 && $seeking->body === substr($bytes, 100, 100), $seeking->describe());
 });
 
+/*
+ * The bug behind "large videos don't play".
+ *
+ * A player asks for "bytes=0-" and, given the chance, holds one request open
+ * for the length of the film. PHP's built-in server -- what `php -S` gives
+ * you, and what a lot of small installations run -- serves one request at a
+ * time, so that single request blocks everything else: measured here, an
+ * ordinary file listing never answered at all while a video streamed.
+ *
+ * Answering a shorter range than was asked for is what HTTP allows and what
+ * every media client already handles. Verified in Chromium as well as here:
+ * a file played from start to end over 41 short range answers.
+ */
+scenario('one request does not carry a whole film', function () use ($client, $scratch) {
+    $big = str_repeat(random_bytes(1024), 12 * 1024);   // 12 MiB, over the cap
+    $init = $client->post('/api/uploads/init', [
+        'targetPath' => $scratch, 'name' => 'long.wav', 'size' => strlen($big),
+        'uploadId' => 'cap'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite',
+    ]);
+    $id = $init->json['id'] ?? '';
+    if ($id === '') { check('the file uploads', false, $init->describe()); return; }
+    foreach (str_split($big, 4 * 1024 * 1024) as $offset => $piece) {
+        $client->putChunk($id, $offset * 4 * 1024 * 1024, $piece);
+    }
+    $client->post('/api/uploads/complete', ['id' => $id]);
+    $media = $scratch.'/long.wav';
+
+    $open = $client->get('/api/files/stream', ['path' => $media], ['Range: bytes=0-']);
+    check('an open-ended range is answered with one chunk',
+        $open->status === 206 && strlen($open->body) === 8 * 1024 * 1024,
+        $open->status.' '.strlen($open->body).' bytes');
+    check('and says exactly what it sent',
+        (string)$open->header('Content-Range') === 'bytes 0-8388607/'.strlen($big),
+        (string)$open->header('Content-Range'));
+    check('which is the bytes it claims', $open->body === substr($big, 0, 8 * 1024 * 1024));
+
+    // Where the player picks up next.
+    $next = $client->get('/api/files/stream', ['path' => $media], ['Range: bytes=8388608-']);
+    check('the rest follows from where it stopped',
+        $next->status === 206 && $next->body === substr($big, 8388608), $next->describe());
+
+    /*
+     * A request that asked for no range gets a 200, and a 200 promises the
+     * whole file. Cut that short and every large file fetched without a range
+     * -- a shared video opened from a link, a download, anything that is not a
+     * player -- is silently truncated, which is a far worse bug than the one
+     * being fixed. Through the same helper the cap lives in, or it proves
+     * nothing.
+     */
+    $whole = $client->get('/api/files/stream', ['path' => $media]);
+    check('a fetch with no range is still the whole file',
+        $whole->status === 200 && $whole->body === $big, $whole->status.' '.strlen($whole->body).' bytes');
+    check('and says so', (string)$whole->header('Content-Length') === (string)strlen($big),
+        (string)$whole->header('Content-Length'));
+
+    $download = $client->get('/api/files/download', ['path' => $media]);
+    check('a download is whole too', $download->status === 200 && $download->body === $big,
+        $download->status.' '.strlen($download->body).' bytes');
+
+    // Below the cap nothing changes.
+    $small = $client->get('/api/files/stream', ['path' => $scratch.'/resumed.wav'], ['Range: bytes=0-']);
+    check('a small file is served in one piece', $small->status === 206 && strlen($small->body) === 16384,
+        strlen($small->body).' bytes');
+});
+
 scenario('seeking still works, and says what it sent', function () use ($client, $scratch) {
     // The behaviour the validators must not have broken.
     $media = $scratch.'/resumed.wav';

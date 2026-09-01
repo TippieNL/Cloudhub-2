@@ -423,12 +423,37 @@ sits at the end of the container cannot be decoded from a prefix; those fall
 back to fetching the file, but only while it is small enough for that to be a
 fair trade. A 4 GB film gets the icon.
 
+**One request carried the whole film.** A player asks for `bytes=0-` and,
+given the chance, holds a single request open for the length of the video.
+That is fine on a server with a worker per request and fatal on one without:
+PHP's built-in server — what `php -S` gives you, and what many small
+installations run — serves one request at a time, so a large video blocked
+*everything else*. Measured: while a video streamed, an ordinary file listing
+never answered at all. A range request is now answered with at most 8 MB, which
+is what HTTP allows and what media clients already handle — verified in
+Chromium, which played a file start to finish over 41 short answers, and seeked
+into it. Between chunks the server is free. A request that asked for **no**
+range still gets the whole file: a download must not be silently truncated.
+
+If you run the built-in server, `PHP_CLI_SERVER_WORKERS=4 php -S 0.0.0.0:8000
+router.php` gives it more than one worker and removes the head-of-line blocking
+entirely. A real web server (Apache, nginx + php-fpm) does this by default.
+
+**Over 2 GB on a 32-bit PHP.** PHP's integer is signed, so a build for 32-bit —
+which Android and some NAS packages are — reports a negative size for a file
+over 2 GB, and the video simply never starts. The server now says exactly that
+instead.
+
 **Nothing was kept.** Skipping back ten seconds re-fetched ten seconds that had
 just arrived, and re-opening a film downloaded it again from the start — which
 resume makes worse, dropping you halfway into a file the player then has to
 reach from scratch. Playback now reads through a disk cache, evicted
 least-recently-used, keyed on the file *and its modification time* so that
-replacing a video does not play the old one out of the cache for good. Settings
+replacing a video does not play the old one out of the cache for good. A file
+larger than a quarter of the cache is read through it without being written:
+a film bigger than the cache cannot be held by it, and trying evicts the spans
+it just wrote — including, sometimes, one still being read, which stops
+playback rather than merely leaving it uncached. Settings
 shows what it holds and empties it.
 
 **Playback waited.** Media3's defaults buffer 2.5 seconds of video before

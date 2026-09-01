@@ -78,6 +78,40 @@ class PlaybackTest {
         )
     }
 
+    /* ---- what may be written to the cache ---------------------------------
+     *
+     * A film bigger than the cache cannot be held by it, and trying is worse
+     * than not trying: playing it evicts the spans it just wrote to make room
+     * for the next ones, churning the whole cache and gaining nothing -- and
+     * the evictor can drop a span while it is being read, which is how a large
+     * video stops playing rather than merely playing uncached.
+     */
+
+    @Test
+    fun `a film bigger than the cache is not written to it`() {
+        assertFalse(PlaybackTuning.mayCache(4096 * mb))
+        assertFalse(PlaybackTuning.mayCache(PlaybackTuning.CACHE_BYTES))
+    }
+
+    @Test
+    fun `a clip that fits alongside others is cached`() {
+        assertTrue(PlaybackTuning.mayCache(20 * mb))
+    }
+
+    @Test
+    fun `what is cacheable leaves room for more than one`() {
+        // A file allowed to fill the whole cache evicts everything else in it.
+        val largest = (1..2000).map { it * mb }.filter { PlaybackTuning.mayCache(it) }.max()
+        assertTrue(largest * 2 <= PlaybackTuning.CACHE_BYTES, "largest cacheable is $largest")
+    }
+
+    @Test
+    fun `a file of unknown size is not cached`() {
+        // The listing gives 0 for something it could not measure; writing an
+        // unbounded stream into a bounded cache is the case above again.
+        assertFalse(PlaybackTuning.mayCache(0))
+    }
+
     /* ---- what a tile costs ------------------------------------------------ */
 
     @Test

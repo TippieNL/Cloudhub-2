@@ -45,6 +45,23 @@ object PlaybackTuning {
     const val CACHE_BYTES = 256L * 1024 * 1024
 
     /**
+     * Whether a file may be *written* to that cache.
+     *
+     * A film bigger than the cache cannot be held by it, and trying is worse
+     * than not trying: playing it evicts every span it just wrote to make room
+     * for the next one, so the cache is churned from end to end, everything
+     * else in it is thrown away, and the file still is not cached. Worse, the
+     * evictor can drop a span while it is being read, which is how a large
+     * video stops playing rather than merely playing uncached.
+     *
+     * A quarter of the cache is the limit: a 64 MB clip can be held alongside
+     * three others, a 4 GB film reads straight through and is never written.
+     * Reading from the cache is unaffected -- something already cached still
+     * comes from there.
+     */
+    fun mayCache(sizeBytes: Long): Boolean = sizeBytes in 1..(CACHE_BYTES / 4)
+
+    /**
      * The cache key for a file, which has to change when the file does.
      *
      * Keyed on the URL alone, replacing holiday.mp4 with a different video of
