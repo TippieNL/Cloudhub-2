@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.work.*
+import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -156,7 +157,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 var offset = status.received.coerceAtMost(item.size)
 
                 while (offset < item.size) {
-                    val end = minOf(offset + status.chunkBytes, item.size)
+                    /*
+                     * Asked again every chunk, not once: the point is to
+                     * notice a video being opened part-way through an upload,
+                     * and to speed back up the moment it is closed.
+                     */
+                    val watching = ForegroundMedia.inUse
+                    val slice = UploadPacing.chunkBytes(status.chunkBytes, watching)
+                    val end = minOf(offset + slice, item.size)
                     // Streamed from the file: a 4 GB video must not need 4 GB
                     // of heap to upload.
                     status = api.uploadChunk(item.id, offset, source.slice(offset, end))
@@ -164,6 +172,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     offset = status.received
                     setProgress(workDataOf("id" to item.id, "sent" to offset, "total" to item.size))
                     notify(doneBytes + offset, batchBytes, queue.all().size, item.name)
+                    // Leaves the link mostly free for whatever is on screen.
+                    // Cancellable, so stopping the work is still immediate.
+                    val pause = UploadPacing.pauseMillis(watching)
+                    if (pause > 0) delay(pause)
                 }
 
                 api.uploadComplete(item.id)

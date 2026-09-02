@@ -1073,8 +1073,23 @@ if ($path === '/api/uploads/init' && $method === 'POST') api_try(function()use($
         (string)($b['uploadId']??''), (string)($b['conflict']??$config['upload_conflict'])
     );
 });
-if ($path === '/api/uploads/status' && $method === 'GET') api_try(fn() => uploads()->status((string)($_GET['id']??'')));
+if ($path === '/api/uploads/status' && $method === 'GET') api_try(function() {
+    release_session_lock();
+    return uploads()->status((string)($_GET['id']??''));
+});
 if ($path === '/api/uploads/chunk' && $method === 'PUT') api_try(function() {
+    /*
+     * The one write that must not hold the session lock.
+     *
+     * Nothing here writes to $_SESSION -- the owner check reads it, and reads
+     * still work once the lock is gone. Keeping it would mean an upload
+     * blocking every other request from the same account for as long as the
+     * chunk takes: on a SAPI that hands the body to PHP as it arrives, that is
+     * the whole upload, and a phone sending a video would lock its owner out
+     * of their own file list. php -S buffers the body first, so there it is
+     * only the write to disk, but the cost of releasing it is nil either way.
+     */
+    release_session_lock();
     $id = (string)($_GET['id']??''); $offset = (int)($_SERVER['HTTP_X_UPLOAD_OFFSET']??-1);
     return uploads()->append($id, $offset, 'php://input');
 });

@@ -163,6 +163,68 @@ scenario('a chunked upload arrives whole', function () use ($client, $scratch, $
         strlen($back->body).' bytes of '.strlen($firstBody));
 });
 
+scenario('a chunk smaller than the server allows is accepted', function () use ($client, $scratch) {
+    /*
+     * What the pacing in the Android uploader rests on.
+     *
+     * A file going up at full speed takes the whole connection: measured on an
+     * 8 Mbit link, 2 MB of video took 2.1s with the line free and up to 10s
+     * with an upload running. The uploader answers by sending a small slice
+     * and waiting whenever a video or photo is open -- which is only possible
+     * because the protocol lets a client send *less* than the chunk size the
+     * server advertises, and answers with the offset it reached.
+     *
+     * If that ever stopped being true, uploads would fail while something was
+     * being watched and work otherwise, which is a horrible bug to be told
+     * about second-hand.
+     */
+    $body = str_repeat('paced', 40000);          // 200 000 bytes
+    $init = $client->post('/api/uploads/init', [
+        'targetPath' => $scratch, 'name' => 'paced.bin',
+        'size' => strlen($body), 'uploadId' => 'httptest'.bin2hex(random_bytes(8)),
+        'conflict' => 'overwrite',
+    ]);
+    check('init succeeds', $init->ok(), $init->describe());
+    $id = $init->json['id'] ?? '';
+    $advertised = (int)($init->json['chunkBytes'] ?? 0);
+    check('the server advertises a chunk size', $advertised > 0, json_encode($init->json));
+    if ($id === '') return;
+
+    // A slice far below what the server would take, sent repeatedly: this is
+    // the shape of an upload that is being polite.
+    $slice = 60000;
+    check('the slice is well under the server\'s limit', $slice < $advertised);
+    $offset = 0;
+    $ok = true;
+    while ($offset < strlen($body)) {
+        $piece = substr($body, $offset, $slice);
+        $r = $client->putChunk($id, $offset, $piece);
+        if (!$r->ok()) { check('every short chunk is accepted', false, $r->describe()); $ok = false; break; }
+        $expected = $offset + strlen($piece);
+        if (($r->json['received'] ?? -1) !== $expected) {
+            check('the offset follows what was actually sent', false, json_encode($r->json));
+            $ok = false; break;
+        }
+        $offset = $expected;
+    }
+    if (!$ok) return;
+    check('every short chunk is accepted', true);
+    check('the offset follows what was actually sent', true);
+
+    // Asking where an upload is up to must work too: it is the route a resume
+    // starts from, and it now answers with the session lock already released.
+    $status = $client->get('/api/uploads/status', ['id' => $id]);
+    check('status still answers', $status->ok(), $status->describe());
+    check('status agrees with the last chunk', ($status->json['received'] ?? -1) === strlen($body),
+        json_encode($status->json));
+
+    $done = $client->post('/api/uploads/complete', ['id' => $id]);
+    check('the upload completes', $done->ok(), $done->describe());
+    $back = $client->get('/api/files/download', ['path' => $scratch.'/paced.bin']);
+    check('the bytes come back unchanged', $back->body === $body,
+        strlen($back->body).' bytes of '.strlen($body));
+});
+
 scenario('the media route serves byte ranges', function () use ($client, $scratch) {
     /*
      * Range serving is what video seeking rides on, so it is worth a real

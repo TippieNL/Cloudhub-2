@@ -617,6 +617,43 @@ file never arrived, and there was no error anywhere to explain it. Refusals are
 now kept with the server's own wording, listed under the queue, and dismissed
 when you have read them.
 
+### An upload no longer takes the whole line
+
+Uploading a large video made everything else unusable: a video would not start
+and photos took the better part of a second each. It is not the server. An
+upload and a video are two claims on one connection, and an upload made of
+back-to-back 8 MB chunks wins that argument outright.
+
+Measured on an 8 Mbit link, against the same server:
+
+| | an image | 2 MB of video |
+| --- | --- | --- |
+| nothing else running | 1-2 ms | 2.1 s |
+| a file uploading flat out | 221-1241 ms | 7.7-10.1 s |
+| the same upload, paced | 1-230 ms | 2.2-2.5 s |
+
+The middle row is the bug as reported. Running the server with four workers
+instead of one changed none of it — which is what says the fix belongs in the
+app: the bytes are simply not there to be had.
+
+So the uploader is told when someone is watching. While the player or the
+photo viewer is on screen it sends 256 KB and waits a second and a half, which
+leaves the link mostly free; when they close it goes back to full speed. The
+protocol already allowed it — a client may send less than the chunk size the
+server advertises, and is answered with the offset it reached — so this costs
+round trips and nothing else. The decision is taken again for every chunk, so
+opening a video part-way through an upload is noticed, and the idle chunk is
+2 MB rather than the server's 8 so that it is noticed within seconds rather
+than within a minute.
+
+On the server, a chunk upload no longer holds the **session lock**. PHP's files
+session handler holds an exclusive lock on the session file for the whole
+request; on a SAPI that hands the body to PHP as it arrives, that is the entire
+upload, and every other request from the same account — the file list, a
+thumbnail, the video — waits behind it. `php -S` buffers the body first, so
+there it only ever cost the write to disk, but the lock buys nothing either
+way: nothing in that route writes to the session.
+
 ### How it hangs together
 
 One OkHttp client is shared by the API, by the thumbnail loader and by the

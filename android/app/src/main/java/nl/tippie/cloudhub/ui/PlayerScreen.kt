@@ -45,6 +45,7 @@ import nl.tippie.cloudhub.data.Settings
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.work.ForegroundMedia
 
 /** How far a double-tap jumps, matching the player's own seek increments. */
 private const val SEEK_STEP_MS = 10_000L
@@ -203,6 +204,16 @@ fun PlayerScreen(
             delay(5_000)
             if (player.isPlaying) settings.rememberResumePosition(entry.path, player.currentPosition)
         }
+    }
+
+    /*
+     * While this screen is up, queued uploads send a small slice at a time.
+     * Measured on an 8 Mbit link, 2 MB of video took 2.1s with the line free
+     * and up to 10s with an upload running flat out beside it.
+     */
+    DisposableEffect(Unit) {
+        ForegroundMedia.enter()
+        onDispose { ForegroundMedia.leave() }
     }
 
     DisposableEffect(player, entry.path) {

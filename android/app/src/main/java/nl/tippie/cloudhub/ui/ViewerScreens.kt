@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.work.ForegroundMedia
 
 /**
  * Full-screen image viewing, swiping between everything in the folder.
@@ -49,6 +50,16 @@ fun ImageViewer(
     onBack: (String?) -> Unit,
 ) {
     val pager = rememberPagerState(initialPage = startAt.coerceIn(0, maxOf(0, images.size - 1))) { images.size }
+
+    /*
+     * Photos and a queued upload share one connection, and the upload will
+     * take all of it unless told otherwise -- which is what left a picture
+     * loading for a second at a time while a video was going up.
+     */
+    DisposableEffect(Unit) {
+        ForegroundMedia.enter()
+        onDispose { ForegroundMedia.leave() }
+    }
 
     Scaffold(
         containerColor = Color.Black,
