@@ -382,11 +382,22 @@ force — three lines reading "Sort by …" with nothing to tell them apart left
 unable to see how a folder was sorted without changing it to find out.
 
 **Settings** covers what previously needed a reinstall: the account and its
-role, changing your own password, the server address and how to change it, the
-theme (system, light or dark — the app used to follow the phone with no
-override), whether folders open as a grid or a list, how many videos have a
-saved position and a way to forget them, the thumbnail cache with a way to
-clear it, how many uploads are still queued, and signing out.
+role, changing your own password, the server address and how to change it,
+storage and the duplicate finder, the theme (system, light or dark — the app
+used to follow the phone with no override), whether folders open as a grid or a
+list, how many videos have a saved position and a way to forget them, the
+thumbnail and video caches with a way to clear each, how many uploads are still
+queued, and signing out.
+
+It reads as a settings screen now rather than a page of links. Everything used
+to be the same shade of blue at the same weight, so "Use a different server"
+and "Forget saved positions" — which throws away every remembered position —
+were indistinguishable at a glance. Rows are grouped into cards under quiet
+headings, each with an icon to find it by and its control on the right;
+**only what is destructive is red**, and the two things that cannot be undone
+(forgetting positions, signing out) ask first. The theme is one segmented row
+instead of three radio buttons and 150dp of screen, and the account is a name
+and a role rather than two table rows.
 
 ### The video player
 

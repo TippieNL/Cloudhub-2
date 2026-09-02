@@ -154,9 +154,13 @@ $checks['the frame is scaled to something the server accepts'] =
 
 /* --- what the cache costs, shown ------------------------------------------- */
 
+// Spelling updated with the settings redesign: the size and the clear action
+// became one row that shows what it holds and empties on a tap. What is pinned
+// is that both are still there.
 $checks['the video cache can be seen and emptied'] =
-    str_contains($settings, 'Line("Cached video"')
-    && str_contains($settings, 'Tappable("Clear the video cache")')
+    str_contains($settings, 'title = "Cached video"')
+    && str_contains($settings, 'onClearVideoCache()')
+    && str_contains($settings, 'humanBytes(video)')
     && str_contains($main, 'onClearVideoCache = { MediaCache.clear(this@MainActivity) }');
 
 $bad = false;

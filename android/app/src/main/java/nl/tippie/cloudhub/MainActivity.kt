@@ -362,6 +362,7 @@ class MainActivity : ComponentActivity() {
                         onClearVideoCache = { MediaCache.clear(this@MainActivity) },
                         onChangeServer = { go(Screen.Setup) },
                         onOpenStorage = { go(Screen.Storage) },
+                        onOpenDuplicates = { go(Screen.Duplicates) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }

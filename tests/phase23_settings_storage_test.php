@@ -106,9 +106,61 @@ $checks['only an admin can ask for a recalculation'] =
 $checks['the trash and the version history are both accounted for'] =
     str_contains($storage, 'Line("In the trash"') && str_contains($storage, 'Line("Previous versions"');
 
+// Spelling updated with the redesign: the flat blue links became rows with an
+// icon, a name and a control. The check is that the action is still there.
 $checks['a viewer can still change their own password'] =
     str_contains($api, 'suspend fun changePassword(')
-    && str_contains($settings, 'Tappable("Change password")');
+    && str_contains($settings, 'title = "Change password"');
+
+/* --- the redesign, and what it must not have dropped -------------------------
+ *
+ * The old screen was a flat column: five identical blue links, one of which
+ * threw away every saved video position, and section headings shouting in the
+ * accent colour. The redesign is the risk that a setting quietly disappears
+ * with the layout that held it, so every one of them is named here.
+ */
+$pieces = $readKt('ui/SettingsPieces.kt');
+foreach ([
+    'Change password', 'Address', 'Storage and space left', 'Use a different server',
+    'Open folders in the grid', 'Videos with a saved position', 'Forget saved positions',
+    'Forget the remembered username', 'Cached thumbnails', 'Cached video', 'Uploads waiting',
+    'Sign out',
+] as $setting) {
+    $checks["the redesign kept: $setting"] = str_contains($settings, '"'.$setting.'"');
+}
+$checks['rows are built from one set of pieces, not per screen'] =
+    str_contains($pieces, 'fun SettingsGroup(')
+    && str_contains($pieces, 'fun SettingsRow(')
+    && str_contains($pieces, 'fun SettingsSwitchRow(');
+// The screenshot's worst problem: everything was the same shade of blue, so a
+// row that opens a screen looked exactly like one that destroys something.
+$checks['only destructive rows are red'] =
+    str_contains($pieces, 'enum class RowTone { NORMAL, DANGER }')
+    && substr_count($settings, 'tone = RowTone.DANGER') === 3;
+// Losing ten remembered positions to a stray tap is not recoverable, so it
+// asks; clearing a cache that refills itself does not need to.
+$checks['what cannot be undone asks first'] =
+    str_contains($settings, 'private data class Confirmation(')
+    && str_contains($settings, 'title = "Forget saved positions?"')
+    && str_contains($settings, 'title = "Sign out?"');
+// Three radio rows and 150dp of screen for a three-way choice.
+$checks['the theme is one row, not three'] =
+    str_contains($pieces, 'fun <T> SegmentedChoice(')
+    && str_contains($settings, 'SegmentedChoice(')
+    && !str_contains($settings, 'RadioButton(');
+$checks['the account reads as an account'] =
+    str_contains($pieces, 'fun AccountHeader(')
+    && str_contains($settings, 'AccountHeader(');
+// A settings screen is where you go to free up space, and the finder is the
+// one thing that gives some back.
+$checks['duplicates can be reached from settings'] =
+    str_contains($settings, 'title = "Find duplicates"')
+    && str_contains($main, 'onOpenDuplicates = { go(Screen.Duplicates) }');
+// Dead helpers left behind by a redesign are how a screen ends up with two
+// ways to draw the same row.
+$checks['the layout it replaced is gone'] =
+    !str_contains($settings, 'private fun Tappable(')
+    && !str_contains($settings, 'private fun Toggle(');
 $checks['an obvious password mistake is caught before a round trip'] =
     str_contains($settings, 'internal fun passwordProblem(')
     && str_contains($settings, 'replacement != confirm')
