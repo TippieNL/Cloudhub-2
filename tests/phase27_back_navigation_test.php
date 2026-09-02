@@ -167,6 +167,41 @@ $checks['the state is dropped after the screen has gone, not before'] =
 $checks['signing out drops the remembered place'] =
     str_contains($main, 'screenState.removeState(Screen.Files.key)');
 
+/* --- the swipe that showed nothing ------------------------------------------
+ *
+ * The viewer is a pager, so a sideways swipe should show the next photo. The
+ * zoom detector on each photo consumed every drag past the touch slop -- zoomed
+ * in or not -- so the pager under it never saw one and the swipe did nothing.
+ */
+$zoom = $readKt('ui/PhotoZoom.kt');
+$zoomTests = (string)@file_get_contents($root.'/android/app/src/test/java/nl/tippie/cloudhub/PhotoZoomTest.kt');
+
+$checks['a drag is offered to the pager rather than swallowed'] =
+    str_contains($viewerScreens, '.transformable(')
+    && str_contains($viewerScreens, 'canPan = { pan ->')
+    && str_contains($viewerScreens, 'PhotoZoom.panBelongsToPhoto(scale, offsetX, pan.x, pan.y, size.width.toFloat())');
+// The detector that consumed everything.
+$checks['the gesture detector that ate the swipe is gone'] =
+    !str_contains($viewerScreens, 'detectTransformGestures');
+$checks['who owns a drag is decided in one place, with tests'] =
+    str_contains($zoom, 'object PhotoZoom')
+    && str_contains($zoom, 'fun panBelongsToPhoto(')
+    && str_contains($zoomTests, "a drag across a photo that fits the screen is the pager's");
+// Zooming has to keep working, or the fix trades one gesture for another.
+$checks['pinch and double tap still zoom'] =
+    str_contains($viewerScreens, 'rememberTransformableState')
+    && str_contains($viewerScreens, 'PhotoZoom.scaled(scale, zoomChange)')
+    && str_contains($viewerScreens, 'onDoubleTap = {')
+    && str_contains($zoomTests, 'double tap zooms in, and again zooms out');
+// A picture flung off the screen leaves nothing to drag back.
+$checks['a zoomed photo cannot be dragged off the screen'] =
+    str_contains($viewerScreens, 'PhotoZoom.clampPan(offsetX + pan.x, scale, size.width.toFloat())')
+    && str_contains($zoomTests, 'a photo cannot be dragged off the screen');
+// A vertical drag handed to a pager is a zoomed photo that cannot pan up.
+$checks['a vertical drag stays with the photo'] =
+    str_contains($zoom, 'if (abs(dragY) > abs(dragX)) return true')
+    && str_contains($zoomTests, "a vertical drag on a zoomed photo is never the pager's");
+
 /* --- the gestures that conflict --------------------------------------------
  *
  * Under gesture navigation the strips down each side belong to Android. In a

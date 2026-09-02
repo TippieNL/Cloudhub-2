@@ -1,10 +1,12 @@
 package nl.tippie.cloudhub.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.pager.rememberPagerState
@@ -18,6 +20,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
@@ -31,7 +35,11 @@ import nl.tippie.cloudhub.net.FileEntry
  * a swipe is the whole point, so the viewer takes the folder rather than a
  * single file.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+// canPan is the overload that lets a drag fall through to the pager, and it is
+// still marked experimental in foundation 1.7 -- opted into deliberately: it is
+// the API for this, and the alternative is a hand-written pointer loop that
+// would do the same thing with more to get wrong.
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ImageViewer(
     api: CloudHubApi,
@@ -79,26 +87,66 @@ fun ImageViewer(
             state = pager,
             modifier = Modifier.fillMaxSize().padding(padding).systemGestureExclusion(),
         ) { page ->
-            var scale by remember(page) { mutableFloatStateOf(1f) }
+            // Zoom belongs to the photo on show, so leaving it and coming back
+            // shows the picture rather than where somebody had magnified it.
+            var scale by remember(page) { mutableFloatStateOf(PhotoZoom.MIN_SCALE) }
             var offsetX by remember(page) { mutableFloatStateOf(0f) }
             var offsetY by remember(page) { mutableFloatStateOf(0f) }
+            var size by remember(page) { mutableStateOf(IntSize.Zero) }
 
-            Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            val transform = rememberTransformableState { zoomChange, pan, _ ->
+                scale = PhotoZoom.scaled(scale, zoomChange)
+                if (PhotoZoom.isZoomed(scale)) {
+                    // Clamped, so a picture cannot be flung off the screen and
+                    // left there with nothing to drag back.
+                    offsetX = PhotoZoom.clampPan(offsetX + pan.x, scale, size.width.toFloat())
+                    offsetY = PhotoZoom.clampPan(offsetY + pan.y, scale, size.height.toFloat())
+                } else {
+                    offsetX = 0f
+                    offsetY = 0f
+                }
+            }
+
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .onSizeChanged { size = it }
+                    /*
+                     * canPan is what fixes the swipe.
+                     *
+                     * The old gesture detector consumed every drag past the
+                     * touch slop, zoomed in or not, so the pager under it never
+                     * saw one and swiping did nothing. Declining a drag here
+                     * leaves it for the pager, which is exactly what "show me
+                     * the next photo" is.
+                     */
+                    .transformable(
+                        state = transform,
+                        canPan = { pan ->
+                            PhotoZoom.panBelongsToPhoto(scale, offsetX, pan.x, pan.y, size.width.toFloat())
+                        },
+                    )
+                    .pointerInput(page) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                scale = PhotoZoom.afterDoubleTap(scale)
+                                offsetX = 0f
+                                offsetY = 0f
+                            },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
                 AsyncImage(
                     model = api.previewUrl(images[page].path).toString(),
                     contentDescription = images[page].name,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
-                        .graphicsLayer(scaleX = scale, scaleY = scale,
-                            translationX = offsetX, translationY = offsetY)
-                        .pointerInput(page) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                scale = (scale * zoom).coerceIn(1f, 6f)
-                                // Panning only means something once zoomed in.
-                                if (scale > 1f) { offsetX += pan.x; offsetY += pan.y }
-                                else { offsetX = 0f; offsetY = 0f }
-                            }
-                        },
+                        .graphicsLayer(
+                            scaleX = scale, scaleY = scale,
+                            translationX = offsetX, translationY = offsetY,
+                        ),
                 )
             }
         }

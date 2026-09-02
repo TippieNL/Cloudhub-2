@@ -444,6 +444,23 @@ grants up to 200dp of height per edge — so a photo swiped from the very edge
 turns the page, while Back by gesture still works above and below that band,
 along with the toolbar arrow and three-button Back.
 
+### Swiping between photos
+
+The viewer is a pager, so a sideways swipe shows the next photo — except that
+it did nothing at all. The zoom gesture detector sitting on each photo consumed
+every drag that passed the touch slop, zoomed in or not, so the pager
+underneath never saw one.
+
+A drag now belongs to whoever can use it. A photo that fits the screen has
+nothing to pan, so the drag goes to the pager and turns the page. A zoomed
+photo keeps it — until its edge reaches the screen edge, at which point
+dragging further that way pages as well, so you never have to zoom out to move
+on. A mostly-vertical drag always stays with the photo, since a pager has no
+use for it.
+
+Pinch still zooms, a double tap zooms in and out, and a zoomed photo cannot be
+dragged off the screen and left there.
+
 ### Coming back where you left off
 
 Scrolling to the fortieth clip in a folder, watching it, and pressing Back put
