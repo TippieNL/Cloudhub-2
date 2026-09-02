@@ -337,8 +337,13 @@ scenario('a revoked link stops working', function () use ($client, $base, $uploa
  * route around it: who may run a scan, who may force one, and that the report
  * describes the files this account can actually see.
  */
-scenario('the same photo twice is found and reported', function () use ($client, $scratch) {
-    $photo = "\xFF\xD8\xFF\xE0".str_repeat("dupe", 4096)."\xFF\xD9";
+// Planted by the scenario below and looked for again by the contract scenario
+// after it, which needs to know how big a copy is to check what deleting one
+// would give back.
+$dupePhoto = "\xFF\xD8\xFF\xE0".str_repeat("dupe", 4096)."\xFF\xD9";
+
+scenario('the same photo twice is found and reported', function () use ($client, $scratch, $dupePhoto) {
+    $photo = $dupePhoto;
     $upload = function (string $folder, string $name, string $bytes) use ($client) {
         $init = $client->post('/api/uploads/init', [
             'targetPath' => $folder, 'name' => $name, 'size' => strlen($bytes),
@@ -398,6 +403,80 @@ scenario('a scan can be read by anyone but forced only by an admin', function ()
 
     $admin = $client->get('/api/duplicates', ['refresh' => 1]);
     check('an admin can', $admin->ok() && ($admin->json['cached'] ?? true) === false, $admin->describe());
+});
+
+/*
+ * The duplicate-scan contract, which is what other clients speak.
+ *
+ * The Android app follows one protocol whichever CloudHub it is pointed at --
+ * POST to start, POST again while `done` is false, GET to read the last
+ * result, DELETE to forget it -- so these check the shape and not just that
+ * something came back. A field renamed here is a screen that shows nothing
+ * there, and nothing else in this repository would notice.
+ */
+scenario('the scan contract answers the way other clients expect', function () use ($base, $client, $scratch, $dupePhoto) {
+    $config = $client->get('/api/files/config');
+    // Their absence is how a build without the feature says so, so a client
+    // can tell "no duplicate finder" from "no duplicates".
+    check('the limits are published', isset($config->json['duplicateScanSeconds']),
+        json_encode($config->json));
+
+    // Whatever a previous run left behind is not this test's subject.
+    $client->delete('/api/duplicates/scan');
+    $empty = $client->get('/api/duplicates/scan');
+    check('an unscanned server says so rather than "none found"',
+        ($empty->json['started'] ?? true) === false, $empty->describe());
+
+    // One scope here, the whole store: answering a folder request with a
+    // store-wide answer would be answering a different question.
+    $folder = $client->post('/api/duplicates/scan', ['path' => $scratch]);
+    check('a folder scan is refused rather than widened', $folder->status === 400, $folder->describe());
+
+    $scan = $client->post('/api/duplicates/scan', ['path' => '/', 'restart' => true]);
+    check('a scan starts', $scan->ok(), $scan->describe());
+    check('and this build finishes it in one request', ($scan->json['done'] ?? false) === true);
+
+    $found = null;
+    foreach ($scan->json['groups'] ?? [] as $group) {
+        if (in_array($scratch.'/holiday.jpg', array_column($group['files'], 'path'), true)) $found = $group;
+    }
+    check('the planted copy is in the result', $found !== null,
+        json_encode($scan->json['groups'] ?? []));
+    if ($found === null) return;
+
+    // The contract's names, not this build's: `count` and `reclaimable`, and a
+    // copy described by a path, a size and an epoch mtime.
+    check('a group counts its copies', ($found['count'] ?? null) === 2, json_encode($found));
+    check('and says what deleting the extra one gives back',
+        ($found['reclaimable'] ?? null) === strlen($dupePhoto), json_encode($found['reclaimable'] ?? null));
+    $file = $found['files'][0];
+    check('a copy carries a path, a size and a modification time',
+        isset($file['path'], $file['bytes'], $file['mtime']) && $file['mtime'] > 0, json_encode($file));
+    check('the totals add up', ($scan->json['reclaimable'] ?? 0) >= strlen($dupePhoto)
+        && ($scan->json['duplicateFiles'] ?? 0) >= 1, json_encode($scan->json['reclaimable'] ?? null));
+    // computed <= hashed <= toHash is what a client's progress bar assumes.
+    check('progress cannot read as more than everything',
+        ($scan->json['computed'] ?? 0) <= ($scan->json['hashed'] ?? 0)
+        && ($scan->json['hashed'] ?? 0) <= ($scan->json['toHash'] ?? 0),
+        json_encode(['computed' => $scan->json['computed'] ?? null, 'hashed' => $scan->json['hashed'] ?? null,
+            'toHash' => $scan->json['toHash'] ?? null]));
+
+    $saved = $client->get('/api/duplicates/scan');
+    check('the result is readable again without redoing the work',
+        ($saved->json['started'] ?? false) === true && ($saved->json['done'] ?? false) === true,
+        $saved->describe());
+
+    // Reading a scan is free; running one walks the store and reads files.
+    $viewer = new Client($base);
+    $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+    $read = $viewer->get('/api/duplicates/scan');
+    check('a viewer can read what was found', $read->ok(), $read->describe());
+    $start = $viewer->post('/api/duplicates/scan', ['path' => '/']);
+    check('but cannot start one', $start->status === 403, $start->describe());
+
+    check('a scan can be thrown away', $client->delete('/api/duplicates/scan')->ok());
+    check('and the server says so afterwards',
+        ($client->get('/api/duplicates/scan')->json['started'] ?? true) === false);
 });
 
 scenario('a scan of everything sees more than a scan of media', function () use ($client, $scratch) {

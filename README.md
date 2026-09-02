@@ -737,9 +737,53 @@ both clients, because a duplicate finder that empties a set has not deleted a
 duplicate, it has deleted the photo. What you do delete goes to the trash, like
 any other delete.
 
-`GET /api/duplicates` backs it: `scope=media` (the default) or `scope=all`.
-Reading the report needs only a signed-in account; `refresh=1`, which forces a
-fresh walk of the store, is admin-only.
+`GET /api/duplicates` backs the web page: `scope=media` (the default) or
+`scope=all`. Reading the report needs only a signed-in account; `refresh=1`,
+which forces a fresh walk of the store, is admin-only.
+
+### The scan contract, for other clients
+
+The Android app talks to whichever CloudHub its owner points it at, so it does
+not speak this server's private shape. It follows the **duplicate-scan
+contract** published by the web build (`TippieNL/Cloudhub-web`), and this
+server answers the same one:
+
+| Request | Does |
+| --- | --- |
+| `POST /api/duplicates/scan` `{"path":"/","restart":true}` | starts a scan |
+| `POST /api/duplicates/scan` `{"path":"/"}` | carries it on; repeat while `done` is false |
+| `GET /api/duplicates/scan` | the last result, doing no work |
+| `DELETE /api/duplicates/scan` | forgets it |
+
+A reply carries `done`, `truncated`, counts of what has been `scanned`,
+`hashed` and is `toHash`, and the groups confirmed so far — each a `bytes`, a
+`count`, what is `reclaimable`, and its files as `path`, `bytes` and `mtime`.
+A `GET` before anything has ever been scanned answers `started: false`, which
+is how a client tells "nothing scanned yet" from "nothing found".
+
+Reading a scan needs only a signed-in account. **Starting one needs write
+access**, because it walks the store and reads files.
+
+Two differences from the web build, both deliberate and both visible to a
+client rather than guessed at:
+
+- The scan here is not sliced across requests — `DuplicateFinder` walks and
+  hashes within its own time budget — so the first `POST` is also the last and
+  the reply says `done` immediately. A polling client cannot tell, and a scan
+  that ran out of budget comes back `truncated`.
+- There is one scope, the whole store. A `POST` naming a folder is **refused**
+  rather than answered with a store-wide result, which would be an answer to a
+  different question.
+
+`GET /api/files/config` publishes `duplicateMinBytes`, `duplicateScanSeconds`
+and `duplicateMaxFiles`. Their absence is how a build without a duplicate
+finder says so, and the app checks exactly that before offering to scan —
+better than a 404 from a route it has just put in front of somebody.
+
+There is no bulk delete. Clients call `DELETE /api/files/delete` once per file,
+which is the ordinary delete: it goes to the trash, honours `ALLOW_DELETE` and
+is audited. Keeping one copy per set is the client's promise, not the server's;
+the app keeps it, and its rules are tested.
 
 ## Previous versions
 

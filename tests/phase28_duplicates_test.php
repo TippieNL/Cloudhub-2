@@ -221,7 +221,7 @@ $checks['the web page keeps the same rule'] =
 // Deleting goes through the ordinary route, so it lands in the trash and can
 // be undone -- the one thing that makes a bulk delete survivable.
 $checks['deleting goes to the trash like any other delete'] =
-    str_contains($screen, 'api.delete(path)')
+    str_contains($screen, 'runCatching { api.delete(path) }')
     && str_contains($appJs, "await api('/api/files/delete', { method: 'DELETE', body: { path } })");
 $checks['both clients can reach it'] =
     str_contains($appView, 'data-route="/duplicates"')
@@ -229,9 +229,66 @@ $checks['both clients can reach it'] =
     && str_contains($readRepo('android/app/src/main/java/nl/tippie/cloudhub/ui/FilesScreen.kt'), 'MenuItem(Icons.Default.ContentCopy, "Duplicates")');
 // A scan that ran out of time found real duplicates but perhaps not all of
 // them, and saying so is cheaper than being wrong.
+//
+// Spelling updated when the app moved to the duplicate-scan contract: what the
+// web build calls `truncated` is what this build reports as an incomplete
+// scan, and the app reads the contract's word. The web page here is unchanged
+// and still reads `complete`.
 $checks['an incomplete scan says so'] =
-    str_contains($screen, 'report?.complete == false')
+    str_contains($screen, 'scan?.truncated == true')
     && str_contains($appJs, 'the scan stopped early');
+
+/* --- one protocol for every client -------------------------------------------
+ *
+ * The Android app talks to whichever CloudHub its owner points it at, so it
+ * follows the duplicate-scan contract published by the web build
+ * (TippieNL/Cloudhub-web) rather than a protocol of its own: POST to start,
+ * POST again while `done` is false, GET to read the last result, DELETE to
+ * forget it. This server answers the same contract, which is what lets one app
+ * work against both -- proven against both in ApiIntegrationTest, and over
+ * HTTP here in tests/http/run.php.
+ */
+$api = $readRepo('android/app/src/main/java/nl/tippie/cloudhub/net/CloudHubApi.kt');
+$models = $readRepo('android/app/src/main/java/nl/tippie/cloudhub/net/Models.kt');
+$apiTests = $readRepo('android/app/src/test/java/nl/tippie/cloudhub/ApiIntegrationTest.kt');
+$httpTests = $readRepo('tests/http/run.php');
+
+$checks['the app calls the four endpoints of the contract'] =
+    str_contains($api, 'suspend fun startDuplicateScan(path: String = "/"): DuplicateScan')
+    && str_contains($api, '"""{"path":${str(path)},"restart":true}"""')
+    && str_contains($api, 'suspend fun continueDuplicateScan(path: String = "/"): DuplicateScan')
+    && str_contains($api, 'suspend fun lastDuplicateScan(): DuplicateScan = get("/api/duplicates/scan")')
+    && str_contains($api, 'request("/api/duplicates/scan", "DELETE"');
+// The names on the wire. A field renamed on either side is a screen that shows
+// nothing, and no unit test would notice.
+$checks['it reads the contract\'s field names'] =
+    str_contains($models, 'data class DuplicateScan(')
+    && str_contains($models, 'val truncated: Boolean = false,')
+    && str_contains($models, 'val toHash: Int = 0,')
+    && str_contains($models, 'val reclaimable: Long = 0,')
+    && str_contains($models, 'val mtime: Long = 0,');
+$checks['the screen polls until the server says done'] =
+    str_contains($screen, 'while (DuplicateRules.shouldContinue(latest, slices))')
+    && str_contains($screen, 'api.continueDuplicateScan()')
+    && str_contains($rules, 'fun shouldContinue(scan: DuplicateScan, slicesSoFar: Int): Boolean');
+// A build without the finder does not publish the limits, which is a better
+// answer than a 404 from a route the user was just offered.
+$checks['a server without the feature is named, not guessed at'] =
+    str_contains($screen, 'supported = config.duplicateScanSeconds != null')
+    && str_contains($index, "'duplicateScanSeconds' => DUPLICATE_SCAN_BUDGET_SECONDS,");
+$checks['this server answers the same contract'] =
+    str_contains($index, "if (\$path === '/api/duplicates/scan') {")
+    && str_contains($index, 'function duplicate_scan_payload(array $report): array {')
+    && str_contains($index, "'reclaimable' => (int)\$group['wastedBytes'],")
+    && str_contains($index, "'truncated' => !\$report['complete'],");
+// A viewer may see what a scan found; running one walks the store and reads
+// files, which is a write-guarded request here as it is there.
+$checks['reading a scan is free, running one is not'] =
+    str_contains($httpTests, 'a viewer can read what was found')
+    && str_contains($httpTests, 'but cannot start one');
+$checks['the client is proven against a running server'] =
+    str_contains($apiTests, 'a duplicate scan polls to done and finds a planted copy')
+    && str_contains($apiTests, 'a scan can be thrown away');
 
 /* --- tidy up ---------------------------------------------------------------- */
 

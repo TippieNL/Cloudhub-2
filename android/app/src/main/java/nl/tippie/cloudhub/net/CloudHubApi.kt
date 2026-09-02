@@ -101,20 +101,30 @@ class CloudHubApi(
         if (refresh) get("/api/storage/usage", "refresh" to "1") { decode(it) }
         else get("/api/storage/usage") { decode(it) }
 
-    /* ---- duplicates ------------------------------------------------------- */
-
-    /**
-     * Copies of the same file, byte for byte.
+    /* ---- duplicates -------------------------------------------------------
      *
-     * Reading the report needs no more than a signed-in account. Forcing a
-     * fresh scan is an admin action, because that is the one that walks the
-     * store and hashes what could match.
+     * A poll loop, because hashing a media library does not finish inside one
+     * request: start a scan, ask it to carry on until it says it is done, and
+     * read the last result whenever the screen is opened again.
+     *
+     * Reading needs only a signed-in account; starting one needs write access,
+     * because a scan walks the whole store and reads files.
      */
-    suspend fun duplicates(refresh: Boolean = false, everything: Boolean = false): DuplicateReport {
-        val scope = if (everything) "all" else "media"
-        return if (refresh) get("/api/duplicates", "scope" to scope, "refresh" to "1") { decode(it) }
-        else get("/api/duplicates", "scope" to scope) { decode(it) }
-    }
+
+    /** Start again from the beginning, and do the first slice of the work. */
+    suspend fun startDuplicateScan(path: String = "/"): DuplicateScan =
+        postJson("/api/duplicates/scan", """{"path":${str(path)},"restart":true}""") { decode(it) }
+
+    /** Carry on. Repeat while the reply says `done` is false. */
+    suspend fun continueDuplicateScan(path: String = "/"): DuplicateScan =
+        postJson("/api/duplicates/scan", """{"path":${str(path)}}""") { decode(it) }
+
+    /** What the last scan found, without doing any work. */
+    suspend fun lastDuplicateScan(): DuplicateScan = get("/api/duplicates/scan") { decode(it) }
+
+    /** Throw the saved scan away. */
+    suspend fun forgetDuplicateScan(): SimpleResult =
+        request("/api/duplicates/scan", "DELETE", "{}") { decode(it) }
 
     /**
      * Change the signed-in account's own password.

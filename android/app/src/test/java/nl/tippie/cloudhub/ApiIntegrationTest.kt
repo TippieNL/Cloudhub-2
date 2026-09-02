@@ -2,6 +2,7 @@ package nl.tippie.cloudhub
 
 import kotlinx.coroutines.runBlocking
 import nl.tippie.cloudhub.net.*
+import nl.tippie.cloudhub.ui.DuplicateRules
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
@@ -9,6 +10,7 @@ import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runners.MethodSorters
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -59,6 +61,16 @@ class ApiIntegrationTest {
     private fun requireServer() {
         assumeTrue("set CLOUDHUB_TEST_URL to run the API tests", baseUrl != null)
         assertTrue(signedIn, "sign in failed; check CLOUDHUB_TEST_USER/PASS")
+    }
+
+    /** Put bytes at a path, through the ordinary chunked upload. */
+    private suspend fun put(path: String, bytes: ByteArray) {
+        val folder = path.substringBeforeLast('/')
+        val name = path.substringAfterLast('/')
+        val id = "fixture${System.nanoTime()}"
+        api.uploadInit(id, folder, name, bytes.size.toLong())
+        api.uploadChunk(id, 0, bytes.toRequestBody())
+        api.uploadComplete(id)
     }
 
     @Test fun `01 sign in returns a user and a csrf token`() = runBlocking {
@@ -211,6 +223,79 @@ class ApiIntegrationTest {
         } catch (e: ApiError) {
             assertEquals(403, e.status)
         }
+    }
+
+    @Test fun `13 the server publishes the duplicate finder's limits`() = runBlocking {
+        requireServer()
+        val config = api.config()
+        // Their absence is how a build without the feature says so, which is
+        // what the screen checks before offering to scan.
+        assertNotNull(config.duplicateScanSeconds, "no duplicate finder on this server")
+        assertNotNull(config.duplicateMaxFiles, "the walk limit was not published")
+        // assertNotNull returns the value, so the block would not be Unit.
+        assertTrue(config.duplicateMinBytes != null, "the minimum size was not published")
+    }
+
+    @Test fun `14 a duplicate scan polls to done and finds a planted copy`() = runBlocking {
+        requireServer()
+        // Two identical files and one the same size but not the same bytes:
+        // the decoy is what proves the answer is the content, not the size.
+        val photo = ByteArray(60_000) { ((it * 31) % 251).toByte() }
+        val decoy = ByteArray(60_000) { ((it * 17) % 241).toByte() }
+        put("$scratch/original.jpg", photo)
+        api.makeFolder("$scratch/copies")
+        put("$scratch/copies/original.jpg", photo)
+        put("$scratch/decoy.jpg", decoy)
+
+        var slices = 1
+        var scan = api.startDuplicateScan()
+        while (DuplicateRules.shouldContinue(scan, slices)) {
+            scan = api.continueDuplicateScan()
+            slices++
+        }
+        assertTrue(scan.done, "the scan never finished after $slices slices")
+
+        val planted = scan.groups.firstOrNull { group ->
+            group.files.any { it.path == "$scratch/original.jpg" }
+        }
+        assertNotNull(planted, "the planted copy was not found: ${scan.groups.map { g -> g.files.map { it.path } }}")
+        assertEquals(2, planted.count)
+        assertEquals(
+            listOf("$scratch/copies/original.jpg", "$scratch/original.jpg"),
+            planted.files.map { it.path }.sorted(),
+        )
+        assertEquals(60_000L, planted.bytes)
+        // bytes x (copies - 1): what deleting the extra copy gives back, never
+        // the whole group.
+        assertEquals(60_000L, planted.reclaimable)
+        // Every copy carries what the screen needs to name and sort it.
+        assertTrue(planted.files.all { it.mtime > 0 }, "no modification time: ${planted.files}")
+
+        assertTrue(
+            scan.groups.none { g -> g.files.any { it.path == "$scratch/decoy.jpg" } },
+            "a file of the same size but different bytes was called a duplicate",
+        )
+    }
+
+    @Test fun `15 the last scan is readable without doing the work again`() = runBlocking {
+        requireServer()
+        val again = api.lastDuplicateScan()
+        assertTrue(again.started, "the finished scan was not kept")
+        assertTrue(again.done)
+        assertTrue(
+            again.groups.any { g -> g.files.any { it.path == "$scratch/original.jpg" } },
+            "reading the saved scan lost the group the scan found",
+        )
+    }
+
+    @Test fun `16 a scan can be thrown away`() = runBlocking {
+        requireServer()
+        assertTrue(api.forgetDuplicateScan().success)
+        val empty = api.lastDuplicateScan()
+        // The one reply that means "nothing has ever been scanned here", which
+        // is different from "nothing was found".
+        assertFalse(empty.started)
+        assertEquals(emptyList(), empty.groups)
     }
 
     @Test fun `99 clean up`() = runBlocking {

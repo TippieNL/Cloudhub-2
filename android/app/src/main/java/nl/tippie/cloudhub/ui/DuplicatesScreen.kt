@@ -26,9 +26,10 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.DuplicateGroup
-import nl.tippie.cloudhub.net.DuplicateReport
+import nl.tippie.cloudhub.net.DuplicateScan
 
 /**
  * The same photo, twice.
@@ -37,6 +38,11 @@ import nl.tippie.cloudhub.net.DuplicateReport
  * a holiday imported from two cameras. The server finds files that are
  * byte-for-byte identical -- never merely similar -- so what is offered here
  * is safe to delete.
+ *
+ * The scan is a poll loop rather than one request: hashing a library does not
+ * finish inside the time a phone will wait for a reply, so the server does a
+ * slice of the work per request and says how far it has got. Groups appear as
+ * they are confirmed, which means the screen is useful before the scan ends.
  *
  * Nothing is deleted without being asked for, every group always keeps a copy,
  * and what is deleted goes to the trash like any other delete, so a mistake is
@@ -49,11 +55,15 @@ fun DuplicatesScreen(
     canWrite: Boolean,
     onBack: () -> Unit,
 ) {
-    var report by remember { mutableStateOf<DuplicateReport?>(null) }
+    var scan by remember { mutableStateOf<DuplicateScan?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(true) }
-    var everything by remember { mutableStateOf(false) }
-    /** Per group, the copy to keep: the server's suggestion until changed. */
+    /** Null while it has not been asked; false on a server without the feature. */
+    var supported by remember { mutableStateOf<Boolean?>(null) }
+    var minBytes by remember { mutableStateOf<Long?>(null) }
+    /** True when the poll loop gave up rather than the scan finishing. */
+    var gaveUp by remember { mutableStateOf(false) }
+    /** Per group, the copy to keep: the oldest until changed. */
     val keeping = remember { mutableStateMapOf<String, String>() }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirming by remember { mutableStateOf(false) }
@@ -61,14 +71,34 @@ fun DuplicatesScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    suspend fun load(refresh: Boolean) {
+    /**
+     * Ask for slices until the server says it is done.
+     *
+     * Every reply carries everything found so far, so each one is shown rather
+     * than waiting for the end. Leaving the screen cancels the coroutine and
+     * with it the loop; the server keeps the scan, and opening the screen
+     * again reads it back without repeating the work.
+     */
+    suspend fun runScan() {
         busy = true
         error = null
+        gaveUp = false
         try {
-            val found = withContext(Dispatchers.IO) { api.duplicates(refresh, everything) }
-            report = found
+            var slices = 1
+            var latest = withContext(Dispatchers.IO) { api.startDuplicateScan() }
+            scan = latest
             keeping.clear()
             selected = emptySet()
+            while (DuplicateRules.shouldContinue(latest, slices)) {
+                latest = withContext(Dispatchers.IO) { api.continueDuplicateScan() }
+                scan = latest
+                slices++
+            }
+            gaveUp = !latest.done
+        } catch (e: ApiError) {
+            // A viewer may read a scan but not start one, which is the server
+            // saying something specific rather than something going wrong.
+            error = if (e.status == 403) "Your account can see a scan but not start one." else e.message
         } catch (e: Exception) {
             error = e.message
         } finally {
@@ -76,9 +106,31 @@ fun DuplicatesScreen(
         }
     }
 
-    LaunchedEffect(everything) { load(refresh = false) }
+    LaunchedEffect(Unit) {
+        busy = true
+        try {
+            // The limits, and whether this build has the feature at all: a
+            // server without a duplicate finder does not publish them.
+            val config = withContext(Dispatchers.IO) { api.config() }
+            supported = config.duplicateScanSeconds != null
+            minBytes = config.duplicateMinBytes
+            if (supported == true) {
+                val last = withContext(Dispatchers.IO) { api.lastDuplicateScan() }
+                scan = last
+                // Nothing has ever been scanned here. Starting one is what the
+                // screen is for -- but only an account that may.
+                if (!last.started && canWrite) runScan() else busy = false
+            } else {
+                busy = false
+            }
+        } catch (e: Exception) {
+            error = e.message
+            supported = supported ?: false
+            busy = false
+        }
+    }
 
-    val groups = report?.groups.orEmpty()
+    val groups = scan?.groups.orEmpty()
     val freed = DuplicateRules.freedBy(groups, selected)
 
     Scaffold(
@@ -96,9 +148,10 @@ fun DuplicatesScreen(
                         onClick = { selected = DuplicateRules.removableIn(groups, keeping).toSet() },
                         enabled = canWrite && groups.isNotEmpty(),
                     ) { Icon(Icons.Default.DoneAll, "Select every extra copy") }
-                    IconButton(onClick = { scope.launch { load(refresh = true) } }, enabled = !busy) {
-                        Icon(Icons.Default.Refresh, "Scan again")
-                    }
+                    IconButton(
+                        onClick = { scope.launch { runScan() } },
+                        enabled = canWrite && !busy && supported == true,
+                    ) { Icon(Icons.Default.Refresh, "Scan again") }
                 },
             )
         },
@@ -128,37 +181,39 @@ fun DuplicatesScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            Header(report, busy, error, everything, onScope = { everything = it })
+            Header(scan, busy, error, gaveUp, minBytes, canWrite, supported)
 
             when {
-                busy && report == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                supported == false -> Message(
+                    "This server does not have the duplicate finder. It needs a newer " +
+                        "CloudHub than the one it is running."
+                )
+
+                busy && groups.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     CircularProgressIndicator()
                 }
 
-                groups.isEmpty() && error == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
-                    Text(
-                        if (everything) "Nothing in the store is stored twice."
-                        else "No photo or video is stored twice.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(32.dp),
-                    )
-                }
+                scan?.started == false -> Message(
+                    if (canWrite) "Nothing has been scanned yet. Tap the refresh button to start."
+                    else "Nothing has been scanned yet, and your account cannot start a scan."
+                )
+
+                groups.isEmpty() && error == null ->
+                    Message("No photo or video is stored twice.")
 
                 else -> LazyColumn(
                     contentPadding = PaddingValues(bottom = 24.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    items(groups, key = { it.hash }) { group ->
+                    items(groups, key = { DuplicateRules.groupId(it) }) { group ->
                         GroupCard(
                             api = api,
                             group = group,
                             canWrite = canWrite,
-                            keeping = keeping[group.hash] ?: group.keep,
+                            keeping = DuplicateRules.keeperFor(group, keeping[DuplicateRules.groupId(group)]),
                             selected = selected,
                             onKeep = { path ->
-                                keeping[group.hash] = path
+                                keeping[DuplicateRules.groupId(group)] = path
                                 // The copy being kept cannot also be deleted.
                                 selected = selected - path
                             },
@@ -194,15 +249,23 @@ fun DuplicatesScreen(
                     enabled = !emptied,
                     onClick = {
                         confirming = false
+                        val going = selected
                         scope.launch {
-                            val failures = withContext(Dispatchers.IO) {
-                                selected.count { path -> runCatching { api.delete(path) }.isFailure }
+                            // One request per file: the server has no bulk
+                            // delete, and each of these is an ordinary delete
+                            // that goes to the trash and is audited.
+                            val gone = withContext(Dispatchers.IO) {
+                                going.filter { path -> runCatching { api.delete(path) }.isSuccess }.toSet()
                             }
+                            // The scan is not re-run for this: what was deleted
+                            // is known, so the list is brought up to date here
+                            // rather than hashing the library again.
+                            scan = scan?.let { DuplicateRules.without(it, gone) }
+                            selected = emptySet()
                             snackbar.showSnackbar(
-                                if (failures == 0) "Moved ${selected.size} to the trash"
-                                else "$failures could not be deleted"
+                                if (gone.size == going.size) "Moved ${gone.size} to the trash"
+                                else "${going.size - gone.size} could not be deleted"
                             )
-                            load(refresh = true)
                         }
                     },
                 ) { Text("Move to trash") }
@@ -213,61 +276,93 @@ fun DuplicatesScreen(
 }
 
 @Composable
+private fun Message(text: String) {
+    Box(Modifier.fillMaxSize(), Alignment.Center) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(32.dp),
+        )
+    }
+}
+
+@Composable
 private fun Header(
-    report: DuplicateReport?,
+    scan: DuplicateScan?,
     busy: Boolean,
     error: String?,
-    everything: Boolean,
-    onScope: (Boolean) -> Unit,
+    gaveUp: Boolean,
+    minBytes: Long?,
+    canWrite: Boolean,
+    supported: Boolean?,
 ) {
     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(
-            DuplicateRules.summary(report?.groupCount ?: 0, report?.wastedBytes ?: 0) { humanBytes(it) },
+            DuplicateRules.summary(scan?.groups?.size ?: 0, scan?.reclaimable ?: 0) { humanBytes(it) },
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            "Files that are byte for byte identical. A photo saved again at another size is a " +
-                "different file and is not counted.",
+            buildString {
+                append("Files that are byte for byte identical. A photo saved again at another ")
+                append("size is a different file and is not counted.")
+                // Read from the server rather than assumed: it is why a folder
+                // of tiny files never appears here.
+                minBytes?.takeIf { it > 0 }?.let { append(" Anything under ${humanBytes(it)} is skipped.") }
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
         )
-        // A scan that ran out of time has found real duplicates but not
-        // necessarily all of them, and saying so is cheaper than being wrong.
-        if (report?.complete == false) {
+
+        if (scan != null && supported == true && scan.started) {
             Text(
-                "The scan stopped early, so there may be more. Scan again to carry on.",
+                DuplicateRules.activity(scan),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
             )
-        }
-        error?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(top = 6.dp))
-        }
-
-        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            FilterChip(
-                selected = !everything,
-                onClick = { onScope(false) },
-                label = { Text("Photos & videos") },
-                enabled = !busy,
-            )
-            Spacer(Modifier.width(8.dp))
-            FilterChip(
-                selected = everything,
-                onClick = { onScope(true) },
-                label = { Text("Everything") },
-                enabled = !busy,
-            )
+            // A determinate bar once there is something to be determinate
+            // about; the first slice walks the tree and hashes nothing.
             if (busy) {
-                Spacer(Modifier.width(12.dp))
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                val fraction = DuplicateRules.progress(scan)
+                if (fraction != null) {
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                } else {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                }
             }
         }
+
+        // A scan that hit the server's file limit has found real duplicates
+        // but not necessarily all of them, and saying so is cheaper than
+        // being wrong.
+        if (scan?.truncated == true) {
+            Notice("The store has more files than one scan covers, so there may be more duplicates.")
+        }
+        if (gaveUp) {
+            Notice("The scan did not finish. What is listed is real; scan again to carry on.")
+        }
+        if (!canWrite && supported == true) {
+            Notice("Your account can see duplicates but not start a scan or delete anything.")
+        }
+        error?.let { Notice(it) }
     }
+}
+
+@Composable
+private fun Notice(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(top = 6.dp),
+    )
 }
 
 @Composable
@@ -283,12 +378,12 @@ private fun GroupCard(
     ElevatedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
         Column(Modifier.padding(12.dp)) {
             Text(
-                "${group.copies} copies · ${humanBytes(group.bytes)} each",
+                "${group.count} copies · ${humanBytes(group.bytes)} each",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                "${humanBytes(group.wastedBytes)} to reclaim",
+                "${humanBytes(group.reclaimable)} to reclaim",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -315,10 +410,15 @@ private fun GroupCard(
                     )
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            if (kept) "In ${file.folder} · kept" else "In ${file.folder}",
+                            DuplicateRules.nameOf(file.path),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        val folder = DuplicateRules.folderOf(file.path)
+                        Text(
+                            if (kept) "In $folder · kept" else "In $folder",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (kept) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant,

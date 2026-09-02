@@ -135,6 +135,17 @@ data class ServerConfigInfo(
     val maxUploadMb: Int = 2048,
     val maxUploadFiles: Int = 20,
     val chunkMb: Int = 8,
+    /*
+     * The duplicate finder's limits, and whether it is there at all.
+     *
+     * The server publishes these so a client reads them rather than keeping a
+     * second copy of the defaults -- and their absence is how it says this
+     * build has no duplicate finder, which is a better answer than a 404 from
+     * a route the user was just offered.
+     */
+    val duplicateMinBytes: Long? = null,
+    val duplicateScanSeconds: Int? = null,
+    val duplicateMaxFiles: Int? = null,
 )
 
 /** What one account is using, from /api/storage/me -- readable by anyone. */
@@ -156,44 +167,67 @@ data class MyStorage(
 )
 
 /**
- * Copies of the same file, found by the server.
+ * One slice of a duplicate scan -- or, once `done`, its result.
  *
- * Byte-for-byte identical only: a photo that was resized is a different file,
- * and calling it a duplicate is how somebody loses their only copy of
- * something. What comes back here is certain.
+ * Hashing a media library does not finish inside one request on a phone, so
+ * the server's contract is a poll loop: POST to start, POST again while `done`
+ * is false, GET to read the last result without doing any work. Every reply
+ * carries the whole picture so far, which is why the screen can list groups
+ * while the scan is still running.
+ *
+ * Matches are byte-for-byte identical only. A photo saved again at another
+ * size is a different file and is not reported -- calling that a duplicate is
+ * how somebody loses their only copy of something.
  */
 @Serializable
-data class DuplicateReport(
+data class DuplicateScan(
+    val path: String = "/",
+    val done: Boolean = false,
+    /**
+     * Present, and false, only in the reply to a GET before anything has been
+     * scanned. A slice of a real scan omits it, which is why it defaults true.
+     */
+    val started: Boolean = true,
+    /** Media files walked, and how many shared a size with another. */
+    val scanned: Int = 0,
+    val candidates: Int = 0,
+    /** Progress through the candidates, and how many were read rather than
+     *  answered from the server's digest cache. */
+    val hashed: Int = 0,
+    val computed: Int = 0,
+    val toHash: Int = 0,
+    /** True when the walk hit the server's file limit: the result is partial. */
+    val truncated: Boolean = false,
     val groups: List<DuplicateGroup> = emptyList(),
-    val groupCount: Int = 0,
-    val wastedBytes: Long = 0,
-    val filesScanned: Int = 0,
-    /** False when the scan ran out of time and reported what it had. */
-    val complete: Boolean = true,
-    val cached: Boolean = false,
-    val scannedAt: String = "",
-    val scope: String = "media",
+    /** Copies that could go: the sum over groups of (count - 1). */
+    val duplicateFiles: Int = 0,
+    val reclaimable: Long = 0,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
 )
 
+/** One set of files that are byte-for-byte the same. */
 @Serializable
 data class DuplicateGroup(
-    val hash: String = "",
     val bytes: Long = 0,
-    /** What deleting all but one would give back. */
-    val wastedBytes: Long = 0,
-    val copies: Int = 0,
-    /** The server's suggestion, which is the oldest copy. */
-    val keep: String = "",
+    val count: Int = 0,
+    /** What deleting all but one copy would give back: bytes x (count - 1). */
+    val reclaimable: Long = 0,
     val files: List<DuplicateFile> = emptyList(),
 )
 
+/**
+ * One copy.
+ *
+ * The path is all the server sends -- no name, no folder -- so both are taken
+ * from it here rather than asked for.
+ */
 @Serializable
 data class DuplicateFile(
     val path: String = "",
-    val name: String = "",
-    val folder: String = "",
     val bytes: Long = 0,
-    val modified: String = "",
+    /** Seconds since the epoch, as the server stats it. */
+    val mtime: Long = 0,
 )
 
 @Serializable

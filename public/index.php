@@ -267,6 +267,16 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
     fclose($handle);
     exit;
 }
+/**
+ * How long one duplicate scan may spend hashing before it reports what it has.
+ *
+ * Named up here because /api/files/config publishes it and the scan route
+ * hands it to the finder -- and because a const is only defined once the line
+ * runs, so one declared beside the route would not exist yet when the config
+ * route above it is answered.
+ */
+const DUPLICATE_SCAN_BUDGET_SECONDS = 20;
+
 /** Minimum password length, matching tools/create-admin.php. */
 const USER_PASSWORD_MIN_LENGTH = 12;
 
@@ -670,7 +680,21 @@ if ($path === '/api/files/config') Http::json([
     'readOnly' => $config['read_only'], 'allowDelete' => $config['allow_delete'], 'allowOverwrite' => $config['allow_overwrite'],
     'maxUploadMb' => $config['max_upload_mb'], 'maxUploadFiles' => $config['max_upload_files'],
     'chunkMb' => $config['upload_chunk_mb'], 'retryCount' => $config['upload_retry_count'],
-    'conflict' => $config['upload_conflict']
+    'conflict' => $config['upload_conflict'],
+    /*
+     * The duplicate finder's limits, and whether it is here at all.
+     *
+     * Published so a client reads them from the server rather than keeping a
+     * second copy of the defaults -- and so that a client can tell a build
+     * with the feature from one without it, which is a better answer than a
+     * 404 from a route it was about to call. The Android app uses exactly
+     * this, and the same three names the web build publishes.
+     */
+    // Nothing is skipped for being small and the walk is not capped in this
+    // build, so both are zero rather than a number that is not enforced.
+    'duplicateMinBytes' => 0,
+    'duplicateScanSeconds' => DUPLICATE_SCAN_BUDGET_SECONDS,
+    'duplicateMaxFiles' => 0
 ]);
 if ($path === '/api/files/list' && $method === 'GET') api_try(function()use($fs) {
     release_session_lock();
@@ -907,6 +931,122 @@ if ($path === '/api/storage/usage' && $method === 'GET') api_try(function()use($
 * budget: an ordinary account is never told "no duplicates" merely because
 * nobody has run it as an administrator yet.
 */
+/**
+ * A scan report in the shape the duplicate-scan contract specifies.
+ *
+ * The two differ in vocabulary rather than substance -- `complete` against
+ * `truncated`, `wastedBytes` against `reclaimable`, a copy described by its
+ * name and folder against one described by its path alone. Translating here
+ * keeps one shape on the wire for every client, and leaves /api/duplicates and
+ * the web UI it serves untouched.
+ *
+ * `modified` is an ISO timestamp there and epoch seconds here, which is what
+ * the contract asks for and what a client sorting by age needs.
+ */
+function duplicate_scan_payload(array $report): array {
+    $groups = array_map(static function(array $group): array {
+        $files = array_map(static fn(array $file): array => [
+            'path' => (string)$file['path'],
+            'bytes' => (int)$file['bytes'],
+            'mtime' => (int)strtotime((string)$file['modified']),
+        ], $group['files']);
+        return [
+            'bytes' => (int)$group['bytes'],
+            'count' => (int)$group['copies'],
+            'reclaimable' => (int)$group['wastedBytes'],
+            'files' => $files,
+        ];
+    }, $report['groups']);
+
+    $scannedAt = (string)($report['scannedAt'] ?? gmdate('c'));
+    return [
+        'path' => '/',
+        // Not sliced here: one request does the whole scan, so it is finished
+        // by the time anyone can ask.
+        'done' => true,
+        'started' => true,
+        'scanned' => (int)$report['filesScanned'],
+        'candidates' => (int)$report['candidates'],
+        'hashed' => (int)$report['candidates'],
+        // This build counts digest computations, and a file can need two of
+        // them -- the sample and then the full read. Clamped so the contract's
+        // computed <= hashed <= toHash holds, which is what a client assumes.
+        'computed' => min((int)$report['hashedFiles'], (int)$report['candidates']),
+        'toHash' => (int)$report['candidates'],
+        // The contract's word for "real, but perhaps not all of them", which is
+        // exactly what a scan that ran out of its budget has produced.
+        'truncated' => !$report['complete'],
+        'groups' => $groups,
+        'duplicateFiles' => array_sum(array_map(static fn(array $g): int => (int)$g['count'] - 1, $groups)),
+        'reclaimable' => (int)$report['wastedBytes'],
+        'startedAt' => $scannedAt,
+        'finishedAt' => $scannedAt,
+    ];
+}
+
+/*
+ * The duplicate scan, in the shape other clients speak.
+ *
+ * The Android app talks to whichever CloudHub its owner points it at, so it
+ * follows one contract -- POST to start, POST again while `done` is false, GET
+ * to read the last result, DELETE to forget it -- rather than one protocol per
+ * build. That contract comes from the web build (TippieNL/Cloudhub-web), where
+ * scanning is sliced across requests because hashing a library does not finish
+ * inside one.
+ *
+ * Here the scan is not sliced: DuplicateFinder::scan() walks and hashes within
+ * its own time budget and returns everything it managed. So the first POST is
+ * also the last one, and the reply says `done` immediately -- a degenerate but
+ * honest case of the same protocol, and one a polling client handles without
+ * knowing the difference. A scan that ran out of budget comes back with
+ * `truncated`, which is the contract's word for "real, but perhaps not all".
+ *
+ * /api/duplicates below is unchanged and still serves the web UI in this
+ * repository.
+ */
+if ($path === '/api/duplicates/scan') {
+    $scanFile = dirname(__DIR__).'/storage/.cache/duplicate-scan.json';
+
+    if ($method === 'GET') api_try(function()use($scanFile) {
+        release_session_lock();
+        $stored = is_file($scanFile) ? json_decode((string)file_get_contents($scanFile), true) : null;
+        // The one reply that says a scan has never been run here, which is how
+        // a client knows to offer to start one rather than report "none found".
+        if (!is_array($stored) || !isset($stored['groups'])) {
+            return ['done' => false, 'groups' => [], 'scanned' => 0, 'started' => false];
+        }
+        return $stored;
+    });
+
+    if ($method === 'DELETE') api_try(function()use($scanFile) {
+        // Write is already required for DELETE by the guard above.
+        @unlink($scanFile);
+        return ['success' => true];
+    });
+
+    if ($method === 'POST') api_try(function()use($fs, $scanFile) {
+        // Write is already required for POST by the guard above, which is what
+        // keeps starting a scan to editors: it walks the store and reads files.
+        release_session_lock();
+
+        $body = Http::body();
+        $wanted = trim((string)($body['path'] ?? '/'));
+        // Saying so beats quietly scanning more than was asked for: this build
+        // has one scope, the whole store, and a caller that wanted a folder
+        // would otherwise be given an answer to a different question.
+        if ($wanted !== '' && $wanted !== '/') {
+            throw new RuntimeException('This server scans the whole store; ask for "/"', 400);
+        }
+
+        $finder = new DuplicateFinder(
+            $fs, dirname(__DIR__).'/storage/.cache/hashes.json', DUPLICATE_SCAN_BUDGET_SECONDS);
+        $payload = duplicate_scan_payload($finder->scan(DuplicateFinder::MEDIA));
+
+        if (!is_dir(dirname($scanFile)))@mkdir(dirname($scanFile), 0775, true);
+        @file_put_contents($scanFile, json_encode($payload, JSON_UNESCAPED_SLASHES));
+        return $payload;
+    });
+}
 if ($path === '/api/duplicates' && $method === 'GET') api_try(function()use($fs, $config) {
     release_session_lock();
 
