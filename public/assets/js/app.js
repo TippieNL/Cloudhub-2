@@ -2115,9 +2115,140 @@ async function loadStorage(refresh = false) {
 
 $('#recalculate-usage').addEventListener('click', () => loadStorage(true));
 
+/* ---- duplicates -------------------------------------------------------------
+ *
+ * The same photo twice: a phone backing up beside a manual copy, a folder
+ * duplicated "just in case". The server compares files byte for byte, never by
+ * how alike they look, so everything listed here really is a second copy of
+ * something and deleting it is safe.
+ *
+ * Two rules the page keeps to. Every set always keeps a copy -- a duplicate
+ * finder that empties a set has deleted the photo, not the duplicate -- and
+ * nothing goes anywhere without being asked for. What is deleted goes to the
+ * trash, like every other delete.
+ */
+const dupes = { groups: [], keep: {}, selected: new Set() };
+
+function dupeKept(group) {
+    const paths = group.files.map(f => f.path);
+    const chosen = dupes.keep[group.hash];
+    if (chosen && paths.includes(chosen)) return chosen;
+    return paths.includes(group.keep) ? group.keep : paths[0];
+}
+
+/** Everything a set offers to remove: its copies, except the one kept. */
+function dupeRemovable(group) {
+    const kept = dupeKept(group);
+    return group.files.map(f => f.path).filter(p => p !== kept);
+}
+
+async function loadDuplicates(refresh = false) {
+    const scope = $('#duplicates-scope').value;
+    const note = $('#duplicates-note');
+    note.textContent = refresh ? 'Scanning\u2026' : 'Loading\u2026';
+    $('#duplicates-list').innerHTML = '';
+    try {
+        const query = `scope=${encodeURIComponent(scope)}${refresh ? '&refresh=1' : ''}`;
+        const d = await (await api(`/api/duplicates?${query}`)).json();
+        dupes.groups = d.groups || [];
+        dupes.keep = {};
+        dupes.selected = new Set();
+        note.textContent = dupes.groups.length
+            ? `${d.groupCount} set${d.groupCount === 1 ? '' : 's'} of copies · ${fmt(d.wastedBytes)} to reclaim`
+                + (d.complete ? '' : ' · the scan stopped early, so there may be more')
+                + (d.cached ? ' · from the last scan' : '')
+            : 'Nothing here is stored twice.';
+        renderDuplicates();
+    } catch (e) {
+        note.textContent = e.message;
+    }
+}
+
+function renderDuplicates() {
+    $('#duplicates-list').innerHTML = dupes.groups.map(group => {
+        const kept = dupeKept(group);
+        const rows = group.files.map(file => {
+            const isKept = file.path === kept;
+            const checked = dupes.selected.has(file.path) ? ' checked' : '';
+            return `<div class="server">
+                <strong>${esc(file.name)}</strong>
+                <span class="muted">in ${esc(file.folder)}${isKept ? ' · kept' : ''}</span>
+                <div class="actions">
+                    ${isKept
+                        ? '<span class="muted">Keeping this one</span>'
+                        : `<label><input type="checkbox" data-dupe="${esc(file.path)}"${checked}> Delete</label>
+                           <button data-dupe-keep="${esc(group.hash)}" data-dupe-path="${esc(file.path)}">Keep this one</button>`}
+                </div>
+            </div>`;
+        }).join('');
+        return `<div class="usage-card">
+            <h3>${group.copies} copies · ${fmt(group.bytes)} each</h3>
+            <p class="muted">${fmt(group.wastedBytes)} to reclaim</p>
+            ${rows}
+        </div>`;
+    }).join('');
+
+    document.querySelectorAll('[data-dupe]').forEach(box => {
+        box.addEventListener('change', () => {
+            if (box.checked) dupes.selected.add(box.dataset.dupe);
+            else dupes.selected.delete(box.dataset.dupe);
+            renderDuplicateActions();
+        });
+    });
+    document.querySelectorAll('[data-dupe-keep]').forEach(button => {
+        button.addEventListener('click', () => {
+            dupes.keep[button.dataset.dupeKeep] = button.dataset.dupePath;
+            // The copy being kept cannot also be one being deleted.
+            dupes.selected.delete(button.dataset.dupePath);
+            renderDuplicates();
+        });
+    });
+    renderDuplicateActions();
+}
+
+function renderDuplicateActions() {
+    const bytes = dupes.groups.reduce((total, group) =>
+        total + group.files.filter(f => dupes.selected.has(f.path)).reduce((n, f) => n + f.bytes, 0), 0);
+    $('#duplicates-actions').hidden = dupes.selected.size === 0;
+    $('#duplicates-selected').textContent = `${dupes.selected.size} selected · ${fmt(bytes)} to reclaim`;
+}
+
+$('#duplicates-scope').addEventListener('change', () => loadDuplicates());
+$('#duplicates-rescan').addEventListener('click', () => loadDuplicates(true));
+$('#duplicates-select-extra').addEventListener('click', () => {
+    dupes.selected = new Set(dupes.groups.flatMap(dupeRemovable));
+    renderDuplicates();
+});
+
+$('#duplicates-delete').addEventListener('click', async () => {
+    // The rule, checked against the selection itself rather than trusted to
+    // whatever produced it: a set with every copy ticked is the photo, gone.
+    const emptied = dupes.groups.some(group =>
+        group.files.length > 0 && group.files.every(f => dupes.selected.has(f.path)));
+    if (emptied) {
+        await askConfirm('Every copy selected',
+            'One set has all of its copies selected, which would delete the file itself. ' +
+            'Leave one copy of each unselected.', 'Close');
+        return;
+    }
+    const paths = [...dupes.selected];
+    if (!await askConfirm('Move to the trash?',
+        `${paths.length} file${paths.length === 1 ? '' : 's'} will be moved to the trash, where they can be restored.`,
+        'Move to trash')) return;
+
+    let failed = 0;
+    for (const path of paths) {
+        try {
+            await api('/api/files/delete', { method: 'DELETE', body: { path } });
+        } catch { failed++; }
+    }
+    toast(failed ? `${failed} could not be deleted` : `Moved ${paths.length} to the trash`);
+    await loadDuplicates(true);
+});
+
 async function route() {
     const p = window.CLOUDHUB_ROUTE || new URLSearchParams(location.search).get('route') || '/';
-    ['files', 'servers', 'browse', 'users', 'trash', 'storage'].forEach(x => $(`#${x}-page`).hidden = true);
+    ['files', 'servers', 'browse', 'users', 'trash', 'storage', 'duplicates'].forEach(x => $(`#${x}-page`).hidden = true);
     document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', (a.dataset.route || '/') === p));
     if (p === '/trash') {
         $('#trash-page').hidden = false;
@@ -2125,6 +2256,9 @@ async function route() {
     } else if (p === '/storage') {
         $('#storage-page').hidden = false;
         await loadStorage();
+    } else if (p === '/duplicates') {
+        $('#duplicates-page').hidden = false;
+        await loadDuplicates();
     } else if (p === '/users') {
         $('#users-page').hidden = false;
         await users();

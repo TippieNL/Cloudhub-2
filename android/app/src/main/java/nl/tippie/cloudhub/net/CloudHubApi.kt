@@ -59,6 +59,14 @@ class CloudHubApi(
     fun thumbnailUrl(entry: FileEntry): HttpUrl =
         url("/api/thumbnail", "path" to entry.path, "v" to entry.modified)
 
+    /**
+     * A thumbnail for a path with no listing row behind it -- the duplicates
+     * screen has paths, not entries. No version marker, so the browser cache
+     * may serve a stale frame for a replaced file; a 44dp preview beside a
+     * name and a folder is not where that matters.
+     */
+    fun thumbnailUrlFor(path: String): HttpUrl = url("/api/thumbnail", "path" to path)
+
     fun streamUrl(path: String): HttpUrl = url("/api/files/stream", "path" to path)
 
     fun downloadUrl(path: String): HttpUrl = url("/api/files/download", "path" to path)
@@ -92,6 +100,21 @@ class CloudHubApi(
     suspend fun serverStorage(refresh: Boolean = false): ServerStorage =
         if (refresh) get("/api/storage/usage", "refresh" to "1") { decode(it) }
         else get("/api/storage/usage") { decode(it) }
+
+    /* ---- duplicates ------------------------------------------------------- */
+
+    /**
+     * Copies of the same file, byte for byte.
+     *
+     * Reading the report needs no more than a signed-in account. Forcing a
+     * fresh scan is an admin action, because that is the one that walks the
+     * store and hashes what could match.
+     */
+    suspend fun duplicates(refresh: Boolean = false, everything: Boolean = false): DuplicateReport {
+        val scope = if (everything) "all" else "media"
+        return if (refresh) get("/api/duplicates", "scope" to scope, "refresh" to "1") { decode(it) }
+        else get("/api/duplicates", "scope" to scope) { decode(it) }
+    }
 
     /**
      * Change the signed-in account's own password.

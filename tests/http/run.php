@@ -268,6 +268,103 @@ scenario('a revoked link stops working', function () use ($client, $base, $uploa
     check('the link is dead', $raw->status === 404, $raw->describe());
 });
 
+/* ---- duplicates --------------------------------------------------------------
+ *
+ * The finder itself is exercised against a store on disk in
+ * tests/phase28_duplicates_test.php. What only a live server can show is the
+ * route around it: who may run a scan, who may force one, and that the report
+ * describes the files this account can actually see.
+ */
+scenario('the same photo twice is found and reported', function () use ($client, $scratch) {
+    $photo = "\xFF\xD8\xFF\xE0".str_repeat("dupe", 4096)."\xFF\xD9";
+    $upload = function (string $folder, string $name, string $bytes) use ($client) {
+        $init = $client->post('/api/uploads/init', [
+            'targetPath' => $folder, 'name' => $name, 'size' => strlen($bytes),
+            'uploadId' => 'dupe'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite',
+        ]);
+        $id = $init->json['id'] ?? '';
+        if ($id === '') return false;
+        $client->putChunk($id, 0, $bytes);
+        return $client->post('/api/uploads/complete', ['id' => $id])->ok();
+    };
+
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/copies']);
+    check('the first copy uploads', $upload($scratch, 'holiday.jpg', $photo));
+    check('the second copy uploads', $upload($scratch.'/copies', 'holiday-again.jpg', $photo));
+    // Same size, different bytes: the trap a size-only finder falls into.
+    check('a decoy of the same size uploads',
+        $upload($scratch, 'beach.jpg', "\xFF\xD8\xFF\xE0".str_repeat("othr", 4096)."\xFF\xD9"));
+
+    $report = $client->get('/api/duplicates', ['refresh' => 1]);
+    check('the scan runs', $report->ok(), $report->describe());
+
+    $found = null;
+    foreach ($report->json['groups'] ?? [] as $group) {
+        $paths = array_column($group['files'], 'path');
+        if (in_array($scratch.'/holiday.jpg', $paths, true)) $found = $group;
+    }
+    check('the two copies are reported as one group', $found !== null && $found['copies'] === 2,
+        json_encode(array_column($report->json['groups'] ?? [], 'copies')));
+    if ($found === null) return;
+
+    check('with the space that deleting one would give back',
+        $found['wastedBytes'] === strlen($photo), (string)$found['wastedBytes']);
+    check('and a copy suggested to keep, which is one of them',
+        in_array($found['keep'], array_column($found['files'], 'path'), true), (string)$found['keep']);
+    check('the decoy of the same size is not in it',
+        !in_array($scratch.'/beach.jpg', array_column($found['files'], 'path'), true));
+    check('the total counts the group', ($report->json['wastedBytes'] ?? 0) >= strlen($photo));
+});
+
+/*
+ * A scan walks the store and hashes what could match, so forcing one is the
+ * expensive request on the server. Reading the last one is not.
+ */
+scenario('a scan can be read by anyone but forced only by an admin', function () use ($base, $client) {
+    $viewer = new Client($base);
+    $viewer->signIn(
+        getenv('CLOUDHUB_VIEWER_USER') ?: 'viewer',
+        getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123',
+    );
+
+    $cached = $viewer->get('/api/duplicates');
+    check('an ordinary account can read the report', $cached->ok(), $cached->describe());
+    check('and it is the cached one', ($cached->json['cached'] ?? false) === true, json_encode($cached->json['cached'] ?? null));
+
+    $forced = $viewer->get('/api/duplicates', ['refresh' => 1]);
+    check('but cannot force a rescan', $forced->status === 403, $forced->describe());
+
+    $admin = $client->get('/api/duplicates', ['refresh' => 1]);
+    check('an admin can', $admin->ok() && ($admin->json['cached'] ?? true) === false, $admin->describe());
+});
+
+scenario('a scan of everything sees more than a scan of media', function () use ($client, $scratch) {
+    $notes = str_repeat('the same note, twice', 200);
+    foreach (['notes-one.txt' => $scratch, 'notes-two.txt' => $scratch.'/copies'] as $name => $folder) {
+        $init = $client->post('/api/uploads/init', [
+            'targetPath' => $folder, 'name' => $name, 'size' => strlen($notes),
+            'uploadId' => 'note'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite',
+        ]);
+        $id = $init->json['id'] ?? '';
+        if ($id === '') { check("$name uploads", false, $init->describe()); return; }
+        $client->putChunk($id, 0, $notes);
+        $client->post('/api/uploads/complete', ['id' => $id]);
+    }
+
+    $media = $client->get('/api/duplicates', ['refresh' => 1]);
+    $everything = $client->get('/api/duplicates', ['refresh' => 1, 'scope' => 'all']);
+    $has = function ($response, string $path): bool {
+        foreach ($response->json['groups'] ?? [] as $group) {
+            if (in_array($path, array_column($group['files'], 'path'), true)) return true;
+        }
+        return false;
+    };
+    check('a media scan ignores the duplicated notes', !$has($media, $scratch.'/notes-one.txt'));
+    check('a scan of everything finds them', $has($everything, $scratch.'/notes-one.txt'),
+        json_encode($everything->json['groupCount'] ?? null));
+    check('and says which scope it ran', ($everything->json['scope'] ?? '') === 'all');
+});
+
 /* ---- playback ---------------------------------------------------------------
  *
  * What a player does between opening a video and finishing it: read a little,

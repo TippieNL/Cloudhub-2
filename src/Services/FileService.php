@@ -260,6 +260,35 @@ final class FileService {
    'measuredAt'=>gmdate('c')];
  }
 
+ /**
+  * Every file in the store, handed to $visit one at a time.
+  *
+  * Shared with the duplicate finder so it walks the tree by exactly the rules
+  * the rest of the application does: the bookkeeping folders at the root are
+  * skipped, symlinks are not followed, and nothing outside the root is
+  * reachable. A second walker written beside this one would drift from it, and
+  * a duplicate report that lists files out of .trash is worse than none.
+  *
+  * @param callable(string $absolute, string $relative, int $bytes, int $modified): bool $visit
+  *        returning false stops the walk
+  */
+ public function eachFile(callable $visit): void {
+  $this->walkFiles($this->root,$visit);
+ }
+
+ private function walkFiles(string $dir,callable $visit): bool {
+  foreach($this->children($dir) as $child){
+   if(is_link($child))continue;
+   if(is_dir($child)){
+    if(!$this->walkFiles($child,$visit))return false;
+    continue;
+   }
+   if(!is_file($child))continue;
+   if($visit($child,$this->relative($child),(int)(filesize($child)?:0),(int)(filemtime($child)?:0))===false)return false;
+  }
+  return true;
+ }
+
  private function accumulate(string $path,array &$acc,int $largestCount): void {
   if(is_link($path))return;
   if(is_dir($path)){

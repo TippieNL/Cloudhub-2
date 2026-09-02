@@ -155,6 +155,47 @@ data class MyStorage(
     val isAdmin: Boolean = false,
 )
 
+/**
+ * Copies of the same file, found by the server.
+ *
+ * Byte-for-byte identical only: a photo that was resized is a different file,
+ * and calling it a duplicate is how somebody loses their only copy of
+ * something. What comes back here is certain.
+ */
+@Serializable
+data class DuplicateReport(
+    val groups: List<DuplicateGroup> = emptyList(),
+    val groupCount: Int = 0,
+    val wastedBytes: Long = 0,
+    val filesScanned: Int = 0,
+    /** False when the scan ran out of time and reported what it had. */
+    val complete: Boolean = true,
+    val cached: Boolean = false,
+    val scannedAt: String = "",
+    val scope: String = "media",
+)
+
+@Serializable
+data class DuplicateGroup(
+    val hash: String = "",
+    val bytes: Long = 0,
+    /** What deleting all but one would give back. */
+    val wastedBytes: Long = 0,
+    val copies: Int = 0,
+    /** The server's suggestion, which is the oldest copy. */
+    val keep: String = "",
+    val files: List<DuplicateFile> = emptyList(),
+)
+
+@Serializable
+data class DuplicateFile(
+    val path: String = "",
+    val name: String = "",
+    val folder: String = "",
+    val bytes: Long = 0,
+    val modified: String = "",
+)
+
 @Serializable
 data class StorageBucket(val bytes: Long = 0, val files: Int = 0, val entries: Int = 0)
 

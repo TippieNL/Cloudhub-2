@@ -9,6 +9,7 @@ use CloudHub\Repositories\StorageLedger;
 use CloudHub\Services\Auth;
 use CloudHub\Services\UploadService;
 use CloudHub\Services\Security;
+use CloudHub\Services\DuplicateFinder;
 use CloudHub\Services\LoginRateLimiter;
 use CloudHub\Services\Authorization;
 use CloudHub\Services\AuditLog;
@@ -895,6 +896,44 @@ if ($path === '/api/storage/usage' && $method === 'GET') api_try(function()use($
     ];
 });
 /**
+* The same photo, twice.
+*
+* Scanning means walking the store and hashing what could possibly match, so
+* the result is cached like the storage figure is. Reading the report needs no
+* more than a signed-in account -- everyone can already browse every file --
+* but *forcing* a rescan is an admin action, because it is the expensive one.
+*
+* A cold cache scans for whoever asks first, bounded by the finder's own time
+* budget: an ordinary account is never told "no duplicates" merely because
+* nobody has run it as an administrator yet.
+*/
+if ($path === '/api/duplicates' && $method === 'GET') api_try(function()use($fs, $config) {
+    release_session_lock();
+
+    $everything = ($_GET['scope'] ?? 'media') === 'all';
+    $categories = $everything?DuplicateFinder::EVERYTHING:DuplicateFinder::MEDIA;
+    $cache = dirname(__DIR__).'/storage/.cache/duplicates-'.($everything?'all':'media').'.json';
+    $ttl = max(0, (int)$config['usage_cache_seconds']);
+
+    $refresh = !empty($_GET['refresh']);
+    if ($refresh)Authorization::requireAdmin();
+
+    if (!$refresh && $ttl > 0 && is_file($cache) && time()-(int)filemtime($cache) < $ttl) {
+        $stored = json_decode((string)file_get_contents($cache), true);
+        if (is_array($stored) && isset($stored['groups'])) {
+            return $stored+['cached' => true, 'scope' => $everything?'all':'media'];
+        }
+    }
+
+    $finder = new DuplicateFinder($fs, dirname(__DIR__).'/storage/.cache/hashes.json');
+    $report = $finder->scan($categories);
+    if (!is_dir(dirname($cache)))@mkdir(dirname($cache), 0775, true);
+    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES));
+
+    return $report+['cached' => false, 'scope' => $everything?'all':'media'];
+});
+
+/**
 * What *this* account is using, readable by anyone signed in.
 *
 * /api/storage/usage is admin-only, which left an account with a quota no way
@@ -1633,7 +1672,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         http_response_code(204); header('Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS'); exit;
     }
     if (str_starts_with($path, '/api/'))Http::error(404, 'NOT_FOUND', 'API endpoint not found');
-    if (in_array($path, ['/', '/servers', '/browse', '/users', '/trash', '/storage'], true)) {
+    if (in_array($path, ['/', '/servers', '/browse', '/users', '/trash', '/storage', '/duplicates'], true)) {
         require dirname(__DIR__).'/views/pages/app.php'; exit;
     }
 /**

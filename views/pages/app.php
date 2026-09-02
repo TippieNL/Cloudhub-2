@@ -38,6 +38,7 @@
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
             <a id="nav-users" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fusers" data-route="/users" hidden>Users</a>
             <a id="nav-storage" href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fstorage" data-route="/storage" hidden>Storage</a>
+            <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fduplicates" data-route="/duplicates">Duplicates</a>
         </nav>
         <div class="header-actions">
             <button id="install-app" type="button" hidden>Install</button>
@@ -310,6 +311,29 @@
             <p id="usage-note" class="muted"></p>
             <div id="usage-summary"></div>
             <div id="usage-detail" class="usage-columns"></div>
+        </section>
+        <section id="duplicates-page" hidden>
+            <div class="toolbar">
+                <h2>Duplicates</h2>
+                <label class="share-field">Look at
+                    <select id="duplicates-scope">
+                        <option value="media">Photos &amp; videos</option>
+                        <option value="all">Everything</option>
+                    </select>
+                </label>
+                <button id="duplicates-rescan" type="button">Scan again</button>
+                <button id="duplicates-select-extra" type="button">Select the extra copies</button>
+            </div>
+            <p class="muted">
+                Files that are byte for byte identical. A photo saved again at another size is a
+                different file and is not counted, so anything listed here really is a second copy.
+            </p>
+            <p id="duplicates-note" class="muted"></p>
+            <div id="duplicates-list"></div>
+            <div id="duplicates-actions" class="modal-actions" hidden>
+                <span id="duplicates-selected" class="muted"></span>
+                <button id="duplicates-delete" class="danger-button" type="button">Move selected to trash</button>
+            </div>
         </section>
         <section id="browse-page" hidden>
             <h2>Remote server browser</h2>

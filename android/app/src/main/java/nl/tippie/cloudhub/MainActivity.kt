@@ -50,6 +50,7 @@ private sealed interface Screen {
     data object Files : Screen { override val key = "files" }
     data object Trash : Screen { override val key = "trash" }
     data object Storage : Screen { override val key = "storage" }
+    data object Duplicates : Screen { override val key = "duplicates" }
     data object SettingsScreen : Screen { override val key = "settingsscreen" }
     data class Images(val images: List<FileEntry>, val index: Int) : Screen {
         override val key get() = "images"
@@ -312,6 +313,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenTrash = { go(Screen.Trash) },
                         onOpenStorage = { go(Screen.Storage) },
+                        onOpenDuplicates = { go(Screen.Duplicates) },
                         onOpenSettings = { go(Screen.SettingsScreen) },
                         onSignOut = {
                             lifecycleScope.launch {
@@ -333,6 +335,12 @@ class MainActivity : ComponentActivity() {
                         onDismissUploadFailures = { queue.clearFailures() },
                         revealPath = reveal,
                         onRevealed = { reveal = null },
+                    )
+
+                    is Screen.Duplicates -> DuplicatesScreen(
+                        api = app.api,
+                        canWrite = state.canWrite,
+                        onBack = { back(); model.refresh() },
                     )
 
                     is Screen.Storage -> StorageScreen(

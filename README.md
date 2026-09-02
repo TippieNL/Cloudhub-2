@@ -654,6 +654,45 @@ write failed that way, since uploads are PUTs and deletes are DELETEs.
 If a request is ever redirected in a way that drops it, the app now says so
 instead of passing the confusing 404 through.
 
+## Duplicates
+
+A phone backing up beside a manual copy, a folder duplicated "just in case",
+the same holiday imported from two cameras: a file server accumulates exact
+copies. **Duplicates** in the web nav and in the Android overflow menu finds
+them, and says what deleting the extras would give back.
+
+Only **byte-for-byte** copies count. A photo saved again at another size is a
+different file with different pixels, and calling that a duplicate is how
+somebody eventually loses their only copy of something. What is listed is
+certain, so acting on it is safe.
+
+Reading every file to compare them would be absurd on a store of any size, so
+the work is arranged to avoid it:
+
+1. Files of different sizes cannot be identical — group by size, and on a real
+   store nearly every file is finished with right there.
+2. Files that differ near either end are not identical — hash 64 KB from each
+   end, so ruling out a 4 GB video costs 128 KB.
+3. Only what survives both is read in full, which is the only way to be sure
+   and by then is a handful of files rather than the whole store.
+
+Hashes are cached against each file's size and modification time, so a second
+scan reads nothing that has not changed, and a scan of photos and videos does
+not throw away what a scan of everything paid for. A scan has a time budget: if
+it runs out, it reports what it found and says it stopped early rather than
+holding the request open.
+
+**Nothing is deleted for you.** Each set suggests keeping the oldest copy —
+the original, since the copies came later — and you can pick a different one.
+Every set always keeps a copy: a selection that would empty one is refused by
+both clients, because a duplicate finder that empties a set has not deleted a
+duplicate, it has deleted the photo. What you do delete goes to the trash, like
+any other delete.
+
+`GET /api/duplicates` backs it: `scope=media` (the default) or `scope=all`.
+Reading the report needs only a signed-in account; `refresh=1`, which forces a
+fresh walk of the store, is admin-only.
+
 ## Previous versions
 
 Deleting a file puts it in the trash. **Replacing** one used to lose it: an

@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -106,6 +107,7 @@ fun FilesScreen(
     onOpenFile: (FileEntry) -> Unit,
     onOpenTrash: () -> Unit,
     onOpenStorage: () -> Unit,
+    onOpenDuplicates: () -> Unit,
     onOpenSettings: () -> Unit,
     onSignOut: () -> Unit,
     onPickMedia: () -> Unit,
@@ -158,6 +160,7 @@ fun FilesScreen(
                 onSort = { model.setSort(it) },
                 onTrash = onOpenTrash,
                 onStorage = onOpenStorage,
+                onDuplicates = onOpenDuplicates,
                 onSettings = onOpenSettings,
                 onSignOut = onSignOut,
             )
@@ -687,6 +690,7 @@ private fun BrowserTopBar(
     onSort: (FilesState.Sort) -> Unit,
     onTrash: () -> Unit,
     onStorage: () -> Unit,
+    onDuplicates: () -> Unit,
     onSettings: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -757,6 +761,9 @@ private fun BrowserTopBar(
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 MenuItem(Icons.Default.Delete, "Trash") { onOverflow(false); onTrash() }
                 MenuItem(Icons.Default.PieChart, "Storage") { onOverflow(false); onStorage() }
+                // Next to Storage: it is a way of getting space back, which is
+                // what somebody looking at Storage is usually after.
+                MenuItem(Icons.Default.ContentCopy, "Duplicates") { onOverflow(false); onDuplicates() }
                 MenuItem(Icons.Default.Settings, "Settings") { onOverflow(false); onSettings() }
 
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
