@@ -101,6 +101,30 @@ data class TrashListing(
     val entries: List<TrashEntry> = emptyList(),
 )
 
+/**
+ * One subtitle file found beside a video, matching SubtitleService::tracksFor().
+ *
+ * `url` is where the track is fetched from, and it is always WebVTT however
+ * the file on the server is written -- the server converts SubRip on the way
+ * out, so nothing here has to know about .srt.
+ */
+@Serializable
+data class SubtitleTrack(
+    val id: String = "",
+    val path: String = "",
+    val name: String = "",
+    val label: String = "",
+    val language: String = "",
+    val forced: Boolean = false,
+    val url: String = "",
+)
+
+@Serializable
+data class SubtitleListing(
+    val path: String = "",
+    val tracks: List<SubtitleTrack> = emptyList(),
+)
+
 @Serializable
 data class ShareLink(
     val token: String = "",

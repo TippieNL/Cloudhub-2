@@ -2,6 +2,7 @@ package nl.tippie.cloudhub.ui
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -31,7 +32,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -45,10 +48,45 @@ import nl.tippie.cloudhub.data.Settings
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.net.SubtitleTrack
 import nl.tippie.cloudhub.work.ForegroundMedia
 
 /** How far a double-tap jumps, matching the player's own seek increments. */
 private const val SEEK_STEP_MS = 10_000L
+
+/**
+ * The video, plus whatever subtitle files were found beside it.
+ *
+ * The tracks arrive after the item has already been set, so this is built
+ * twice for a film that has subtitles -- once without and once with. Keeping
+ * it in one function is what makes the second item identical to the first in
+ * every other respect, the cache key above all: a different key there would
+ * re-download the film from the start.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun mediaItemFor(
+    api: CloudHubApi,
+    entry: FileEntry,
+    tracks: List<SubtitleTrack>,
+): MediaItem =
+    MediaItem.Builder()
+        .setUri(api.streamUrl(entry.path).toString())
+        // Keyed on the URL alone, replacing a file with a different video of
+        // the same name would play the old one out of the cache for good.
+        .setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))
+        .setSubtitleConfigurations(
+            tracks.map { track ->
+                MediaItem.SubtitleConfiguration
+                    .Builder(Uri.parse(api.subtitleUrl(track.path).toString()))
+                    // Always VTT: the server converts SubRip as it serves it.
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(track.language.ifBlank { null })
+                    .setLabel(track.label)
+                    .setSelectionFlags(if (track.forced) C.SELECTION_FLAG_FORCED else 0)
+                    .build()
+            }
+        )
+        .build()
 
 /**
  * Video and audio playback.
@@ -154,18 +192,37 @@ fun PlayerScreen(
             )
             .build()
             .apply {
-                setMediaItem(
-                    MediaItem.Builder()
-                        .setUri(api.streamUrl(entry.path).toString())
-                        // Keyed on the URL alone, replacing a file with a
-                        // different video of the same name would play the old
-                        // one out of the cache for good.
-                        .setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))
-                        .build()
-                )
+                setMediaItem(mediaItemFor(api, entry, emptyList()))
                 prepare()
                 playWhenReady = true
+                // Which language, if any, was chosen the last time. Media3
+                // selects a text track only when one is asked for, so with no
+                // stored language subtitles simply start off.
+                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                    .setPreferredTextLanguage(settings.subtitleLanguage)
+                    .build()
             }
+    }
+
+    /* ---- sidecar subtitles -----------------------------------------------
+     *
+     * The .srt beside the film is a separate request, and playback does not
+     * wait for it: for most files the answer is an empty list, and a video
+     * that stalls on a subtitle lookup is a worse player than one with no
+     * subtitles at all. When there are tracks, the media item is replaced by
+     * one carrying them, resuming at the position reached -- which, this
+     * early, is the first fraction of a second.
+     *
+     * A failure is swallowed on purpose. Subtitles are never worth interrupting
+     * a film for, and the player says nothing about a list that came back empty
+     * either way.
+     */
+    LaunchedEffect(player, entry.path) {
+        val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
+        if (tracks.isEmpty()) return@LaunchedEffect
+
+        player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
+        player.prepare()
     }
 
     /* ---- resume ---------------------------------------------------------
@@ -229,6 +286,23 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(state: Int) {
                 // A finished video is finished, not paused near the end.
                 if (state == Player.STATE_ENDED) settings.forgetResumePosition(entry.path)
+            }
+
+            /*
+             * Follow the subtitle button rather than wrapping it.
+             *
+             * Media3's own track menu is what the viewer uses, so the choice is
+             * read back out of the selection instead of being intercepted.
+             * Only when this video has text tracks at all: a film with none
+             * selects none, and taking that for "subtitles off" would forget
+             * the language after every video that has no subtitles.
+             */
+            override fun onTracksChanged(tracks: Tracks) {
+                val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                if (textGroups.isEmpty()) return
+
+                val selected = textGroups.firstOrNull { it.isSelected }
+                settings.subtitleLanguage = selected?.getTrackFormat(0)?.language
             }
         }
         player.addListener(listener)

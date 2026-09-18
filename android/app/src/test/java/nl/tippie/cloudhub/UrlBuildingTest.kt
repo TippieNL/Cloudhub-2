@@ -60,10 +60,20 @@ class UrlBuildingTest {
             api.streamUrl("/a.mp4"),
             api.downloadUrl("/a.bin"),
             api.previewUrl("/a.png"),
+            api.subtitleUrl("/a.en.srt"),
             api.url("/api/uploads/chunk", "id" to "x"),
         )) {
             assertTrue(url.encodedPath.endsWith("/"), "$url does not address the front controller")
         }
+    }
+
+    @Test fun `a subtitle is addressed by its own path`() {
+        // Media3 is handed this as a string and fetches it itself, so the path
+        // has to survive the round trip through the query intact -- spaces and
+        // all, which is how subtitle files beside a film are usually named.
+        val url = apiFor("http://host:8000").subtitleUrl("/Films/The Film.en.srt")
+        assertEquals("/api/files/subtitle", url.queryParameter("route"))
+        assertEquals("/Films/The Film.en.srt", url.queryParameter("path"))
     }
 
     @Test fun `extra query parameters survive alongside the route`() {

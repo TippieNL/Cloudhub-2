@@ -69,6 +69,19 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("grid_view", true)
         set(value) = prefs.edit().putBoolean("grid_view", value).apply()
 
+    /**
+     * The subtitle language last chosen, or null for none.
+     *
+     * A language rather than a file, for the same reason the web player stores
+     * one: the next film's Dutch subtitles are a different file with a
+     * different name, and somebody who wants subtitles wants them again.
+     */
+    var subtitleLanguage: String?
+        get() = prefs.getString("subtitle_language", null)
+        set(value) =
+            if (value.isNullOrBlank()) prefs.edit().remove("subtitle_language").apply()
+            else prefs.edit().putString("subtitle_language", value).apply()
+
     /* ---- where playback got to ------------------------------------------
      *
      * Kept as one string rather than a key per file, so the whole set can be
