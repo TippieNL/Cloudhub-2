@@ -99,6 +99,14 @@ $assets = htmlspecialchars($assetBase, ENT_QUOTES, 'UTF-8');
         window.CLOUDHUB_BASE = <?= json_encode($basePath, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_FRONT = <?= json_encode($frontController, JSON_UNESCAPED_SLASHES) ?>;
         window.CLOUDHUB_ROUTE = <?= json_encode($path, JSON_UNESCAPED_SLASHES) ?>;
+        <?php
+        /*
+         * The subtitle tracks found beside this file. JSON_HEX_TAG matters
+         * here: labels are built from filenames, and a file named to contain
+         * "</script>" would otherwise end this block early.
+         */
+        ?>
+        window.CLOUDHUB_SUBTITLES = <?= json_encode($mediaFile['subtitles'] ?? [], JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
     </script>
 </body>
 </html>

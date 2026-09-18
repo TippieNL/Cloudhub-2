@@ -73,6 +73,18 @@ class CloudHubApi(
 
     fun previewUrl(path: String): HttpUrl = url("/api/files/preview", "path" to path)
 
+    fun subtitleUrl(path: String): HttpUrl = url("/api/files/subtitle", "path" to path)
+
+    /**
+     * The subtitle files sitting beside a video.
+     *
+     * Empty for most files, so the caller starts playback first and adds what
+     * comes back -- a film must never wait on its subtitles, let alone fail
+     * for want of them.
+     */
+    suspend fun subtitles(path: String): List<SubtitleTrack> =
+        get("/api/files/subtitles", "path" to path) { decode<SubtitleListing>(it).tracks }
+
     /* ---- auth ----------------------------------------------------------- */
 
     suspend fun status(): AuthStatus = get("/api/auth/status") {

@@ -265,6 +265,58 @@ scenario('the media route serves byte ranges', function () use ($client, $scratc
         (string)$part->header('Content-Range'));
 });
 
+scenario('the subtitles beside a video are found and converted', function () use ($client, $scratch) {
+    /*
+     * The whole path, end to end: an .srt lands next to a video, the listing
+     * route claims it for that video, and the delivery route hands it back as
+     * WebVTT. The conversion is unit-tested in tests/phase30_subtitles_test.php
+     * -- what cannot be checked there is that the routes are wired up, that a
+     * viewer's session is enough to read them, and that the URL the listing
+     * hands out is one that actually answers.
+     */
+    $samples = 800;
+    $pcm = str_repeat("\x00\x00", $samples);
+    $wav = 'RIFF'.pack('V', 36 + strlen($pcm)).'WAVEfmt '.pack('VvvVVvv', 16, 1, 1, 8000, 16000, 2, 16)
+        .'data'.pack('V', strlen($pcm)).$pcm;
+    $srt = "1\r\n00:00:01,000 --> 00:00:02,500\r\nFirst line\r\n\r\n";
+
+    $put = function (string $name, string $bytes) use ($client, $scratch): bool {
+        $init = $client->post('/api/uploads/init', [
+            'targetPath' => $scratch, 'name' => $name,
+            'size' => strlen($bytes), 'uploadId' => 'sub'.bin2hex(random_bytes(8)),
+            'conflict' => 'overwrite',
+        ]);
+        $id = $init->json['id'] ?? '';
+        if ($id === '') { check('uploading '.$name, false, $init->describe()); return false; }
+        $client->putChunk($id, 0, $bytes);
+        return $client->post('/api/uploads/complete', ['id' => $id])->ok();
+    };
+
+    if (!$put('lecture.wav', $wav) || !$put('lecture.en.srt', $srt)) return;
+
+    $listing = $client->get('/api/files/subtitles', ['path' => $scratch.'/lecture.wav']);
+    check('the listing answers', $listing->ok(), $listing->describe());
+
+    $track = $listing->json['tracks'][0] ?? null;
+    check('the sidecar is claimed by the video', $track !== null, json_encode($listing->json));
+    if ($track === null) return;
+    check('with the language read off its name',
+        ($track['language'] ?? '') === 'en' && ($track['label'] ?? '') === 'English',
+        json_encode($track));
+
+    $vtt = $client->get('/api/files/subtitle', ['path' => $track['path']]);
+    check('the track itself is served', $vtt->ok(), $vtt->describe());
+    check('as WebVTT', str_contains((string)$vtt->header('Content-Type'), 'text/vtt'),
+        (string)$vtt->header('Content-Type'));
+    check('converted from SubRip on the way out',
+        str_starts_with($vtt->body, "WEBVTT\n\n") && str_contains($vtt->body, '00:00:01.000 --> 00:00:02.500'),
+        substr($vtt->body, 0, 80));
+
+    // Otherwise this would be a route that reads any file as text.
+    $refused = $client->get('/api/files/subtitle', ['path' => $scratch.'/lecture.wav']);
+    check('a file that is not a subtitle is refused', $refused->status === 415, $refused->describe());
+});
+
 scenario('a document is refused by the media route', function () use ($client, $uploaded) {
     // The guard that stops the streaming path being a general file reader.
     $r = $client->get('/api/files/stream', ['path' => $uploaded]);

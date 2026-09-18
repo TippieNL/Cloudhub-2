@@ -106,12 +106,65 @@ largest cost in loading a folder of images.
 To clear the cache, delete `storage/.thumbnails/images`; it is rebuilt on
 demand.
 
+## Subtitles
+
+Drop `Holiday.srt` next to `Holiday.mp4` and the player offers it. Nothing is
+uploaded through a subtitle screen and nothing is configured: the subtitle
+almost always arrives in the same drag as the video, named after it, and that
+is what is looked for.
+
+**What counts as belonging to a video** — in the video's own folder, any `.srt`
+or `.vtt` named after it: `Holiday.srt`, `Holiday.en.srt`,
+`Holiday.nl.forced.srt`, `Holiday.en.sdh.vtt`. A name that merely starts the
+same (`Holiday 2.srt`) belongs to a different film and is not claimed. A `Subs/`
+or `Subtitles/` folder beside the video is read too — `Subs/Holiday/Dutch.srt`
+by name, and loose files like `Subs/English.srt` only when the folder holds
+exactly one video, because with two films there is nothing to say which one
+`English.srt` belongs to.
+
+**What the name is read for** — the language (`en`, `eng`, `english`, `nl`,
+`dutch`, … for about forty languages), and the `forced` and `sdh`/`cc` flags,
+which become the menu label: *English*, *Dutch (Forced)*, *English (SDH)*. A
+tag that names nothing recognised is kept as-is, so `Holiday.commentary.srt`
+reads as *commentary* rather than as a filename. `Film.hi.srt` is Hindi;
+`Film.en.hi.srt` is English for the hearing impaired — the language is claimed
+first, which is the only thing separating those two.
+
+**How they are served** — `GET /api/files/subtitle?path=…` always answers
+WebVTT, converting SubRip on the way out: the comma in its timestamps, its cue
+numbers, its `<font color>` tags and the `{\an8}` positioning overrides of
+ASS-flavoured files. A subtitle written on Windows is very often Windows-1252
+rather than UTF-8, so anything that is not valid UTF-8 is converted before it
+is parsed — without that, every accented character arrives as a replacement
+glyph, which is precisely the half of a subtitle a person notices. The file on
+disk is never rewritten. The route serves `.srt` and `.vtt` and nothing else,
+so it cannot be used to read arbitrary files as text, and it is bounded at 4 MB
+per file, 24 tracks per video.
+
+`GET /api/files/subtitles?path=<video>` lists what was found, for clients that
+have a path and no page. The web player does not use it: `/play` renders the
+list into the page it was already building, so the menu is right the first time
+it is opened.
+
+**In the player** — the subtitles button appears only when there is something
+to show, `C` turns them on and off, and the cues drop to the bottom of the
+frame when the controls auto-hide. Cues are drawn by the player rather than by
+a `<track>` element, which is what makes them survive fullscreen and keeps them
+styled the same everywhere.
+
+The choice is remembered as a *language*, not as a file: turn on Dutch for one
+film and the next film's Dutch track — a different file with a different name —
+comes on by itself. Nothing is selected until you pick something once.
+
+Public share links have no subtitles. The token is a credential for one file,
+and serving the files beside it would quietly widen what was shared.
+
 ## Tests
 
 Two suites, and both run on every push (`.github/workflows/ci.yml`):
 
 ```bash
-php tests/run.php        # 28 scripts pinning decisions in the source
+php tests/run.php        # 36 scripts pinning decisions in the source
 php tests/http/run.php   # the API, over real HTTP against a real database
 ```
 
@@ -404,7 +457,15 @@ and a role rather than two table rows.
 Fullscreen with a rotation to landscape and the system bars out of the way;
 **back un-maximises rather than leaving the video**, which is the thing that
 otherwise makes fullscreen annoying to use. Playback speed, subtitle tracks and
-audio/video track selection come from Media3's own menu. Double-tap the left or
+audio/video track selection come from Media3's own menu.
+
+Subtitles found beside the file (see **Subtitles** above) are offered there
+alongside any the container carries, fetched as WebVTT from the same server.
+They are asked for after playback has already started — a film that stalls
+waiting on a subtitle lookup is a worse player than one with no subtitles — and
+a lookup that fails is not an error the viewer is told about. The language
+chosen is remembered across videos, and a video with no subtitle tracks at all
+does not count as turning them off. Double-tap the left or
 right of the picture to seek ten seconds, but only while the controls are
 hidden — an overlay on top of the transport controls would swallow every button
 press.
