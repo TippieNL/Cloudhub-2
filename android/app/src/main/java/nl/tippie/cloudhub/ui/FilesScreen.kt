@@ -1,5 +1,10 @@
 package nl.tippie.cloudhub.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -70,6 +75,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -116,6 +122,8 @@ fun FilesScreen(
     onRecordVideo: () -> Unit,
     onDownload: (FileEntry) -> Unit,
     onShare: (FileEntry) -> Unit,
+    /** Send a chosen subtitle file up beside the video, under the given name. */
+    onAddSubtitle: (FileEntry, Uri, String) -> Unit,
     onDismissUploadFailures: () -> Unit,
     /** A file to come back to -- the photo or video just closed. */
     revealPath: String? = null,
@@ -130,6 +138,21 @@ fun FilesScreen(
     var menuFor by remember { mutableStateOf<FileEntry?>(null) }
     var propertiesFor by remember { mutableStateOf<FileEntry?>(null) }
     var overflow by remember { mutableStateOf(false) }
+
+    /* ---- adding subtitles ------------------------------------------------
+     *
+     * Pick the file first, then ask what language it is: the file's own name
+     * usually answers that, and a prompt that already holds the right answer
+     * is one tap rather than typing. Nothing is uploaded until both are known.
+     */
+    val context = LocalContext.current
+    var subtitlesFor by remember { mutableStateOf<FileEntry?>(null) }
+    var subtitleUri by remember { mutableStateOf<Uri?>(null) }
+    val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        // A .srt has no agreed MIME type, so the picker cannot be narrowed to
+        // one and the check is on the name instead.
+        if (uri == null) subtitlesFor = null else subtitleUri = uri
+    }
 
     // Only action feedback goes through the snackbar now. A failed *listing*
     // is a state of the screen, not a message that scrolls away.
@@ -259,12 +282,42 @@ fun FilesScreen(
             onMove = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = true) },
             onCopy = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = false) },
             onDelete = { menuFor = null; model.delete(listOf(entry.path)) },
+            onAddSubtitles = { menuFor = null; subtitlesFor = entry; subtitlePicker.launch("*/*") },
             onProperties = { menuFor = null; propertiesFor = entry },
         )
     }
 
     propertiesFor?.let { entry ->
         PropertiesSheet(entry = entry, onDismiss = { propertiesFor = null })
+    }
+
+    val video = subtitlesFor
+    val chosen = subtitleUri
+    if (video != null && chosen != null) {
+        val pickedName = remember(chosen) { displayNameOf(context, chosen) }
+        val close = { subtitlesFor = null; subtitleUri = null }
+        if (!SubtitleRules.isSubtitleFile(pickedName)) {
+            LaunchedEffect(chosen) {
+                close()
+                snackbar.showSnackbar("Subtitles have to be a .srt or .vtt file")
+            }
+        } else {
+            TextPrompt(
+                "Add subtitles",
+                // Empty is how an untagged track is asked for, which is the
+                // right answer when the film has only one.
+                "Language code — en, nl, de… (blank for none)",
+                SubtitleRules.guessLanguage(pickedName),
+                onDismiss = close,
+                onConfirm = { language ->
+                    val name = SubtitleRules.fileNameFor(
+                        video.name, language, pickedName.substringAfterLast('.', ""),
+                    )
+                    onAddSubtitle(video, chosen, name)
+                    close()
+                },
+            )
+        }
     }
 
     if (showNewFolder) {
@@ -801,6 +854,26 @@ private fun MenuItem(
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 14.dp),
     )
+}
+
+/**
+ * What a picked document is called.
+ *
+ * The URI from the system picker says nothing useful -- it is a content://
+ * address with a number on the end -- so the name has to be asked for. It
+ * decides both the extension, which says whether this is a subtitle at all,
+ * and the language guess.
+ */
+private fun displayNameOf(context: Context, uri: Uri): String {
+    runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) {
+                cursor.getString(index)?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+        }
+    }
+    return uri.lastPathSegment.orEmpty()
 }
 
 /**

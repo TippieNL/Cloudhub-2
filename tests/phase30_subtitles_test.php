@@ -283,6 +283,55 @@ $checks['the language is remembered on the phone too'] =
 $checks['a video without subtitles does not clear the stored language'] =
     str_contains($player, 'if (textGroups.isEmpty()) return');
 
+/* --- adding one -------------------------------------------------------------
+ *
+ * Finding subtitles is one half; putting one there is the other. There is no
+ * endpoint for it, because a subtitle is found by sitting beside the film
+ * under the right name -- so what both clients do is an ordinary upload with
+ * that name worked out first, and the name is the thing worth pinning.
+ */
+$appJs = $read('public/assets/js/app.js');
+$dialogs = $readKt('ui/Dialogs.kt');
+$files = $readKt('ui/FilesScreen.kt');
+$main = $readKt('MainActivity.kt');
+$rules = $readKt('ui/SubtitleRules.kt');
+$rulesTests = (string)@file_get_contents($root.'/android/app/src/test/java/nl/tippie/cloudhub/SubtitleRulesTest.kt');
+
+$checks['both clients offer it, and only on a video'] =
+    str_contains($appJs, "<button data-cmd=\"subtitles\">Add subtitles…</button>")
+    && str_contains($appJs, 'isVideoPath(path)')
+    && str_contains($dialogs, 'SheetAction(Icons.Default.ClosedCaption, "Add subtitles…", onAddSubtitles)')
+    && str_contains($dialogs, 'entry.kind == FileEntry.Kind.VIDEO');
+// The one rule that decides whether any of this is ever seen again.
+$checks['the file is named after the film it belongs to'] =
+    str_contains($appJs, 'function subtitleFileName(videoPath, language, extension)')
+    && str_contains($appJs, '`${stem}.${language}.${extension}`')
+    && str_contains($rules, 'fun fileNameFor(videoName: String, language: String, extension: String): String')
+    && str_contains($rulesTests, 'a subtitle is named after the film it belongs to');
+// A downloaded subtitle usually says what it is; a prompt that already holds
+// the right answer is one tap rather than typing.
+$checks['the language is guessed from the file name'] =
+    str_contains($appJs, 'function guessSubtitleLanguage(fileName)')
+    && str_contains($rules, 'fun guessLanguage(fileName: String): String')
+    && str_contains($rulesTests, 'the language a downloaded subtitle claims is offered');
+$checks['only a subtitle file may be attached'] =
+    str_contains($appJs, 'SUBTITLE_EXTENSIONS.has(extension)')
+    && str_contains($rules, 'fun isSubtitleFile(fileName: String): Boolean')
+    && str_contains($files, 'SubtitleRules.isSubtitleFile(pickedName)');
+// Over the server's limit it would upload and then never appear in a menu,
+// which looks like the feature not working rather than the file being wrong.
+$checks['a file too large to be read is refused before it is sent'] =
+    str_contains($appJs, 'const SUBTITLE_MAX_BYTES = 4194304;')
+    && str_contains($appJs, 'file.size > SUBTITLE_MAX_BYTES');
+// Replacing goes through the trash like any other delete, so a mistake is
+// recoverable -- and it is asked about first.
+$checks['replacing an existing track is asked about'] =
+    str_contains($appJs, "askConfirm(\n            'Replace subtitles',")
+    && str_contains($appJs, "await api('/api/files/delete', { method: 'DELETE', body: { path: clash.path } });");
+$checks['the phone sends it through the ordinary upload queue'] =
+    str_contains($main, 'private fun attachSubtitle(video: FileEntry, uri: Uri, name: String)')
+    && str_contains($main, 'queue.add(result.upload.copy(name = name, targetPath = folder))');
+
 $bad = false;
 foreach ($checks as $name => $ok) {
     echo ($ok ? '[PASS] ' : '[FAIL] ').$name.PHP_EOL;

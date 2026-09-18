@@ -156,6 +156,20 @@ The choice is remembered as a *language*, not as a file: turn on Dutch for one
 film and the next film's Dutch track — a different file with a different name —
 comes on by itself. Nothing is selected until you pick something once.
 
+**Adding one** — "Add subtitles…" on any video, in the web app's file menu and
+in the Android file sheet. It asks for a language code, offering whatever the
+file's own name claims (`The.Film.2024.WEB-DL.nl.srt` → `nl`, while `WEB-DL` is
+not a language and is not offered), and puts the file beside the film under the
+name above. There is no upload endpoint for subtitles and nothing to keep in
+step afterwards: the naming *is* the wiring, which is why it is worked out for
+you rather than left as something to get right by hand.
+
+Replacing a track that is already there asks first and goes through the trash,
+like any other delete. A file that is not a `.srt` or `.vtt`, or one over the
+4 MB the server will read, is refused before it is sent — it would otherwise
+upload happily and then never appear in a menu, which looks like the feature
+being broken rather than the file being wrong.
+
 Public share links have no subtitles. The token is a credential for one file,
 and serving the files beside it would quietly widen what was shared.
 

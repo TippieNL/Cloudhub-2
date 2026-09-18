@@ -332,6 +332,7 @@ class MainActivity : ComponentActivity() {
                         onRecordVideo = { startCapture("mp4") { recordVideo.launch(it) } },
                         onDownload = { download(it) },
                         onShare = { sharing = it },
+                        onAddSubtitle = { video, uri, name -> attachSubtitle(video, uri, name) },
                         onDismissUploadFailures = { queue.clearFailures() },
                         revealPath = reveal,
                         onRevealed = { reveal = null },
@@ -523,6 +524,35 @@ class MainActivity : ComponentActivity() {
                 }
                 if (full == null && unreadable > 0 && queued == 0) {
                     Toast.makeText(this@MainActivity, "Nothing could be read from that", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    /**
+     * Put a chosen subtitle file next to its video.
+     *
+     * An ordinary upload with the name decided for it: there is no subtitle
+     * endpoint, because a subtitle is found by sitting beside the film under
+     * the right name. It goes through the same queue as everything else, so it
+     * survives the app being closed and shows in the upload tracker like any
+     * other file.
+     */
+    private fun attachSubtitle(video: FileEntry, uri: Uri, name: String) {
+        val folder = video.path.substringBeforeLast('/', "").ifEmpty { "/" }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = UploadWorker.stage(this@MainActivity, uri, name)
+            withContext(Dispatchers.Main) {
+                when (result) {
+                    is StageResult.Staged -> {
+                        queue.add(result.upload.copy(name = name, targetPath = folder))
+                        UploadWorker.enqueue(this@MainActivity)
+                        Toast.makeText(this@MainActivity, "Adding $name", Toast.LENGTH_SHORT).show()
+                    }
+                    is StageResult.NoRoom -> Toast.makeText(
+                        this@MainActivity, "Not enough space on this phone", Toast.LENGTH_LONG).show()
+                    StageResult.Unreadable -> Toast.makeText(
+                        this@MainActivity, "That file could not be read", Toast.LENGTH_LONG).show()
                 }
             }
         }

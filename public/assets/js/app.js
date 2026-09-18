@@ -1166,6 +1166,159 @@ function askInput(title, label, value = '') {
     });
 }
 
+/* ---- Subtitles ------------------------------------------------------------
+ *
+ * A subtitle track is a file sitting beside the film, named after it:
+ * Holiday.mp4 is subtitled by Holiday.srt, and by Holiday.en.srt and
+ * Holiday.nl.srt when there is more than one. That is the convention every
+ * desktop player follows, so a library that already works in VLC works here,
+ * and a subtitle downloaded from anywhere is added by putting it next to the
+ * video under the right name -- which is all this does.
+ */
+const SUBTITLE_EXTENSIONS = new Set(['srt', 'vtt']);
+/**
+ * What the server refuses to read, checked here so the picker can say why.
+ * Kept in step with MAX_BYTES in src/Services/SubtitleService.php: a file over
+ * it would upload and then never appear in any menu.
+ */
+const SUBTITLE_MAX_BYTES = 4194304;
+const SUBTITLE_VIDEO_EXTENSIONS = new Set([
+    'mp4', 'webm', 'ogv', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts'
+]);
+
+function isVideoPath(path) {
+    const name = path.split('/').pop() || '';
+    return SUBTITLE_VIDEO_EXTENSIONS.has((name.includes('.') ? name.split('.').pop() : '').toLowerCase());
+}
+
+/** One file from the system picker, or null if nothing was chosen. */
+function pickFile(accept) {
+    return new Promise(resolve => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = accept;
+        const done = value => { input.remove(); resolve(value); };
+        input.addEventListener('change', () => done(input.files?.[0] || null), { once: true });
+        // Not every browser fires this, which is why the element is created
+        // per pick rather than kept: an abandoned one is collected with it.
+        input.addEventListener('cancel', () => done(null), { once: true });
+        input.style.display = 'none';
+        document.body.appendChild(input);
+        input.click();
+    });
+}
+
+/**
+ * The language a downloaded subtitle's own name is claiming.
+ *
+ * Files arrive called "The.Film.2024.1080p.WEB-DL.nl.srt", so the segment
+ * before the extension is usually the answer. Only accepted when it looks
+ * like a language code -- two or three letters -- because "WEB-DL" is not
+ * one, and a wrong guess is offered to the user to correct rather than used
+ * silently.
+ */
+function guessSubtitleLanguage(fileName) {
+    const parts = fileName.replace(/\.[^.]+$/, '').split('.');
+    const last = (parts.length > 1 ? parts[parts.length - 1] : '').toLowerCase();
+    return /^[a-z]{2,3}$/.test(last) ? last : '';
+}
+
+/** The name a subtitle has to have for the players to find it. */
+function subtitleFileName(videoPath, language, extension) {
+    const stem = (videoPath.split('/').pop() || '').replace(/\.[^.]+$/, '');
+    return language ? `${stem}.${language}.${extension}` : `${stem}.${extension}`;
+}
+
+async function addSubtitles(videoPath) {
+    let existing = [];
+    try {
+        // api() hands back the Response, as every other caller here expects.
+        const found = await (await api(`/api/files/subtitles?path=${encodeURIComponent(videoPath)}`)).json();
+        existing = found.tracks || [];
+    } catch (e) {
+        // Not fatal: it only costs the "replace what is there?" question.
+        console.warn('Could not read the existing subtitles:', e);
+    }
+
+    const file = await pickFile('.srt,.vtt,text/vtt,application/x-subrip');
+    if (!file) return;
+
+    const extension = (file.name.includes('.') ? file.name.split('.').pop() : '').toLowerCase();
+    if (!SUBTITLE_EXTENSIONS.has(extension)) {
+        toast('Subtitles have to be a .srt or .vtt file');
+        return;
+    }
+    if (file.size > SUBTITLE_MAX_BYTES) {
+        toast('That file is too large to be a subtitle track');
+        return;
+    }
+
+    // Empty means cancelled, so "none" is how an untagged track is asked for:
+    // Holiday.srt rather than Holiday.en.srt.
+    const language = (await askInput(
+        'Add subtitles',
+        'Language code — en, nl, de… (or "none")',
+        guessSubtitleLanguage(file.name) || 'en',
+    )).trim().toLowerCase();
+    if (!language) return;
+
+    const tag = language === 'none' ? '' : language;
+    const name = subtitleFileName(videoPath, tag, extension);
+    const folder = videoPath.substring(0, videoPath.lastIndexOf('/')) || '/';
+
+    const clash = existing.find(track => track.name.toLowerCase() === name.toLowerCase());
+    if (clash) {
+        const replace = await askConfirm(
+            'Replace subtitles',
+            `${clash.label} subtitles are already there. Replace them?`,
+            'Replace',
+        );
+        if (!replace) return;
+        // To the trash like any other delete, so a mistake is recoverable.
+        await api('/api/files/delete', { method: 'DELETE', body: { path: clash.path } });
+    }
+
+    try {
+        await uploadSubtitleFile(folder, name, file);
+        toast(`Subtitles added as ${name}`);
+        await loadFiles();
+    } catch (e) {
+        toast(e.message || 'Could not add the subtitles');
+    }
+}
+
+/**
+ * The subtitle, uploaded in one piece.
+ *
+ * The resumable protocol, but without the resuming: a subtitle is smaller
+ * than one chunk by definition -- the server will not read one over 5 MB --
+ * so there is nothing to carry on from and nothing to show progress for.
+ */
+async function uploadSubtitleFile(folder, name, file) {
+    const started = await (await api('/api/uploads/init', {
+        method: 'POST',
+        body: {
+            targetPath: folder,
+            name,
+            size: file.size,
+            uploadId: 'sub' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+            // Anything already in the way was dealt with above, so a clash
+            // here is a surprise and should be reported, not renamed around.
+            conflict: 'reject',
+        },
+    })).json();
+
+    const response = await fetch(`${appUrl('/api/uploads/chunk')}&id=${encodeURIComponent(started.id)}`, {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'X-Upload-Offset': '0', 'X-CSRF-Token': S.csrf },
+        body: file,
+    });
+    if (!response.ok) throw new Error(`The subtitle could not be sent (HTTP ${response.status})`);
+
+    await api('/api/uploads/complete', { method: 'POST', body: { id: started.id } });
+}
+
 async function del(p) {
     const name = p.split('/').pop();
     // The wording depends on where the item actually goes, which the server
@@ -1255,7 +1408,7 @@ function showContextMenu(path, x, y) {
     const f = currentEntries().find(item => item.path === path);
     const menu = $('#file-context');
     if (!f) return;
-    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : '<button data-cmd="versions">Previous versions</button>'}${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
+    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}${f.isDirectory || !isVideoPath(path) ? '' : '<button data-cmd="subtitles">Add subtitles…</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : '<button data-cmd="versions">Previous versions</button>'}${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
     menu.hidden = false;
     menu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(y, window.innerHeight - 240)}px`;
@@ -1266,6 +1419,7 @@ function showContextMenu(path, x, y) {
         if (c === 'preview') openPreview(path);
         if (c === 'download') download(path);
         if (c === 'share') share(path);
+        if (c === 'subtitles') addSubtitles(path);
         if (c === 'rename') ren(path);
         if (c === 'move') relocate([path], 'move');
         if (c === 'copy') relocate([path], 'copy');

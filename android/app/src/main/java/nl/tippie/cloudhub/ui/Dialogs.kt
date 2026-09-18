@@ -129,6 +129,7 @@ fun FileActionsSheet(
     onMove: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit,
+    onAddSubtitles: () -> Unit,
     onProperties: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -141,6 +142,11 @@ fun FileActionsSheet(
             SheetAction(Icons.Default.Link, "Share link", onShare)
         }
         if (canWrite) {
+            // Only for a video: a subtitle beside anything else is a text file
+            // nothing will ever read.
+            if (entry.kind == FileEntry.Kind.VIDEO) {
+                SheetAction(Icons.Default.ClosedCaption, "Add subtitles…", onAddSubtitles)
+            }
             SheetAction(Icons.Default.DriveFileRenameOutline, "Rename", onRename)
             SheetAction(Icons.Default.DriveFileMove, "Move to…", onMove)
             SheetAction(Icons.Default.ContentCopy, "Copy to…", onCopy)
