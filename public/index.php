@@ -413,7 +413,10 @@ function send_thumbnail(string $cache): never {
         exit;
     }
 
-    header('Content-Length: '.filesize($cache));
+    // filesize() returns false on failure, which interpolates to an empty
+    // Content-Length header rather than a number.
+    $cachedSize = @filesize($cache);
+    if ($cachedSize !== false)header('Content-Length: '.$cachedSize);
     readfile($cache);
     exit;
 }
@@ -826,7 +829,8 @@ if ($path === '/sw.js' && ($method === 'GET' || $method === 'HEAD')) {
     header('Content-Type: text/javascript; charset=utf-8');
     // The worker must be revalidated or a stale one pins every cached asset.
     header('Cache-Control: no-cache');
-    header('Content-Length: '.filesize($file));
+    $workerSize = @filesize($file);
+    if ($workerSize !== false)header('Content-Length: '.$workerSize);
     if ($method === 'HEAD')exit;
     readfile($file);
     exit;
@@ -914,7 +918,7 @@ if ($path === '/api/files/list' && $method === 'GET') api_try(function()use($fs)
 // streams the file to disk instead of holding it in the page's memory.
 if ($path === '/api/files/download' && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($fs, $method) {
     release_session_lock();
-    $f = $fs->existing((string)($_GET['path']??'')); if (!is_file($f))throw new RuntimeException('File not found', 404); header('Content-Type: '.mime_type($f)); header('Content-Disposition: '.content_disposition('attachment', basename($f))); header('Content-Length: '.filesize($f)); if ($method === 'GET')readfile($f); exit;
+    $f = $fs->existing((string)($_GET['path']??'')); if (!is_file($f))throw new RuntimeException('File not found', 404); header('Content-Type: '.mime_type($f)); header('Content-Disposition: '.content_disposition('attachment', basename($f))); $downloadSize = @filesize($f); if ($downloadSize !== false)header('Content-Length: '.$downloadSize); if ($method === 'GET')readfile($f); exit;
 });
 /**
 * Streams a file for the authenticated preview dialog.
@@ -1409,7 +1413,8 @@ if ($path === '/api/files/versions/download' && ($method === 'GET' || $method ==
     $file = $fs->versionPayload($rel, $id);
     header('Content-Type: '.mime_type($file));
     header('Content-Disposition: '.content_disposition('attachment', basename($file)));
-    header('Content-Length: '.filesize($file));
+    $versionSize = @filesize($file);
+    if ($versionSize !== false)header('Content-Length: '.$versionSize);
     if ($method === 'GET')readfile($file);
     exit;
 });
@@ -1681,7 +1686,8 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         clearstatcache(true, $tmp);
         header('Content-Type: application/zip');
         header('Content-Disposition: attachment; filename="download.zip"');
-        header('Content-Length: '.filesize($tmp));
+        $zipSize = @filesize($tmp);
+        if ($zipSize !== false)header('Content-Length: '.$zipSize);
         readfile($tmp);
         unlink($tmp);
         exit;
