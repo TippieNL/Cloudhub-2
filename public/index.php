@@ -2179,7 +2179,13 @@ if ($path === '/play' && $method === 'GET') {
         try {
             $f = $fs->existing($relPath);
             if (is_file($f)) {
-                $mime = mime_type($f);
+                // media_mime_type(), not mime_type(): /api/files/stream decides
+                // with the extension-first mapper that exists because libmagic
+                // is unreliable here, and two functions answering one question
+                // meant a video libmagic misread -- an MPEG-TS clip is
+                // "application/octet-stream" to it -- got "Media not available"
+                // from this page while the stream route would have served it.
+                $mime = media_mime_type($f);
                 if (str_starts_with($mime, 'video/') || str_starts_with($mime, 'audio/')) {
                     $size = filesize($f);
                     $mediaFile = [

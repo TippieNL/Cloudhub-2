@@ -370,6 +370,28 @@ scenario('a download can be asked about without being sent', function () use ($c
     check('and 404 for one that is not', $gone->status === 404, $gone->describe());
 });
 
+/*
+ * The player page and the stream route answer "is this media?" the same way.
+ * The page asked libmagic, which calls an MPEG-TS clip
+ * application/octet-stream, so it said "Media not available" for a file the
+ * stream route serves as video/mp2t.
+ */
+scenario('the player opens every file the stream route serves', function () use ($client, $scratch) {
+    $clip = '';
+    for ($i = 0; $i < 200; $i++) $clip .= "\x47".random_bytes(187);   // transport-stream packets
+    $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => 'clip.ts', 'size' => strlen($clip),
+        'uploadId' => 'play'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    $client->putChunk((string)($init->json['id'] ?? ''), 0, $clip);
+    $client->post('/api/uploads/complete', ['id' => (string)($init->json['id'] ?? '')]);
+
+    $stream = $client->get('/api/files/stream', ['path' => $scratch.'/clip.ts'], ['Range: bytes=0-99']);
+    check('the stream route serves it as video', $stream->status === 206
+        && str_starts_with((string)$stream->header('Content-Type'), 'video/'), $stream->describe());
+    $page = $client->get('/play', ['path' => $scratch.'/clip.ts']);
+    check('and the player page offers it', $page->status === 200 && str_contains($page->body, 'files%2Fstream')
+        && stripos($page->body, 'not available') === false, 'status '.$page->status);
+});
+
 scenario('a document is refused by the media route', function () use ($client, $uploaded) {
     // The guard that stops the streaming path being a general file reader.
     $r = $client->get('/api/files/stream', ['path' => $uploaded]);
