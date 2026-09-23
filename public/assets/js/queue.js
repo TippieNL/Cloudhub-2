@@ -27,6 +27,7 @@ const Q = (() => {
 
     const state = {
         running: false,
+        waiting: false,
         csrf: '',
         current: null,
         cancelled: new Set(),
@@ -139,6 +140,18 @@ const Q = (() => {
         }
     }
 
+    // A session that ended mid-upload pauses the queue rather than failing
+    // the item: 'cfh-signed-in' picks it up again with a fresh token.
+    const signedOut = () => Object.assign(new Error('Sign in to continue uploading'), { signedOut: true });
+
+    /** Where the server says an upload stands. */
+    async function serverStatus(id) {
+        const res = await fetch(`${url('/api/uploads/status')}&id=${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+        if (res.status === 401) throw signedOut();
+        if (!res.ok) throw Object.assign(new Error(await readError(res, `Upload status failed (HTTP ${res.status})`)), { status: res.status });
+        return res.json();
+    }
+
     async function sendChunk(id, offset, blob) {
         const res = await fetch(`${url('/api/uploads/chunk')}&id=${encodeURIComponent(id)}`, {
             method: 'PUT',
@@ -150,6 +163,7 @@ const Q = (() => {
             },
             body: blob,
         });
+        if (res.status === 401) throw signedOut();
         if (!res.ok) throw Object.assign(new Error(await readError(res, `Chunk failed (HTTP ${res.status})`)), { status: res.status });
         return res.json();
     }
@@ -161,6 +175,7 @@ const Q = (() => {
             uploadId: item.id, targetPath: item.targetPath,
             name: item.name, size: item.size, conflict: 'rename',
         });
+        if (init.status === 401) throw signedOut();
         if (!init.ok) {
             const message = await readError(init, `Upload refused (HTTP ${init.status})`);
             // 507 is the quota talking, 413 the size limit: retrying changes
@@ -174,7 +189,18 @@ const Q = (() => {
         while (offset < item.size) {
             if (state.cancelled.has(item.id)) throw Object.assign(new Error('Cancelled'), { cancelled: true });
             const end = Math.min(offset + chunkBytes, item.size);
-            status = await sendChunk(item.id, offset, item.blob.slice(offset, end));
+            try {
+                status = await sendChunk(item.id, offset, item.blob.slice(offset, end));
+            } catch (err) {
+                // 409 is the server saying it holds a different number of
+                // bytes -- a chunk whose answer was lost has still landed.
+                // Carry on from where it is instead of failing an upload that
+                // is in fact fine.
+                if (err.status !== 409) throw err;
+                const at = await serverStatus(item.id);
+                if (at.received === offset) throw err;
+                status = at;
+            }
             offset = status.received;
             // Persisted per chunk, so a crash costs at most one chunk.
             await put({ ...item, offset, state: 'uploading' });
@@ -182,13 +208,36 @@ const Q = (() => {
         }
 
         const done = await post('/api/uploads/complete', { id: item.id });
+        if (done.status === 401) throw signedOut();
         if (!done.ok) throw new Error(await readError(done, 'Could not finalise the upload'));
         return done.json();
     }
 
+    /*
+     * One tab drives the queue at a time.
+     *
+     * The queue lives in IndexedDB, which every tab of the app shares, and
+     * each tab used to run it: two tabs picked the same item and sent its
+     * chunks interleaved, so one was refused with 409 and marked the item
+     * failed while the other finished it. A tab that finds the lock held
+     * waits its turn, and whoever holds it reads the store afresh each round,
+     * so items added in any tab are uploaded. Without Web Locks it runs as
+     * it always did.
+     */
     async function run() {
-        if (state.running) return;
+        if (state.running || state.waiting) return;
         if (!navigator.onLine) return;
+        if (!navigator.locks?.request) return drain();
+        state.waiting = true;
+        try {
+            await navigator.locks.request('cloudhub-upload-queue', () => { state.waiting = false; return drain(); });
+        } finally {
+            state.waiting = false;
+        }
+    }
+
+    async function drain() {
+        if (state.running) return;
         state.running = true;
         try {
             while (true) {
