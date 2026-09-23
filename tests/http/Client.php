@@ -34,6 +34,11 @@ final class Client
         return $this->send('GET', $route, $query, null, $headers);
     }
 
+    public function head(string $route, array $query = []): Response
+    {
+        return $this->send('HEAD', $route, $query, null);
+    }
+
     public function post(string $route, array $body, array $query = []): Response
     {
         return $this->send('POST', $route, $query, $body);
@@ -73,6 +78,48 @@ final class Client
     public function getRange(string $route, array $query, int $from, int $to): Response
     {
         return $this->send('GET', $route, $query, null, ["Range: bytes=$from-$to"]);
+    }
+
+    /**
+     * A WebDAV request to a clean /webdav path, carrying the session and CSRF
+     * token like a real client. WebDAV uses its own verbs (MKCOL, MOVE, …) on
+     * real paths rather than the ?route= form, so this bypasses send()'s route
+     * builder and hits the path directly -- which is exactly what the
+     * authorization guard has to cover.
+     */
+    public function dav(string $method, string $path, array $headers = [], ?string $body = null): Response
+    {
+        $url = rtrim($this->base, '/').$path;
+        $h = ['Accept: */*'];
+        if ($this->cookies) {
+            $pairs = [];
+            foreach ($this->cookies as $name => $value) $pairs[] = $name.'='.$value;
+            $h[] = 'Cookie: '.implode('; ', $pairs);
+        }
+        if ($this->csrf !== '') $h[] = 'X-CSRF-Token: '.$this->csrf;
+        foreach ($headers as $header) $h[] = $header;
+        return $this->perform($url, $method, $h, $body);
+    }
+
+    /**
+     * A multipart/form-data POST, for the legacy upload route.
+     *
+     * @param array<string,string> $fields plain form fields
+     * @param array<string,string> $files file name => bytes, sent as files[]
+     */
+    public function multipart(string $route, array $fields, array $files): Response
+    {
+        $boundary = '----cloudhub'.bin2hex(random_bytes(8));
+        $body = '';
+        foreach ($fields as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+        foreach ($files as $filename => $bytes) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"$filename\"\r\n"
+                ."Content-Type: application/octet-stream\r\n\r\n$bytes\r\n";
+        }
+        $body .= "--$boundary--\r\n";
+        return $this->send('POST', $route, [], $body, ['Content-Type: multipart/form-data; boundary='.$boundary]);
     }
 
     public function delete(string $route, array $body = []): Response
@@ -131,7 +178,9 @@ final class Client
             $headers[] = 'Content-Type: application/json';
         } elseif (is_string($body)) {
             $payload = $body;
-            $headers[] = 'Content-Type: application/octet-stream';
+            // A caller that names its own type (multipart below) keeps it.
+            $typed = (bool)array_filter($extraHeaders, static fn(string $h): bool => stripos($h, 'Content-Type:') === 0);
+            if (!$typed) $headers[] = 'Content-Type: application/octet-stream';
         }
         foreach ($extraHeaders as $header) $headers[] = $header;
 
@@ -153,6 +202,8 @@ final class Client
             CURLOPT_TIMEOUT => 30,
         ]);
         if ($payload !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        // A HEAD answer has no body; without this curl waits for one.
+        if ($method === 'HEAD') curl_setopt($ch, CURLOPT_NOBODY, true);
 
         $raw = curl_exec($ch);
         if ($raw === false) {

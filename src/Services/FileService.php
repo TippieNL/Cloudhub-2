@@ -19,6 +19,18 @@ final class FileService {
   */
  public const RESERVED_ROOT_NAMES=['.trash','.thumbnails','.versions'];
 
+ /**
+  * Whether a top-level name is one of CloudHub's own directories.
+  *
+  * Compared the way the filesystem underneath may compare it. Android's shared
+  * storage, macOS and Windows resolve names case-insensitively, and Windows
+  * also drops trailing dots and spaces -- so ".Trash" or ".trash." opens the
+  * real trash there while an exact comparison waved it through.
+  */
+ public static function isReservedRootName(string $name): bool {
+  return in_array(strtolower(rtrim($name,' .')),self::RESERVED_ROOT_NAMES,true);
+ }
+
  private string $root;
  public function __construct(private array $config) {
   $real=realpath((string)$config['root_dir']);
@@ -29,9 +41,16 @@ final class FileService {
 
  public function sanitize(string $requested): string {
   if(str_contains($requested,"\0"))throw new RuntimeException('Invalid path',400);
-  $decoded=rawurldecode($requested);
-  if(str_contains($decoded,"\0"))throw new RuntimeException('Invalid path',400);
-  $decoded=str_replace('\\','/',$decoded);
+  /*
+   * Not percent-decoded here. Every caller hands over a path that is already
+   * decoded -- PHP decodes $_GET, JSON bodies are never encoded, and the
+   * router decodes the URL path once -- so decoding again only corrupted names
+   * that legitimately contain a percent sign: "Report%202024.pdf", as wget
+   * saves it, was looked up as "Report 2024.pdf" and could be listed but never
+   * opened, renamed or deleted. A literal "%2e%2e" is a name, not "..": the
+   * filesystem does not decode it either, so it cannot climb out of the root.
+   */
+  $decoded=str_replace('\\','/',$requested);
   // Virtual paths may start with one slash, but native absolute/drive/UNC paths are never accepted.
   if(preg_match('/^[A-Za-z]:\//',$decoded)||str_starts_with($decoded,'//'))throw new RuntimeException('Absolute filesystem paths are not allowed',400);
   $parts=explode('/',ltrim($decoded,'/'));$safe=[];
@@ -41,7 +60,7 @@ final class FileService {
    if(preg_match('/[\x00-\x1F\x7F]/u',$part))throw new RuntimeException('Control characters are not allowed in paths',400);
    $safe[]=$part;
   }
-  if($safe&&in_array($safe[0],self::RESERVED_ROOT_NAMES,true))throw new RuntimeException('That path is reserved',403);
+  if($safe&&self::isReservedRootName($safe[0]))throw new RuntimeException('That path is reserved',403);
   $candidate=$this->root.($safe?'/'.implode('/',$safe):'');
   $this->assertNoSymlinkTraversal($candidate);
   return $candidate;
@@ -53,7 +72,10 @@ final class FileService {
   $real=realpath($candidate);
   if($real===false)throw new RuntimeException('File or directory not found',404);
   $real=str_replace('\\','/',$real);$this->assertContained($real);
-  if($this->pathContainsSymlink($candidate))throw new RuntimeException('Symlink access is not allowed',403);
+  // sanitize() has already walked this exact path with pathContainsSymlink().
+  // Repeating it here re-stat'ed every component for no possible change of
+  // verdict -- roughly a third of the syscalls of every existing() call, on
+  // the hottest path in the application.
   return $real;
  }
 
@@ -94,14 +116,39 @@ final class FileService {
   */
  private function children(string $dir): array {
   $atRoot=rtrim($dir,'/')===$this->root;$out=[];
+  /*
+   * The parent chain is proven once for the directory rather than re-walked
+   * from the storage root for every entry in it.
+   *
+   * Every entry of one scandir() shares the same parent chain by
+   * construction, so a per-entry walk re-stat'ed the same components N times
+   * for N files -- on Android's FUSE-backed storage, where a stat costs many
+   * times what it does on a server filesystem, the largest cost of opening a
+   * folder. Equivalent: if $dir's chain holds a symlink then so does every
+   * path beneath it and every entry would have been skipped, which is the
+   * empty list returned here; otherwise only the final component is left to
+   * test, which is exactly is_link($full).
+   */
+  if($this->escapingSymlink($dir))return [];
   foreach(scandir($dir)?:[] as $name){
    if($name==='.'||$name==='..')continue;
-   if($atRoot&&in_array($name,self::RESERVED_ROOT_NAMES,true))continue;
-   $full=$dir.'/'.$name;if(is_link($full)||$this->escapingSymlink($full))continue;
+   if($atRoot&&self::isReservedRootName($name))continue;
+   $full=$dir.'/'.$name;if(is_link($full))continue;
    $out[]=$full;
   }
   return $out;
  }
+
+ /**
+  * The readable children of a directory as absolute paths.
+  *
+  * children() applies the symlink and reserved-name rules that every traversal
+  * in this class depends on; a caller that walks the tree itself -- WebDAV's
+  * PROPFIND -- needs those same rules, not its own scandir().
+  *
+  * @return list<string>
+  */
+ public function childPaths(string $dir): array { return $this->children($dir); }
 
  /** One listing row. Shared so search results and folder listings never drift apart. */
  private function entry(string $full): array {
@@ -164,7 +211,7 @@ final class FileService {
   $this->assertContained(str_replace('\\','/',$src));$this->assertContained(str_replace('\\','/',$dst));
   if(is_link($src))throw new RuntimeException('Symlinks cannot be copied',403);
   if(is_dir($src)){
-   if(!is_dir($dst)&&!mkdir($dst,0775,true)&&!is_dir($dst))throw new RuntimeException('Unable to create the destination directory',500);
+   if(!is_dir($dst)&&!@mkdir($dst,0775,true)&&!is_dir($dst))throw new RuntimeException('Unable to create the destination directory',500);
    foreach(scandir($src)?:[] as $n){if($n==='.'||$n==='..')continue;$this->copyTree($src.'/'.$n,$dst.'/'.$n);}
    return;
   }
@@ -178,6 +225,10 @@ final class FileService {
   */
  public function copiedFiles(string $path): array {
   if(is_link($path))return [];
+  // A path that is not there produced [$path] and, once a partly-failed copy
+  // started asking what landed, would have attributed a row to a file that
+  // was never written.
+  if(!file_exists($path))return [];
   if(!is_dir($path))return [$path];
   $out=[];$stack=[$path];
   while($stack){
@@ -344,8 +395,14 @@ final class FileService {
 
  public function trashRoot(): string {return $this->root.'/.trash';}
 
- /** Move an item into the trash and return its recorded metadata. */
- public function trash(string $realPath,?string $actor=null): array {
+ /**
+  * Move an item into the trash and return its recorded metadata.
+  *
+  * $attribution is the ledger's rows for the item (StorageLedger::rowsUnder()),
+  * kept beside meta.json so restore() can hand the bytes back to whoever
+  * uploaded them.
+  */
+ public function trash(string $realPath,?string $actor=null,array $attribution=[]): array {
   $realPath=str_replace('\\','/',$realPath);$this->assertContained($realPath);
   if(rtrim($realPath,'/')===$this->root)throw new RuntimeException('Storage root cannot be deleted',403);
   if(str_starts_with($realPath.'/',$this->trashRoot().'/'))throw new RuntimeException('That item is already in the trash',400);
@@ -358,7 +415,9 @@ final class FileService {
 
   $id=gmdate('Ymd-His').'-'.bin2hex(random_bytes(4));
   $entry=$this->trashRoot().'/'.$id;
-  if(!mkdir($entry.'/payload',0775,true))throw new RuntimeException('Unable to open the trash',500);
+  // Suppressed because the return value is checked right here and turned
+  // into an exception that says what failed and why.
+  if(!@mkdir($entry.'/payload',0775,true))throw new RuntimeException('Unable to open the trash',500);
 
   $name=basename($realPath);
   if(!rename($realPath,$entry.'/payload/'.$name)){
@@ -369,7 +428,28 @@ final class FileService {
   $meta=['id'=>$id,'name'=>$name,'originalPath'=>$original,'isDirectory'=>$isDir,
    'bytes'=>$measured['bytes'],'files'=>$measured['files'],
    'deletedAt'=>gmdate('c'),'deletedBy'=>$actor];
-  file_put_contents($entry.'/meta.json',json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT));
+
+  /*
+   * A trash entry without readable metadata is worse than a failed delete.
+   *
+   * The payload has already been moved, and trashMeta() returns null for an
+   * entry whose meta.json cannot be read -- so the item would vanish from
+   * trashList(), trashPurge(), trashPurgeExpired() and the storage report at
+   * once, while the caller was still told "Moved to trash". The realistic
+   * trigger is a full disk, which is exactly when someone is deleting things,
+   * so the move is put back and the delete fails loudly instead.
+   */
+  if(@file_put_contents($entry.'/meta.json',json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT))===false){
+   if(!@rename($entry.'/payload/'.$name,$realPath))
+    throw new RuntimeException('Unable to record the deletion of '.$name.', and it could not be put back. It is in '.$this->relative($entry),500);
+   $this->deleteTree($entry);
+   throw new RuntimeException('Unable to record the deletion of '.$name.'; it was left where it was',500);
+  }
+  // Beside meta.json rather than in it: trashList() reads every meta.json and
+  // hands it to the client, and per-account rows are nobody else's business.
+  // Best effort -- without it a restore is merely unattributed, as before.
+  if($attribution&&@file_put_contents($entry.'/attribution.json',json_encode(array_values($attribution),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE))===false)
+   error_log('[trash] could not keep the attribution of '.$original);
   return $meta;
  }
 
@@ -401,12 +481,14 @@ final class FileService {
 
   $target=$this->sanitize((string)$meta['originalPath']);
   $parent=dirname($target);
-  if(!is_dir($parent)&&!mkdir($parent,0775,true)&&!is_dir($parent))throw new RuntimeException('Unable to recreate the original folder',500);
+  if(!is_dir($parent)&&!@mkdir($parent,0775,true)&&!is_dir($parent))throw new RuntimeException('Unable to recreate the original folder',500);
   $target=$this->freeName($target);
 
   if(!rename($payload,$target))throw new RuntimeException('Unable to restore '.$meta['name'],500);
+  $attribution=json_decode((string)@file_get_contents($this->trashRoot().'/'.$id.'/attribution.json'),true);
   $this->deleteTree($this->trashRoot().'/'.$id);
-  return ['path'=>$this->relative($target),'renamed'=>basename($target)!==$meta['name']];
+  return ['path'=>$this->relative($target),'renamed'=>basename($target)!==$meta['name'],
+   'originalPath'=>(string)$meta['originalPath'],'attribution'=>is_array($attribution)?$attribution:[]];
  }
 
  /** Permanently remove one trash entry, or every entry when $id is null. */
@@ -453,6 +535,27 @@ final class FileService {
    if(!file_exists($candidate))return $candidate;
   }
   throw new RuntimeException('Too many items with that name',409);
+ }
+
+ /**
+  * Whether two existing paths name one file.
+  *
+  * On case-insensitive storage -- Android's shared storage, macOS, Windows --
+  * "a.txt" and "A.txt" are the same file, so a case-only rename or move finds
+  * its own source already at the destination, and treating that as a
+  * collision either picked "a (2).txt" or displaced the source itself. Linux
+  * realpath() keeps the spelling it was given, so after comparing paths this
+  * compares device and inode. A hard-linked file is never "the same": POSIX
+  * rename() between two links to one inode does nothing and reports success.
+  */
+ public function isSameFile(string $a,string $b): bool {
+  if(!file_exists($a)||!file_exists($b))return false;
+  $ra=realpath($a);$rb=realpath($b);
+  if($ra!==false&&$ra===$rb)return true;
+  $x=@stat($a);$y=@stat($b);
+  if($x===false||$y===false||(int)$x['ino']===0)return false;
+  if($x['dev']!==$y['dev']||$x['ino']!==$y['ino'])return false;
+  return is_dir($a)||(int)$x['nlink']===1;
  }
 
  private function assertContained(string $path): void {
@@ -513,7 +616,7 @@ final class FileService {
   $bytes=(int)(filesize($realPath)?:0);
   $id=gmdate('Ymd-His').'-'.bin2hex(random_bytes(4));
   $entry=$this->versionsRoot().'/'.$this->versionKey($original).'/'.$id;
-  if(!mkdir($entry.'/payload',0775,true))throw new RuntimeException('Unable to open the version store',500);
+  if(!@mkdir($entry.'/payload',0775,true))throw new RuntimeException('Unable to open the version store',500);
 
   $name=basename($realPath);
   if(!rename($realPath,$entry.'/payload/'.$name)){
@@ -532,7 +635,14 @@ final class FileService {
    */
   $meta=['id'=>$id,'name'=>$name,'path'=>$original,'bytes'=>$bytes,
    'keptAt'=>gmdate('c'),'keptAtMs'=>(int)round(microtime(true)*1000),'keptBy'=>$actor];
-  file_put_contents($entry.'/meta.json',json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT));
+  // Same rule as trash(): a version nobody can list is bytes nobody can
+  // reach, so an unwritable record puts the file back and fails the overwrite.
+  if(@file_put_contents($entry.'/meta.json',json_encode($meta,JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT))===false){
+   if(!@rename($entry.'/payload/'.$name,$realPath))
+    throw new RuntimeException('Unable to record the previous version of '.$name.', and it could not be put back. It is in '.$this->relative($entry),500);
+   $this->deleteTree($entry);
+   throw new RuntimeException('Unable to record the previous version of '.$name.'; nothing was replaced',500);
+  }
 
   // Trimmed here rather than only on the sweep, so a file rewritten every
   // night cannot grow its history without bound between sweeps.

@@ -223,6 +223,12 @@ $checks['the menu is grouped rather than a flat list'] =
 $checks['the menu does not hug the screen edge'] =
     str_contains($files, 'offset = DpOffset(x = (-8).dp, y = 4.dp)');
 
+// storageReport() returns `folders` as a list of per-folder rows; (int) of a
+// non-empty array is 1, which reported "1 folder" for every store.
+$checks['the folder count is counted, not cast'] =
+    str_contains($meRoute, "'folders' => count(\$report['folders'] ?? []),")
+    && !str_contains($meRoute, "(int)(\$report['folders']");
+
 $bad = false;
 foreach ($checks as $name => $ok) {
     echo ($ok ? '[PASS] ' : '[FAIL] ').$name.PHP_EOL;

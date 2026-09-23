@@ -57,9 +57,17 @@ if (preg_match('#^/share/[A-Za-z0-9_-]{20,128}(?:/|$)#', $uri)) {
 // The built-in server does not read .htaccess, so mirror its deny rules here.
 // Without this the project root — which is the document root in this layout —
 // hands out .env, the database schema and the PHP sources verbatim.
-$denied = '#^/(?:config|src|views|database|storage|logs|tests|tools|deploy)(?:/|$)'
-    .'|^/\.env|^/(?:README|SECURITY)\.md$'
-    .'|\.(?:bak|old|orig|save|sql|log|ini|dist)$#i';
+//
+// Any dot-segment is refused (/.git/config, /.env, editor droppings) except
+// /.well-known/, which ACME certificate renewal answers from, as is
+// the android/ client tree, whose keystore.properties is a signing secret and
+// whose build.gradle exposes internals. The extension list catches the loose
+// artefacts a repo accumulates. /share/ was exempted above, so a shared
+// notes.log is unaffected.
+$denied = '#(?:^|/)\.(?!well-known(?:/|$))'
+    .'|^/(?:config|src|views|database|storage|logs|tests|tools|deploy|android)(?:/|$)'
+    .'|^/(?:README|SECURITY|PROJECT_CONTEXT|replit)\.md$'
+    .'|\.(?:bak|old|orig|save|sql|log|ini|dist|gradle|properties|kt|lock)$#i';
 if (preg_match($denied, $uri)) {
     http_response_code(403);
     header('Content-Type: text/plain; charset=utf-8');

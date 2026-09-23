@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS file_metadata (
  mime_type VARCHAR(190) NULL,
  uploaded_by INT UNSIGNED NULL,
  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
- CONSTRAINT fk_file_metadata_server FOREIGN KEY(server_id) REFERENCES storage_servers(id) ON DELETE CASCADE,
+ -- No ON DELETE CASCADE to storage_servers: this table is the upload ledger,
+ -- server_id is a fiction (files always live on the local filesystem), and a
+ -- cascade meant deleting a server row silently wiped every account's usage
+ -- history, which sweep() never rebuilds. migrate.php drops the old constraint.
  INDEX idx_file_server(server_id), INDEX idx_file_server_path(server_id, file_path(190)), INDEX idx_file_uploader(uploaded_by)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -69,7 +72,15 @@ CREATE TABLE IF NOT EXISTS share_links (
  file_path TEXT NOT NULL,
  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  expires_at TIMESTAMP NULL DEFAULT NULL,
- INDEX idx_share_expires(expires_at)
+ -- The lifetime asked for, and who asked. /api/shares/create inserts both and
+ -- /api/shares/list reads them; a fresh install from this file used to 500 on
+ -- the first share because the INSERT named columns only migrate.php added.
+ expires_hours INT NULL DEFAULT NULL,
+ created_by INT UNSIGNED NULL DEFAULT NULL,
+ INDEX idx_share_expires(expires_at),
+ INDEX idx_share_creator(created_by),
+ -- Share creation looks up a live link by path before issuing a token.
+ INDEX idx_share_path(file_path(190))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO storage_servers (name,type,is_active,is_default,config)

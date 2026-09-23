@@ -8,10 +8,14 @@ RewriteEngine On
 RewriteRule ^share/[A-Za-z0-9_-]{20,128}(?:/|$) index.php [QSA,L]
 
 # Never expose application internals.
-RewriteRule ^(?:config|src|views|database|storage|logs|tests|tools|deploy)(?:/|$) - [F,L,NC]
+RewriteRule ^(?:config|src|views|database|storage|logs|tests|tools|deploy|android)(?:/|$) - [F,L,NC]
 RewriteRule ^\.env(?:\..*)?$ - [F,L,NC]
-RewriteRule ^(?:composer\.(?:json|lock)|phpunit\.xml|README\.md|SECURITY\.md)$ - [F,L,NC]
-RewriteRule .*\.(?:bak|old|orig|save|sql|log|ini|dist)$ - [F,L,NC]
+RewriteRule ^(?:composer\.(?:json|lock)|phpunit\.xml|README\.md|SECURITY\.md|PROJECT_CONTEXT\.md|replit\.md)$ - [F,L,NC]
+RewriteRule .*\.(?:bak|old|orig|save|sql|log|ini|dist|gradle|properties|kt|lock)$ - [F,L,NC]
+# Any dot-segment: /.git/config, /.gitignore, editor droppings. The share rule
+# above already ran, so a shared dotfile is unaffected. /.well-known/ stays
+# reachable: ACME HTTP-01 certificate renewal answers from it.
+RewriteRule (?:^|/)\.(?!well-known(?:/|$)) - [F,L]
 
 # Public static files.
 RewriteRule ^favicon\.png$ public/favicon.png [L]

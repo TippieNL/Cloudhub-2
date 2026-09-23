@@ -66,12 +66,16 @@ $checks['both are covered over real HTTP'] =
  */
 $checks['a range request serves at most one chunk'] =
     str_contains($index, 'const MEDIA_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;')
-    && str_contains($index, 'if ($end-$start+1 > MEDIA_RANGE_CHUNK_BYTES) {');
+    && str_contains($index, "if (\$disposition === 'inline' && \$end-\$start+1 > MEDIA_RANGE_CHUNK_BYTES) {");
 // A 200 promises the whole file. Cutting that short would truncate every
 // download of a large file -- a far worse bug than the one being fixed.
 $checks['a download with no range is never shortened'] =
-    (bool)preg_match('/\$status = 206;\s*\n\s*\n\s*\/\*.*?\*\/\s*\n\s*if \(\$end-\$start\+1 > MEDIA_RANGE_CHUNK_BYTES\)/s', $index)
+    (bool)preg_match('/\$status = 206;\s*\n\s*\n\s*\/\*.*?\*\/\s*\n\s*if \(\$disposition === \'inline\' && \$end-\$start\+1 > MEDIA_RANGE_CHUNK_BYTES\)/s', $index)
     && str_contains($http, 'a fetch with no range is still the whole file');
+// A download manager resuming an attachment reads a short 206 as the rest of
+// the file and saves it truncated, so only inline media is chunked.
+$checks['a resumed attachment download is never shortened'] =
+    str_contains($http, 'a resumed shared download gets the whole remainder');
 $checks['the chunking is exercised over real HTTP'] =
     str_contains($http, 'one request does not carry a whole film')
     && str_contains($http, 'the rest follows from where it stopped');

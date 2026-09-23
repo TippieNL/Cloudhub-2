@@ -16,6 +16,16 @@ use RuntimeException;
  */
 final class UploadService
 {
+    /**
+     * Status for "this upload's metadata cannot be parsed".
+     *
+     * 422 rather than 500 because the staged bytes, not the server, are what
+     * is unprocessable -- and it has to be distinguishable from assertOwner()'s
+     * 404 so that init() never mistakes somebody else's session for a damaged
+     * one of its own.
+     */
+    private const META_UNREADABLE = 422;
+
     private string $stagingRoot;
 
     public function __construct(
@@ -40,8 +50,18 @@ final class UploadService
             if ($name === '.' || $name === '..') continue;
             $dir = $this->stagingRoot.'/'.$name;
             if (!is_dir($dir) || (filemtime($dir) ?: time()) >= $cutoff) continue;
-            $this->deleteStagingTree($dir);
-            $removed++;
+            // Per entry, because deleteStagingTree() throws on any failed
+            // rmdir or unlink and init() calls this before it does anything
+            // else -- so one directory PHP could not remove (left by another
+            // uid, or a FUSE quirk on Android) failed every user's every
+            // upload with a 500 until somebody deleted it by hand. Cleanup
+            // is opportunistic and must never block the actual work.
+            try {
+                $this->deleteStagingTree($dir);
+                $removed++;
+            } catch (\Throwable $e) {
+                error_log('[upload] could not clean abandoned session '.$dir.': '.$e->getMessage());
+            }
         }
         return $removed;
     }
@@ -53,7 +73,11 @@ final class UploadService
         $this->cleanupAbandoned();
 
         $max = max(1, (int)$this->config['max_upload_mb']) * 1024 * 1024;
-        if ($size < 0 || $size > $max) throw new RuntimeException('File exceeds the '.$this->config['max_upload_mb'].' MB limit', 413);
+        // Separated so the message names the actual fault. The route defaults
+        // a missing size to -1, which fell into the limit branch and answered
+        // "File exceeds the N MB limit" for a field that was never sent.
+        if ($size < 0) throw new RuntimeException('A file size is required to start an upload', 400);
+        if ($size > $max) throw new RuntimeException('File exceeds the '.$this->config['max_upload_mb'].' MB limit', 413);
 
         $safeName = $this->files->safeName($name);
         $targetDir = $this->files->existing($targetPath);
@@ -73,9 +97,18 @@ final class UploadService
                 }
                 return $this->statusPayload($id, $meta);
             } catch (RuntimeException $e) {
-                if ($e->getCode() === 409) throw $e;
-                // A prior interrupted metadata write must not permanently block
-                // the same file. Remove the damaged session and recreate it.
+                /*
+                 * Only genuinely unreadable metadata may be recreated.
+                 *
+                 * assertOwner() throws 404, and this used to treat anything
+                 * that was not a 409 as "damaged session, start over" -- so a
+                 * session belonging to somebody else was deleted rather than
+                 * refused. Upload ids are a hash of path|name|size|lastModified
+                 * (see uploadKey() in app.js), not per-user, so two people
+                 * uploading the same file to the same folder collide by
+                 * construction and the second wiped the first's staged bytes.
+                 */
+                if ($e->getCode() !== self::META_UNREADABLE) throw $e;
                 $this->deleteStagingTree($dir);
             }
         }
@@ -104,19 +137,57 @@ final class UploadService
      */
     public function append(string $id, int $offset, string $input): array
     {
+        $startedAt = microtime(true);
         $this->files->writable();
         $meta = $this->readMeta($id);
         $this->assertOwner($meta);
         $part = $this->sessionDir($id).'/data.part';
-        $current = is_file($part) ? (filesize($part) ?: 0) : 0;
-        if ($offset !== $current) throw new RuntimeException('Upload offset mismatch; expected '.$current, 409);
+        $chunkLimit = max(1, (int)$this->config['upload_chunk_mb']) * 1024 * 1024;
+
+        $in = fopen($input, 'rb');
+        $out = $this->openPartForWriting($part);
+        if (!$in || !$out) {
+            if ($in) fclose($in);
+            if ($out) fclose($out);
+            throw new RuntimeException('Unable to open upload stream for '.$part, 500);
+        }
+
+        /*
+         * The offset is checked and the write is positioned there.
+         *
+         * Previously the size was read, compared, and then appended with 'ab'
+         * with nothing held in between. Because upload ids are deterministic
+         * (a hash of path|name|size|lastModified), the same file dropped into
+         * two tabs -- or a chunk retried while the original was still in
+         * flight -- produces two requests with the same id and the same
+         * offset: both read offset 0, both passed the check, and both appended,
+         * leaving data.part at twice the length. From then on complete() failed
+         * 409 "incomplete" forever and append() failed 413, because $remaining
+         * went negative, and the session could not be recovered before the
+         * 24-hour sweep.
+         *
+         * Writing at a position this method chooses is what fixes that, not the
+         * lock below: two requests that compute the same offset now write the
+         * same region instead of each adding to the end, so the file keeps the
+         * right length and the right bytes either way. The lock only narrows
+         * the window between the check and the write.
+         */
+        $written = 0;
+        $locked = $this->lockForWriting($out, $part, $offset === 0);
+        clearstatcache(true, $part);
+        $current = (int)(fstat($out)['size'] ?? 0);
+        if ($offset !== $current) {
+            $this->releasePart($out, $locked);
+            fclose($in);
+            throw new RuntimeException('Upload offset mismatch; expected '.$current, 409);
+        }
+        if (fseek($out, $current) !== 0) {
+            $this->releasePart($out, $locked);
+            fclose($in);
+            throw new RuntimeException('Unable to seek '.$part.' to offset '.$current, 500);
+        }
 
         $remaining = (int)$meta['size'] - $current;
-        $chunkLimit = max(1, (int)$this->config['upload_chunk_mb']) * 1024 * 1024;
-        $in = fopen($input, 'rb');
-        $out = fopen($part, 'ab');
-        if (!$in || !$out) throw new RuntimeException('Unable to open upload stream', 500);
-        $written = 0;
         try {
             // The browser sends exactly chunkBytes per chunk, so $written
             // reaches $chunkLimit while the stream is not yet at EOF. Testing
@@ -141,13 +212,78 @@ final class UploadService
                 }
             }
         } finally {
+            // Flush before releasing: another waiter must observe this chunk's
+            // bytes in the size it reads, or it would compute the same offset
+            // again.
+            fflush($out);
+            $this->releasePart($out, $locked);
             fclose($in);
-            fclose($out);
         }
         clearstatcache(true, $part);
-        $meta['updatedAt'] = time();
-        $this->writeMeta($id, $meta);
-        return $this->statusPayload($id, $meta);
+        // The session directory is touched rather than the metadata rewritten:
+        // nothing reads updatedAt (the resume offset comes from the part
+        // file's size), and cleanupAbandoned() reads the directory mtime, which
+        // writing data.part does not bump.
+        @touch($this->sessionDir($id));
+
+        $payload = $this->statusPayload($id, $meta);
+        // So a client can say how much of an upload was the server and how much
+        // was the network, instead of the two being argued about.
+        $payload['serverMs'] = (int)round((microtime(true) - $startedAt) * 1000);
+        return $payload;
+    }
+
+    /**
+     * Open the staging file for a positioned write.
+     *
+     * 'c+b' rather than 'ab' because the write has to land where append()
+     * decides, not wherever the file currently ends. It asks for more than
+     * 'ab' did -- create *and* read -- and this class already warns that
+     * Android emulated storage reports permissions unreliably, so a refusal
+     * falls back to creating the file and reopening it for update.
+     *
+     * @return resource|false
+     */
+    private function openPartForWriting(string $part)
+    {
+        $out = @fopen($part, 'c+b');
+        if ($out !== false) return $out;
+
+        if (!is_file($part)) @touch($part);
+        $out = @fopen($part, 'r+b');
+        if ($out !== false) {
+            error_log('[upload] '.$part.' refused c+b; reopened r+b');
+            return $out;
+        }
+        return false;
+    }
+
+    /**
+     * Take the advisory lock if this filesystem has one, without insisting.
+     *
+     * Locking here is an optimisation, not the correctness mechanism -- the
+     * positioned write in append() is -- so a filesystem without it must not
+     * fail the upload. Android shared storage supports ordinary I/O without
+     * reliable advisory flock() semantics, and requiring the lock would make
+     * every chunk return 500 on exactly the platform this application targets.
+     * One attempt, never a retry: where there is no advisory locking flock()
+     * fails instantly and identically every time, so a retry loop would only
+     * burn a fixed delay per chunk for something that can never succeed.
+     *
+     * @param resource $out
+     */
+    private function lockForWriting($out, string $part, bool $report): bool
+    {
+        if (@flock($out, LOCK_EX | LOCK_NB)) return true;
+        if ($report) error_log('[upload] no advisory lock available for '.$part.'; continuing with a positioned write');
+        return false;
+    }
+
+    /** @param resource $out */
+    private function releasePart($out, bool $locked): void
+    {
+        if ($locked) @flock($out, LOCK_UN);
+        fclose($out);
     }
 
     /** Assemble/finalise the upload and apply the requested conflict policy. */
@@ -173,39 +309,73 @@ final class UploadService
             }
             if ($policy === 'overwrite' && is_dir($dest)) throw new RuntimeException('Destination is a directory', 409);
             /*
-             * The outgoing file is kept, not unlinked.
+             * The outgoing file is kept, not destroyed.
              *
-             * This line used to destroy the previous contents outright: the
-             * trash covered deleting a file, but replacing one lost it with no
-             * way back. keepVersion() renames it into .versions, which is the
-             * same filesystem and so cannot half-finish.
+             * The trash covers deleting a file; replacing one used to lose it
+             * with no way back. keepVersion() renames it into .versions -- same
+             * filesystem, atomic -- so $dest no longer exists and the placement
+             * below is a clean create. With versions disabled the atomic
+             * rename-over below replaces it in place; either way the existing
+             * file is never removed before its replacement is ready.
              */
-            if ($policy === 'overwrite' && is_file($dest)) {
-                if (($this->config['versions_enabled'] ?? true)) {
-                    $this->files->keepVersion(
-                        $dest,
-                        $_SESSION['username'] ?? null,
-                        (int)($this->config['max_versions_per_file'] ?? 0),
-                    );
-                } elseif (!unlink($dest)) {
-                    throw new RuntimeException('Unable to replace existing file', 500);
-                }
+            if ($policy === 'overwrite' && is_file($dest) && ($this->config['versions_enabled'] ?? true)) {
+                $this->files->keepVersion(
+                    $dest,
+                    $_SESSION['username'] ?? null,
+                    (int)($this->config['max_versions_per_file'] ?? 0),
+                );
             }
         }
 
-        if (!rename($part, $dest)) {
-            if (!copy($part, $dest) || !unlink($part)) throw new RuntimeException('Unable to finalise uploaded file', 500);
+        /*
+         * The existing file is never removed before its replacement is in
+         * place. unlink($dest) used to run first, so an overwrite that then
+         * failed both rename() and copy() -- staging on another filesystem
+         * gives EXDEV, a full target disk gives ENOSPC -- destroyed the old
+         * file without writing the new one, and nothing restored it. rename()
+         * over an existing path is atomic on POSIX, so the common case needs no
+         * unlink at all; the cross-device fallback copies to a temporary name
+         * in the destination directory and renames that into place, so $dest is
+         * only ever replaced by a complete file.
+         */
+        if (!@rename($part, $dest)) {
+            $staged = $dest.'.cfh-incoming-'.bin2hex(random_bytes(6));
+            if (!copy($part, $staged)) {
+                @unlink($staged);
+                throw new RuntimeException('Unable to finalise uploaded file', 500);
+            }
+            if (!rename($staged, $dest)) {
+                @unlink($staged);
+                throw new RuntimeException('Unable to finalise uploaded file', 500);
+            }
+            // The bytes are committed. A staging file that will not delete is a
+            // cleanup problem, not a reason to fail an upload that landed --
+            // reporting failure here made clients retry and produce a duplicate
+            // "name (1).ext" from the very same part file.
+            if (!@unlink($part)) error_log('[upload] could not remove staging file '.$part);
         }
         @unlink($dir.'/meta.json');
         @rmdir($dir);
-        return ['success'=>true,'name'=>basename($dest),'path'=>substr(str_replace('\\','/',$dest), strlen($this->config['root_dir']))];
+        // FileService::relative() rather than a substr() against the raw config
+        // value: $dest comes from existing(), a realpath, while
+        // config['root_dir'] is whatever was written in .env -- so a symlinked,
+        // trailing-slash or /./ ROOT_DIR cut the string at the wrong offset.
+        return ['success'=>true,'name'=>basename($dest),'path'=>$this->files->relative($dest)];
     }
 
     /** Explicitly cancel an upload and remove all staged bytes. */
     public function cancel(string $id): array
     {
         $dir = $this->sessionDir($id);
-        if(is_file($dir.'/meta.json')){$meta=$this->readMeta($id);$this->assertOwner($meta);}
+        // Upload ids are a deterministic hash of path|name|size|lastModified,
+        // so they are guessable -- and the ownership check used to sit inside
+        // an is_file() test while the delete ran unconditionally. Anyone could
+        // therefore drop another account's staged bytes just by naming a
+        // session whose metadata was missing. Nothing to prove ownership
+        // against means nothing to cancel; genuinely orphaned directories are
+        // removed by the cleanupAbandoned() TTL.
+        if (!is_file($dir.'/meta.json')) throw new RuntimeException('Upload session not found or expired', 404);
+        $this->assertOwner($this->readMeta($id));
         if (is_dir($dir)) $this->deleteStagingTree($dir);
         return ['success'=>true];
     }
@@ -233,7 +403,11 @@ final class UploadService
         $file = $this->sessionDir($id).'/meta.json';
         if (!is_file($file)) throw new RuntimeException('Upload session not found or expired', 404);
         $meta = json_decode((string)file_get_contents($file), true);
-        if (!is_array($meta)) throw new RuntimeException('Upload metadata is invalid', 500);
+        // Distinct from every other failure so init() can tell "this session's
+        // metadata is unreadable, so recreate it" apart from "this session
+        // belongs to someone else, so refuse" -- previously indistinguishable,
+        // and the second was treated as the first.
+        if (!is_array($meta)) throw new RuntimeException('Upload metadata is invalid', self::META_UNREADABLE);
         return $meta;
     }
 
@@ -330,7 +504,7 @@ final class UploadService
         // Symlinks are unlinked, never followed, so a staged link cannot be
         // used to delete files elsewhere on the filesystem.
         if (is_link($normalised)) {
-            if (!unlink($normalised)) throw new RuntimeException('Unable to remove upload staging link', 500);
+            if (!@unlink($normalised)) throw new RuntimeException('Unable to remove upload staging link', 500);
             return;
         }
 
@@ -339,11 +513,14 @@ final class UploadService
                 if ($entry === '.' || $entry === '..') continue;
                 $this->deleteStagingTree($normalised.'/'.$entry);
             }
-            if (!rmdir($normalised)) throw new RuntimeException('Unable to remove upload staging directory', 500);
+            if (!@rmdir($normalised)) throw new RuntimeException('Unable to remove upload staging directory', 500);
             return;
         }
 
-        if (file_exists($normalised) && !unlink($normalised)) {
+        // Suppressed because each result is checked here and turned into an
+        // exception naming what could not be removed; cleanupAbandoned() logs
+        // the throw.
+        if (file_exists($normalised) && !@unlink($normalised)) {
             throw new RuntimeException('Unable to remove upload staging file', 500);
         }
     }
