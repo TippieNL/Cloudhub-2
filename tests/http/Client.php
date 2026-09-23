@@ -34,6 +34,11 @@ final class Client
         return $this->send('GET', $route, $query, null, $headers);
     }
 
+    public function head(string $route, array $query = []): Response
+    {
+        return $this->send('HEAD', $route, $query, null);
+    }
+
     public function post(string $route, array $body, array $query = []): Response
     {
         return $this->send('POST', $route, $query, $body);
@@ -197,6 +202,8 @@ final class Client
             CURLOPT_TIMEOUT => 30,
         ]);
         if ($payload !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        // A HEAD answer has no body; without this curl waits for one.
+        if ($method === 'HEAD') curl_setopt($ch, CURLOPT_NOBODY, true);
 
         $raw = curl_exec($ch);
         if ($raw === false) {

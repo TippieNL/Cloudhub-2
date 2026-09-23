@@ -109,6 +109,18 @@ function media_mime_type(string $f): string {
 const MEDIA_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 
 /**
+ * A Content-Disposition value that names the file in any script.
+ *
+ * filename= alone is a quoted string of bytes, so a name like "Überweisung.pdf"
+ * or "写真.jpg" arrived as whatever the browser guessed those bytes meant.
+ * filename* (RFC 6266/8187) carries the real name and is what browsers use;
+ * the plain form stays for clients that ignore it, such as curl -J.
+ */
+function content_disposition(string $type, string $name): string {
+    return $type.'; filename="'.str_replace(['"', '\\', "\r", "\n"], '_', $name).'"; filename*=UTF-8\'\''.rawurlencode($name);
+}
+
+/**
  * Stream a file to the browser, honouring a single HTTP byte range.
  *
  * Media players request ranges to read metadata, start playback quickly and
@@ -263,7 +275,7 @@ function serve_file_range(string $file, string $mime, string $disposition, strin
 
     http_response_code($status);
     header('Content-Type: '.$mime);
-    header('Content-Disposition: '.$disposition.'; filename="'.str_replace(['"', "\r", "\n"], '_', basename($file)).'"');
+    header('Content-Disposition: '.content_disposition($disposition, basename($file)));
     header('Accept-Ranges: bytes');
     header('Content-Length: '.$length);
     header('X-Content-Type-Options: nosniff');
@@ -852,9 +864,12 @@ if ($path === '/api/files/list' && $method === 'GET') api_try(function()use($fs)
 
     return $entries;
 });
-if ($path === '/api/files/download' && $method === 'GET') api_try(function()use($fs) {
+// HEAD says whether a download will work without sending it: the web client
+// asks first, then hands the URL to the browser's own download manager, which
+// streams the file to disk instead of holding it in the page's memory.
+if ($path === '/api/files/download' && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($fs, $method) {
     release_session_lock();
-    $f = $fs->existing((string)($_GET['path']??'')); if (!is_file($f))throw new RuntimeException('File not found', 404); header('Content-Type: '.mime_type($f)); header('Content-Disposition: attachment; filename="'.str_replace(['"', "\r", "\n"], '_', basename($f)).'"'); header('Content-Length: '.filesize($f)); readfile($f); exit;
+    $f = $fs->existing((string)($_GET['path']??'')); if (!is_file($f))throw new RuntimeException('File not found', 404); header('Content-Type: '.mime_type($f)); header('Content-Disposition: '.content_disposition('attachment', basename($f))); header('Content-Length: '.filesize($f)); if ($method === 'GET')readfile($f); exit;
 });
 /**
 * Streams a file for the authenticated preview dialog.
@@ -1340,15 +1355,17 @@ if ($path === '/api/files/versions' && $method === 'GET') api_try(function()use(
         'maxPerFile' => (int)$config['max_versions_per_file'],
         'versions' => $fs->versionList($rel)];
 });
-if ($path === '/api/files/versions/download' && $method === 'GET') api_try(function()use($fs) {
+// HEAD as for /api/files/download: asked first by the web client, which then
+// lets the browser stream the version to disk.
+if ($path === '/api/files/versions/download' && ($method === 'GET' || $method === 'HEAD')) api_try(function()use($fs, $method) {
     release_session_lock();
     $rel = $fs->relative($fs->existing((string)($_GET['path']??'')));
     $id = (string)($_GET['id']??'');
     $file = $fs->versionPayload($rel, $id);
     header('Content-Type: '.mime_type($file));
-    header('Content-Disposition: attachment; filename="'.str_replace(['"', "\r", "\n"], '_', basename($file)).'"');
+    header('Content-Disposition: '.content_disposition('attachment', basename($file)));
     header('Content-Length: '.filesize($file));
-    readfile($file);
+    if ($method === 'GET')readfile($file);
     exit;
 });
 if ($path === '/api/files/versions/restore' && $method === 'POST') api_try(function()use($fs, $config) {

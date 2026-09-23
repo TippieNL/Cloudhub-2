@@ -317,6 +317,22 @@ scenario('the subtitles beside a video are found and converted', function () use
     check('a file that is not a subtitle is refused', $refused->status === 415, $refused->describe());
 });
 
+/*
+ * The web client asks with HEAD before it hands a download to the browser's
+ * own download manager, so a missing file is reported instead of saved as a
+ * "file" holding a JSON error -- and the HEAD must not read the file.
+ */
+scenario('a download can be asked about without being sent', function () use ($client, $uploaded) {
+    $head = $client->head('/api/files/download', ['path' => $uploaded]);
+    check('HEAD answers 200 for a file that is there', $head->status === 200, $head->describe());
+    check('with its length and its name, and no body',
+        (int)$head->header('Content-Length') > 0 && $head->body === ''
+            && str_contains((string)$head->header('Content-Disposition'), "filename*=UTF-8''"),
+        $head->describe());
+    $gone = $client->head('/api/files/download', ['path' => $uploaded.'.missing']);
+    check('and 404 for one that is not', $gone->status === 404, $gone->describe());
+});
+
 scenario('a document is refused by the media route', function () use ($client, $uploaded) {
     // The guard that stops the streaming path being a general file reader.
     $r = $client->get('/api/files/stream', ['path' => $uploaded]);

@@ -888,13 +888,56 @@ function esc(s) {
     return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-async function download(p) {
-    const r = await api(`/api/files/download?path=${encodeURIComponent(p)}`);
-    const blob = await r.blob(), u = URL.createObjectURL(blob), a = document.createElement('a');
-    a.href = u;
-    a.download = p.split('/').pop();
+/**
+ * Save a file the server sends as an attachment.
+ *
+ * Left to the browser's own download manager, which streams it to disk.
+ * Fetching it into a Blob first held the whole file in the page's memory --
+ * up to the upload limit -- before a byte was saved, which is where a phone
+ * gave up on a large video. A HEAD goes first so a missing file or an expired
+ * session is reported rather than saved as a "file" holding a JSON error. The
+ * session cookie is scoped to "/", so the plain navigation carries it on a
+ * subdirectory install too.
+ */
+async function saveFromServer(url, name) {
+    try {
+        await api(url, { method: 'HEAD' });
+    } catch (error) {
+        // A HEAD answer has no body to carry the server's message.
+        throw error.status === 404 ? Error('That file is no longer there') : error;
+    }
+    clickDownload(appUrl(url), name);
+}
+
+/** Save bytes already in the page, releasing the URL once the save has begun. */
+function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    clickDownload(url, name);
+    // Revoked straight after click(), Firefox and Safari could cancel the
+    // download before it had started.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function clickDownload(href, name) {
+    const a = Object.assign(document.createElement('a'), { href, download: name });
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(u);
+    a.remove();
+}
+
+async function download(p) {
+    const url = `/api/files/download?path=${encodeURIComponent(p)}`;
+    const name = p.split('/').pop();
+    try {
+        // A file kept for offline use is already in the browser, so it is
+        // saved from there -- the one way that works with no network at all.
+        const kept = 'caches' in window
+            ? await caches.match(appUrl(url), { ignoreVary: true }).catch(() => undefined) : undefined;
+        if (kept && kept.ok) saveBlob(await kept.blob(), name);
+        else await saveFromServer(url, name);
+    } catch (error) {
+        toast(error.message);
+    }
 }
 
 /**
@@ -1034,16 +1077,10 @@ async function showVersions(path) {
     overlay.hidden = false;
 
     list.querySelectorAll('[data-vdown]').forEach(b => b.addEventListener('click', async () => {
-        // Through api() and a blob, like download(): a plain link would not
-        // carry the session on an install served from a subdirectory.
+        // Streamed by the browser, like download().
         try {
-            const r = await api('/api/files/versions/download?path=' + encodeURIComponent(path)
-                + '&id=' + encodeURIComponent(b.dataset.vdown));
-            const blob = await r.blob(), u = URL.createObjectURL(blob), a = document.createElement('a');
-            a.href = u;
-            a.download = name;
-            a.click();
-            URL.revokeObjectURL(u);
+            await saveFromServer('/api/files/versions/download?path=' + encodeURIComponent(path)
+                + '&id=' + encodeURIComponent(b.dataset.vdown), name);
         } catch (e) {
             toast(e.message);
         }
@@ -1966,15 +2003,13 @@ uploadUI.form.addEventListener('submit', async e => {
 
 async function downloadSelected() {
     if (!S.selected.size) return toast('Select files first');
+    // Still through a Blob: the archive is built by a POST, which the browser
+    // cannot hand to its download manager with the CSRF header attached.
     const r = await api('/api/files/download-zip', {
         method: 'POST',
         body: { files: [...S.selected] }
     });
-    const blob = await r.blob(), u = URL.createObjectURL(blob), a = document.createElement('a');
-    a.href = u;
-    a.download = 'download.zip';
-    a.click();
-    URL.revokeObjectURL(u);
+    saveBlob(await r.blob(), 'download.zip');
 }
 $('#zip').addEventListener('click', downloadSelected);
 $('#selection-download').addEventListener('click', downloadSelected);
