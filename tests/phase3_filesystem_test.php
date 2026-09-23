@@ -22,6 +22,18 @@ check('a percent-encoded name is treated as a literal name',fn()=>$fs->sanitize(
 // The bug the decode caused: a filename that legitimately contains a percent
 // escape resolves to itself and can be opened.
 check('a filename containing a percent escape is reachable',fn()=>$fs->existing('/safe/Report%20(1).txt')===realpath($base.'/safe/Report%20(1).txt'));
+// isSameFile(): renaming or moving a file onto its own name is not a
+// collision. "name (2)" was picked for an unchanged rename, and WebDAV's MOVE
+// displaced -- trashed or deleted -- the source itself.
+check('a path is the same file as itself',fn()=>$fs->isSameFile($base.'/safe/a.txt',$base.'/safe/a.txt'));
+check('another spelling of one path is the same file',fn()=>$fs->isSameFile($base.'/safe/a.txt',$base.'/safe/./a.txt'));
+check('two different files are not the same file',fn()=>!$fs->isSameFile($base.'/safe/a.txt',$base.'/safe/Report%20(1).txt'));
+check('a missing path is never the same file',fn()=>!$fs->isSameFile($base.'/safe/a.txt',$base.'/safe/missing.txt'));
+// rename() between two hard links to one inode does nothing and reports
+// success, so a hard link must count as a collision, not as "the same".
+if(function_exists('link')&&@link($base.'/safe/a.txt',$base.'/safe/linked.txt')){
+ check('a hard link is not treated as the same file',fn()=>!$fs->isSameFile($base.'/safe/linked.txt',$base.'/safe/a.txt'));
+}
 check('drive path rejected',function()use($fs){try{$fs->sanitize('C:\\Windows\\x');return false;}catch(RuntimeException){return true;}});
 check('root delete rejected',function()use($fs,$base){try{$fs->deleteTree(realpath($base));return false;}catch(RuntimeException){return true;}});
 if(function_exists('symlink')&&@symlink($outside,$base.'/escape')){

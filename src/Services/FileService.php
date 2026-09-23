@@ -524,6 +524,27 @@ final class FileService {
   throw new RuntimeException('Too many items with that name',409);
  }
 
+ /**
+  * Whether two existing paths name one file.
+  *
+  * On case-insensitive storage -- Android's shared storage, macOS, Windows --
+  * "a.txt" and "A.txt" are the same file, so a case-only rename or move finds
+  * its own source already at the destination, and treating that as a
+  * collision either picked "a (2).txt" or displaced the source itself. Linux
+  * realpath() keeps the spelling it was given, so after comparing paths this
+  * compares device and inode. A hard-linked file is never "the same": POSIX
+  * rename() between two links to one inode does nothing and reports success.
+  */
+ public function isSameFile(string $a,string $b): bool {
+  if(!file_exists($a)||!file_exists($b))return false;
+  $ra=realpath($a);$rb=realpath($b);
+  if($ra!==false&&$ra===$rb)return true;
+  $x=@stat($a);$y=@stat($b);
+  if($x===false||$y===false||(int)$x['ino']===0)return false;
+  if($x['dev']!==$y['dev']||$x['ino']!==$y['ino'])return false;
+  return is_dir($a)||(int)$x['nlink']===1;
+ }
+
  private function assertContained(string $path): void {
   $path=rtrim(str_replace('\\','/',$path),'/');
   if($path!==$this->root&&!str_starts_with($path,$this->root.'/'))throw new RuntimeException('Path escapes the configured storage root',403);
