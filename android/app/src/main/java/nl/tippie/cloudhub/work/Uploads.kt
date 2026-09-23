@@ -80,18 +80,27 @@ object StagingSpace {
  * A database would be more than a list of a few dozen records needs, and would
  * mean adding an annotation processor to the build for it.
  */
-class UploadQueue(context: Context) {
-    private val file = File(context.filesDir, "upload-queue.json")
-    private val failureFile = File(context.filesDir, "upload-failures.json")
+class UploadQueue(dir: File) {
+    constructor(context: Context) : this(context.filesDir)
+
+    private val file = File(dir, "upload-queue.json")
+    private val failureFile = File(dir, "upload-failures.json")
     private val json = Json { ignoreUnknownKeys = true }
 
-    @Synchronized fun all(): List<QueuedUpload> =
+    /*
+     * One lock for every instance. The worker and the activity each make their
+     * own UploadQueue, and @Synchronized locked only the instance it was on --
+     * so a file shared while the worker removed a finished one could be read,
+     * overwritten by the other, and silently dropped from the queue.
+     */
+    fun all(): List<QueuedUpload> = synchronized(LOCK) {
         if (!file.exists()) emptyList()
         else runCatching { json.decodeFromString<List<QueuedUpload>>(file.readText()) }.getOrDefault(emptyList())
+    }
 
-    @Synchronized fun add(item: QueuedUpload) = write(all() + item)
+    fun add(item: QueuedUpload) = synchronized(LOCK) { write(all() + item) }
 
-    @Synchronized fun remove(id: String) = write(all().filterNot { it.id == id })
+    fun remove(id: String) = synchronized(LOCK) { write(all().filterNot { it.id == id }) }
 
     /* ---- refusals -------------------------------------------------------
      *
@@ -100,26 +109,39 @@ class UploadQueue(context: Context) {
      * to say what happened to it.
      */
 
-    @Synchronized fun failures(): List<UploadFailure> =
+    fun failures(): List<UploadFailure> = synchronized(LOCK) {
         if (!failureFile.exists()) emptyList()
         else runCatching { json.decodeFromString<List<UploadFailure>>(failureFile.readText()) }
             .getOrDefault(emptyList())
+    }
 
-    @Synchronized fun recordFailure(failure: UploadFailure) {
+    fun recordFailure(failure: UploadFailure) = synchronized(LOCK) {
         // Bounded: a queue stuck against a full quota would otherwise write a
         // record per attempt until the disk noticed.
         val kept = (failures() + failure).takeLast(MAX_FAILURES)
-        runCatching { failureFile.writeText(json.encodeToString(kept)) }
+        replace(failureFile, json.encodeToString(kept))
     }
 
-    @Synchronized fun clearFailures() { runCatching { failureFile.delete() } }
+    fun clearFailures() = synchronized(LOCK) { runCatching { failureFile.delete() }; Unit }
 
-    private fun write(items: List<QueuedUpload>) {
-        runCatching { file.writeText(json.encodeToString(items)) }
+    private fun write(items: List<QueuedUpload>) = replace(file, json.encodeToString(items))
+
+    /*
+     * Written beside the file and renamed over it. Written in place, a process
+     * killed mid-write left half a JSON document, which all() reads back as an
+     * empty queue -- every queued upload forgotten at once.
+     */
+    private fun replace(target: File, text: String) {
+        runCatching {
+            val tmp = File(target.parentFile, target.name + ".tmp")
+            tmp.writeText(text)
+            if (!tmp.renameTo(target)) { target.writeText(text); tmp.delete() }
+        }
     }
 
     private companion object {
         const val MAX_FAILURES = 20
+        val LOCK = Any()
     }
 }
 
@@ -141,12 +163,22 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         runCatching { api.status() }.getOrElse { return Result.retry() }
 
         ensureChannel(applicationContext)
-        // The batch's size, taken once: files leave the queue as they finish,
-        // so measuring per item would make the notification go backwards.
-        val batchBytes = queue.all().sumOf { it.size.coerceAtLeast(0) }
+        // The batch's size: files leave the queue as they finish, so it only
+        // ever grows -- when something is added mid-run -- and the
+        // notification never goes backwards.
+        var batchBytes = queue.all().sumOf { it.size.coerceAtLeast(0) }
         var doneBytes = 0L
 
-        for (item in queue.all()) {
+        /*
+         * Drained, not iterated. A snapshot taken at the start missed every
+         * file shared while the batch ran, and enqueue()'s KEEP made that
+         * share a no-op -- so those files sat in the queue with no worker
+         * coming until the next share or launch. Every pass below either
+         * removes the item or ends the run, so this always terminates.
+         */
+        while (true) {
+            val item = queue.all().firstOrNull() ?: break
+            batchBytes = maxOf(batchBytes, doneBytes + queue.all().sumOf { it.size.coerceAtLeast(0) })
             val source = File(item.cachePath)
             if (!source.isFile) {
                 queue.remove(item.id)
