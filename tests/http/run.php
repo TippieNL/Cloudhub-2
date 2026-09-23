@@ -318,6 +318,43 @@ scenario('the subtitles beside a video are found and converted', function () use
 });
 
 /*
+ * Thumbnails through the real route: an image too large to decode is refused
+ * from its header -- a 10000x10000 PNG of 285 KB took one request to 704 MB --
+ * and a phone photo stands the way its EXIF says it was held.
+ */
+scenario('a thumbnail is upright and never a memory bomb', function () use ($client, $scratch) {
+    if (!extension_loaded('gd') || !function_exists('exif_read_data')) { check('GD and EXIF are available', true); return; }
+    $put = function (string $name, string $bytes) use ($client, $scratch): void {
+        $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name, 'size' => strlen($bytes),
+            'uploadId' => 'thumb'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $client->putChunk((string)($init->json['id'] ?? ''), 0, $bytes);
+        $client->post('/api/uploads/complete', ['id' => (string)($init->json['id'] ?? '')]);
+    };
+
+    // 8000x8000 one-bit PNG: 8 KB on disk, 64 megapixels once decoded.
+    $row = "\0".str_repeat("\0", 1000);
+    $chunk = fn(string $type, string $data): string => pack('N', strlen($data)).$type.$data.pack('N', crc32($type.$data));
+    $put('bomb.png', "\x89PNG\r\n\x1a\n".$chunk('IHDR', pack('NNCCCCC', 8000, 8000, 1, 0, 0, 0, 0))
+        .$chunk('IDAT', (string)gzcompress(str_repeat($row, 8000), 9)).$chunk('IEND', ''));
+    $bomb = $client->get('/api/thumbnail', ['path' => $scratch.'/bomb.png']);
+    check('an image too large to decode is refused from its header', $bomb->status === 422, $bomb->describe());
+
+    // 40x20, left half red, carrying EXIF Orientation 6 (held upright).
+    $im = imagecreatetruecolor(40, 20);
+    imagefill($im, 0, 0, imagecolorallocate($im, 0, 0, 255));
+    imagefilledrectangle($im, 0, 0, 19, 19, imagecolorallocate($im, 255, 0, 0));
+    ob_start(); imagejpeg($im, null, 95); $jpeg = (string)ob_get_clean();
+    $app1 = "Exif\0\0II*\0".pack('V', 8).pack('v', 1).pack('vvVv', 0x0112, 3, 1, 6)."\0\0".pack('V', 0);
+    $put('portrait.jpg', substr($jpeg, 0, 2)."\xFF\xE1".pack('n', strlen($app1) + 2).$app1.substr($jpeg, 2));
+    $thumb = $client->get('/api/thumbnail', ['path' => $scratch.'/portrait.jpg']);
+    $shown = $thumb->status === 200 ? @imagecreatefromstring($thumb->body) : false;
+    check('a portrait photo gets a portrait thumbnail', $shown !== false && imagesx($shown) < imagesy($shown),
+        $shown ? imagesx($shown).'x'.imagesy($shown) : $thumb->describe());
+    check('turned the right way', $shown !== false && (imagecolorat($shown, intdiv(imagesx($shown), 2), 2) >> 16 & 0xFF) > 200,
+        'top pixel is not the red half');
+});
+
+/*
  * The web client asks with HEAD before it hands a download to the browser's
  * own download manager, so a missing file is reported instead of saved as a
  * "file" holding a JSON error -- and the HEAD must not read the file.
