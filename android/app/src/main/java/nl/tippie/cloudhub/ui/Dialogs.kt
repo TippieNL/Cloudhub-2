@@ -131,15 +131,25 @@ fun FileActionsSheet(
     onDelete: () -> Unit,
     onAddSubtitles: () -> Unit,
     onProperties: () -> Unit,
+    /** Whether the file is starred; the action reads the other way. */
+    favorite: Boolean = false,
+    onFavorite: () -> Unit = {},
+    /** Offered where a file is shown away from its folder, as on Favorites. */
+    onShowInFolder: (() -> Unit)? = null,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Text(entry.name, style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp), maxLines = 2)
         HorizontalDivider()
         SheetAction(Icons.Default.OpenInNew, if (entry.isDirectory) "Open" else "Preview", onOpen)
+        onShowInFolder?.let { SheetAction(Icons.Default.FolderOpen, "Show in folder", it) }
         if (!entry.isDirectory) {
             SheetAction(Icons.Default.Download, "Download", onDownload)
             SheetAction(Icons.Default.Link, "Share link", onShare)
+            // Anyone's, whatever their role: a star changes nothing but their
+            // own Favorites.
+            if (favorite) SheetAction(Icons.Default.StarBorder, "Remove from favorites", onFavorite)
+            else SheetAction(Icons.Default.Star, "Add to favorites", onFavorite)
         }
         if (canWrite) {
             // Only for a video: a subtitle beside anything else is a text file

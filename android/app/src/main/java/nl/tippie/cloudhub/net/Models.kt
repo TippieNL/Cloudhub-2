@@ -134,6 +134,29 @@ data class ShareLink(
     val expiresAt: String? = null,
 )
 
+/**
+ * The account's favorites, from /api/favorites, most recently starred first.
+ *
+ * Each is an ordinary listing row -- the server builds them with the same
+ * FileService::entry() a folder listing uses -- so every card, viewer and
+ * player takes one without knowing where it came from.
+ */
+@Serializable
+data class FavoritesListing(
+    val favorites: List<FileEntry> = emptyList(),
+    /** How many one account may keep. */
+    val limit: Int = 0,
+)
+
+/** The answer to starring or unstarring, with the path as the server stored it. */
+@Serializable
+data class FavoriteResult(
+    val success: Boolean = false,
+    val favorite: Boolean = false,
+    val path: String = "",
+    val message: String = "",
+)
+
 @Serializable
 data class SimpleResult(
     val success: Boolean = false,

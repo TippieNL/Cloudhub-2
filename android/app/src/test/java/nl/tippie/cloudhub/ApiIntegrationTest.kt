@@ -298,6 +298,47 @@ class ApiIntegrationTest {
         assertEquals(emptyList(), empty.groups)
     }
 
+    @Test fun `17 a file is starred, listed and unstarred`() = runBlocking {
+        requireServer()
+        put("$scratch/starred.jpg", "not really a photo".toByteArray())
+        val added = api.addFavorite("$scratch/starred.jpg")
+        assertTrue(added.success && added.favorite)
+        // A second star is not an error, and does not list the file twice.
+        assertTrue(api.addFavorite("$scratch/starred.jpg").success)
+
+        val listed = api.favorites().favorites.filter { it.path == "$scratch/starred.jpg" }
+        assertEquals(1, listed.size)
+        // An ordinary listing row: the cards and viewers take it as it is.
+        assertEquals("starred.jpg", listed.single().name)
+        assertEquals(FileEntry.Kind.IMAGE, listed.single().kind)
+
+        assertFalse(api.removeFavorite("$scratch/starred.jpg").favorite)
+        assertFalse(api.favorites().favorites.any { it.path == "$scratch/starred.jpg" })
+    }
+
+    @Test fun `18 a star follows its file when it is renamed`() = runBlocking {
+        requireServer()
+        put("$scratch/before.txt", "follows".toByteArray())
+        api.addFavorite("$scratch/before.txt")
+        api.rename("$scratch/before.txt", "$scratch/after.txt")
+        val paths = api.favorites().favorites.map { it.path }
+        assertTrue("$scratch/after.txt" in paths, "the star did not follow the rename: $paths")
+        assertFalse("$scratch/before.txt" in paths)
+        // And it is removed under the name it has now.
+        assertFalse(api.removeFavorite("$scratch/after.txt").favorite)
+        assertFalse(api.favorites().favorites.any { it.path == "$scratch/after.txt" })
+    }
+
+    @Test fun `19 a folder cannot be starred`() = runBlocking {
+        requireServer()
+        try {
+            api.addFavorite(scratch)
+            fail("a folder was starred")
+        } catch (e: ApiError) {
+            assertEquals(400, e.status)
+        }
+    }
+
     @Test fun `99 clean up`() = runBlocking {
         requireServer()
         api.delete(scratch)

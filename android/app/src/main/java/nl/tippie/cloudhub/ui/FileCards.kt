@@ -13,6 +13,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -239,6 +241,7 @@ fun FileTile(
     onLongPress: () -> Unit,
     onMenu: () -> Unit,
     modifier: Modifier = Modifier,
+    favorite: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -260,7 +263,10 @@ fun FileTile(
             ),
         container = if (selected) MaterialTheme.colorScheme.primaryContainer
         else MaterialTheme.colorScheme.surface,
-        preview = { Preview(api, entry, Modifier.fillMaxSize()) },
+        preview = {
+            Preview(api, entry, Modifier.fillMaxSize())
+            if (favorite) FavoriteBadge(Modifier.align(Alignment.TopEnd).padding(8.dp))
+        },
         body = {
             Text(
                 entry.name,
@@ -296,6 +302,7 @@ fun FileRow(
     onLongPress: () -> Unit,
     onMenu: () -> Unit,
     modifier: Modifier = Modifier,
+    favorite: Boolean = false,
 ) {
     Row(
         modifier
@@ -329,9 +336,27 @@ fun FileRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if (favorite) FavoriteBadge()
         IconButton(onClick = onMenu) { Icon(Icons.Default.MoreVert, "Actions for ${entry.name}") }
     }
 }
+
+/**
+ * A starred file's mark.
+ *
+ * Gold on a dark disc, the way the play mark on a video sits over its frame:
+ * a bare gold star vanishes against a bright photo, and against a white row in
+ * the light theme it falls under the contrast a symbol needs to be seen.
+ */
+@Composable
+fun FavoriteBadge(modifier: Modifier = Modifier) {
+    Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.5f), modifier = modifier.size(26.dp)) {
+        Icon(Icons.Default.Star, "Favorite", tint = FAVORITE_GOLD, modifier = Modifier.padding(4.dp))
+    }
+}
+
+/** The star's gold, shared by the badge, the sheet and the viewers. */
+val FAVORITE_GOLD = Color(0xFFF2C14E)
 
 /* ---- previews ------------------------------------------------------------ */
 

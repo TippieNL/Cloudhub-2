@@ -109,6 +109,8 @@ fun PlayerScreen(
     settings: Settings,
     entry: FileEntry,
     onBack: () -> Unit,
+    favorite: Boolean = false,
+    onToggleFavorite: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val activity = context.findActivity()
@@ -343,10 +345,14 @@ fun PlayerScreen(
                     navigationIcon = {
                         IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
                     },
+                    actions = {
+                        onToggleFavorite?.let { FavoriteToggle(starred = favorite, onClick = it) }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = Color.Black.copy(alpha = 0.6f),
                         titleContentColor = Color.White,
                         navigationIconContentColor = Color.White,
+                        actionIconContentColor = Color.White,
                     ),
                 )
             }

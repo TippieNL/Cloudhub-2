@@ -38,7 +38,27 @@ function dev_content_type(string $file): string
     return $byExtension[$extension] ?? (mime_content_type($file) ?: 'application/octet-stream');
 }
 
-
+/**
+ * Tell the application which script it is really running.
+ *
+ * PHP 8.2's built-in server hands a request whose path ends in an extension --
+ * /share/TOKEN/holiday.jpg, /webdav/Photos/beach.jpg -- to this router with
+ * SCRIPT_NAME set to that path and SCRIPT_FILENAME set to this file, as if the
+ * URL named a script. Http::basePath() reads the install folder from
+ * SCRIPT_NAME, so it took "/share/TOKEN" for one and stripped it: every share
+ * link ending in its file's name, and every WebDAV file, answered "Not found".
+ * PHP 8.3 and later report the front controller, as Apache and nginx always
+ * have. Under this router the application sits at the root of the server, so
+ * that is what it is told -- in the form the later versions use, and only when
+ * the server has named the router itself.
+ */
+function dev_front_controller(string $uri): void
+{
+    if (realpath((string)($_SERVER['SCRIPT_FILENAME'] ?? '')) !== __FILE__) return;
+    $_SERVER['SCRIPT_FILENAME'] = rtrim((string)($_SERVER['DOCUMENT_ROOT'] ?? __DIR__), '/').'/index.php';
+    $_SERVER['SCRIPT_NAME'] = '/index.php';
+    $_SERVER['PHP_SELF'] = '/index.php'.$uri;
+}
 
 /*
  * Public share links, before the deny rules.
@@ -50,6 +70,7 @@ function dev_content_type(string $file): string
  * the project root, so there is nothing here for those rules to protect.
  */
 if (preg_match('#^/share/[A-Za-z0-9_-]{20,128}(?:/|$)#', $uri)) {
+    dev_front_controller($uri);
     require __DIR__ . '/public/index.php';
     return true;
 }
@@ -102,4 +123,5 @@ if ($uri !== '/') {
 }
 
 // Otherwise, boot the application.
+dev_front_controller($uri);
 require __DIR__ . '/public/index.php';

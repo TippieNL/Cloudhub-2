@@ -33,6 +33,7 @@
         <strong>◉ File Server</strong>
         <nav>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>" data-route="/">Files</a>
+            <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Ffavorites" data-route="/favorites">Favorites</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fservers" data-route="/servers">Servers</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Ftrash" data-route="/trash">Trash</a>
             <a href="<?= htmlspecialchars($frontController, ENT_QUOTES) ?>?route=%2Fbrowse" data-route="/browse">Browse</a>
@@ -249,6 +250,20 @@
             </div>
         </div>
         <div id="file-context" class="context-menu" hidden role="menu"></div>
+
+        <section id="favorites-page" hidden>
+            <div class="toolbar">
+                <h2>Favorites</h2>
+                <div class="search-scope favorites-filter" role="group" aria-label="Show">
+                    <button type="button" data-fav-filter="all" class="active" aria-pressed="true">All</button>
+                    <button type="button" data-fav-filter="image" aria-pressed="false">Photos</button>
+                    <button type="button" data-fav-filter="video" aria-pressed="false">Videos</button>
+                    <button type="button" data-fav-filter="other" aria-pressed="false">Other</button>
+                </div>
+            </div>
+            <p id="favorites-note" class="muted" role="status" aria-live="polite"></p>
+            <div id="favorites-list" class="file-grid"></div>
+        </section>
 
         <section id="servers-page" hidden>
             <div class="toolbar">

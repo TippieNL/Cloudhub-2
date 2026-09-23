@@ -22,7 +22,13 @@ const S = {
     // walk the tree. Results live separately from S.files so leaving a search
     // restores the folder listing without another request.
     scope: 'folder',
-    results: null
+    results: null,
+    // Paths this account has starred. The folder listing does not carry the
+    // flag -- it touches no database on the server -- so the set is read once
+    // from /api/favorites and kept in step with every star and unstar.
+    favorites: new Set(),
+    // Which screen this page load is showing; route() sets it.
+    page: '/'
 };
 const $ = s => document.querySelector(s);
 const toast = m => {
@@ -99,8 +105,11 @@ $('#logout').addEventListener('click', async () => {
     } catch {}
     S.csrf = '';
     // Cached listings and kept files belong to the account that was signed in;
-    // the next person on this device must not inherit them.
+    // the next person on this device must not inherit them -- nor its stars.
     navigator.serviceWorker?.controller?.postMessage({ type: 'sign-out' });
+    S.favorites = new Set();
+    FAV.entries = [];
+    paintStars();
     $('#login').style.display = 'flex';
 });
 
@@ -220,11 +229,17 @@ function askWorker(message) {
     });
 }
 
+/** Redraw whichever list this page is showing. */
+function renderCurrent() {
+    if (S.page === '/favorites') renderFavorites();
+    else renderFiles();
+}
+
 async function refreshOfflineSet() {
     const res = await askWorker({ type: 'list-offline' });
     if (!res?.ok) return;
     S.offlinePaths = new Set(res.result);
-    renderFiles();
+    renderCurrent();
 }
 
 async function keepOffline(path) {
@@ -235,7 +250,7 @@ async function keepOffline(path) {
     S.offlinePaths = new Set(res.result.kept);
     // A file that could not be stored must not be shown as if it had been.
     toast(res.result.failed.length ? 'That file could not be saved for offline use' : 'Available offline');
-    renderFiles();
+    renderCurrent();
 }
 
 async function dropOffline(path) {
@@ -243,7 +258,165 @@ async function dropOffline(path) {
     if (!res?.ok) return;
     S.offlinePaths = new Set(res.result.kept);
     toast('Removed the offline copy');
-    renderFiles();
+    renderCurrent();
+}
+
+/* ---- Favorites ------------------------------------------------------------
+ *
+ * A star is the account's own: a viewer can star a file as readily as an
+ * editor, and nobody else sees it. The server keeps a favorite pointed at its
+ * file through renames, moves and the trash, so the Favorites page never
+ * shows a file under a path it no longer has.
+ */
+const FAV = {
+    entries: [],
+    filter: 'all',
+    // Stars with a request in flight. A second tap before the first answer
+    // would otherwise send the same request again rather than the opposite one.
+    pending: new Set(),
+    // Bumped by every star and unstar, so a list fetched before one can tell
+    // it is out of date rather than paint the old stars back.
+    edits: 0,
+};
+
+/** The favorites as the server has them, fetched again if a star changes meanwhile. */
+async function fetchFavorites() {
+    for (;;) {
+        const edits = FAV.edits;
+        const d = await (await api('/api/favorites')).json();
+        if (edits === FAV.edits) return d.favorites || [];
+    }
+}
+
+const favoriteLabel = (path, on) => `${on ? 'Remove' : 'Add'} ${path.split('/').pop()} ${on ? 'from' : 'to'} favorites`;
+
+function starButton(path) {
+    const on = S.favorites.has(path);
+    return `<button type="button" class="fav-button${on ? ' on' : ''}" data-fav="${encodeURIComponent(path)}" aria-pressed="${on}" title="${on ? 'Remove from favorites' : 'Add to favorites'}" aria-label="${esc(favoriteLabel(path, on))}">${on ? '★' : '☆'}</button>`;
+}
+
+/** Bring every star on the page in line with S.favorites, without re-rendering. */
+function paintStars() {
+    document.querySelectorAll('[data-fav]').forEach(b => {
+        const path = decodeURIComponent(b.dataset.fav);
+        const on = S.favorites.has(path);
+        b.classList.toggle('on', on);
+        b.textContent = on ? '★' : '☆';
+        b.title = on ? 'Remove from favorites' : 'Add to favorites';
+        b.setAttribute('aria-pressed', String(on));
+        b.setAttribute('aria-label', favoriteLabel(path, on));
+    });
+}
+
+/**
+ * Which files are starred, for the stars on the folder listing.
+ *
+ * Quiet on failure: without it every star simply reads as off, and the next
+ * one pressed reports the real problem.
+ */
+async function loadFavoriteSet() {
+    try {
+        FAV.entries = await fetchFavorites();
+        S.favorites = new Set(FAV.entries.map(f => f.path));
+        paintStars();
+    } catch (e) {
+        console.warn('Cloud File Hub favorites:', e);
+    }
+}
+
+async function toggleFavorite(path) {
+    if (FAV.pending.has(path)) return;
+    const on = !S.favorites.has(path);
+    FAV.pending.add(path);
+    let d;
+    try {
+        d = await (await api('/api/favorites', { method: on ? 'POST' : 'DELETE', body: { path } })).json();
+    } catch (e) {
+        toast(e.message);
+        return;
+    } finally {
+        FAV.pending.delete(path);
+    }
+    FAV.edits++;
+    if (on) {
+        S.favorites.add(d.path || path);
+    } else {
+        S.favorites.delete(path);
+        FAV.entries = FAV.entries.filter(f => f.path !== path);
+    }
+    toast(d.message || (on ? 'Added to favorites' : 'Removed from favorites'));
+    paintStars();
+    // Unstarring on the Favorites page takes the card away; starring again --
+    // from the preview dialog -- has to bring it back, and only the server has
+    // the row for it. Everywhere else the star changes in place, so no
+    // thumbnail is reloaded.
+    if (S.page === '/favorites') {
+        if (on) await loadFavorites();
+        else renderFavorites();
+    }
+}
+
+const FAVORITE_KINDS = { all: 'All', image: 'Photos', video: 'Videos', other: 'Other' };
+
+function favoriteKind(f) {
+    const ext = (f.name.includes('.') ? f.name.split('.').pop() : '').toLowerCase();
+    if (CARD_IMAGE_EXT.has(ext)) return 'image';
+    if (CARD_VIDEO_EXT.has(ext)) return 'video';
+    return 'other';
+}
+
+async function loadFavorites() {
+    const note = $('#favorites-note');
+    note.textContent = 'Loading…';
+    try {
+        FAV.entries = await fetchFavorites();
+        S.favorites = new Set(FAV.entries.map(f => f.path));
+    } catch (e) {
+        note.textContent = e.message;
+        $('#favorites-list').innerHTML = '';
+        return;
+    }
+    renderFavorites();
+}
+
+function renderFavorites() {
+    const counts = { all: FAV.entries.length, image: 0, video: 0, other: 0 };
+    for (const f of FAV.entries) counts[favoriteKind(f)]++;
+    // A filter that has emptied -- the last video unstarred -- falls back to
+    // everything rather than leaving an empty page behind a pressed button,
+    // and a filter with nothing in it cannot be pressed at all.
+    if (counts[FAV.filter] === 0) FAV.filter = 'all';
+
+    document.querySelectorAll('[data-fav-filter]').forEach(b => {
+        const kind = b.dataset.favFilter;
+        b.textContent = `${FAVORITE_KINDS[kind]} (${counts[kind]})`;
+        b.classList.toggle('active', kind === FAV.filter);
+        b.setAttribute('aria-pressed', String(kind === FAV.filter));
+        b.disabled = kind !== 'all' && counts[kind] === 0;
+    });
+
+    const shown = FAV.entries.filter(f => FAV.filter === 'all' || favoriteKind(f) === FAV.filter);
+    $('#favorites-note').textContent = shown.length
+        ? `${shown.length} favorite${shown.length === 1 ? '' : 's'}, most recently starred first.`
+        : 'No favorites yet. Star a file with ☆ and it will be kept here.';
+
+    const list = $('#favorites-list');
+    list.className = S.view === 'list' ? 'file-list-view' : 'file-grid';
+    list.innerHTML = shown.map(f => fileCard(f, { selectable: false, showFolder: true })).join('');
+    wireCards(list);
+}
+
+document.querySelectorAll('[data-fav-filter]').forEach(b => b.addEventListener('click', () => {
+    FAV.filter = b.dataset.favFilter;
+    renderFavorites();
+}));
+
+/** Open the Files page on the folder that holds a file. */
+function showInFolder(path) {
+    const parent = path.substring(0, path.lastIndexOf('/')) || '/';
+    // The Files page starts where this tab last was, so that is set first.
+    try { sessionStorage.setItem('cfh_path', parent); } catch {}
+    location.href = FRONT;
 }
 
 /* ---- Camera and gallery -------------------------------------------------
@@ -341,8 +514,9 @@ function parentLabel(path) {
     return parent === '' ? 'Root' : parent;
 }
 
-/** Whatever the grid is currently showing: a folder listing or search results. */
+/** Whatever the grid is currently showing: favorites, a folder listing or search results. */
 function currentEntries() {
+    if (S.page === '/favorites') return FAV.entries;
     return S.results ? S.results.entries : S.files;
 }
 
@@ -650,53 +824,75 @@ function initVideoThumbnails() {
     }
 }
 
+const CARD_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif']);
+const CARD_VIDEO_EXT = new Set(['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts']);
+const CARD_AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac']);
+
 /** Render files in either responsive grid or compact list mode. */
 function renderFiles() {
     const list = $('#file-list');
-    const imageExt = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif']);
-    const videoExt = new Set(['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts']);
-    const audioExt = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac']);
     list.className = S.view === 'list' ? 'file-list-view' : 'file-grid';
-    list.innerHTML = sortedFiles().map(f => {
-        const encoded = encodeURIComponent(f.path);
-        const ext = (f.name.includes('.') ? f.name.split('.').pop() : '').toLowerCase();
-        // "Play" on a text file reads like a bug. Label the action for what it
-        // actually does with this file.
-        const playable = videoExt.has(ext) || audioExt.has(ext);
-        const preview = f.isDirectory ? '' : `<button data-preview="${encoded}">${playable ? 'Play' : 'Preview'}</button>`;
-        const thumbnailUrl = appUrl('/api/thumbnail?path=' + encodeURIComponent(f.path) + '&v=' + encodeURIComponent(f.modified || ''));
-        let thumb = '<span class="file-icon">📄</span>';
+    list.innerHTML = sortedFiles().map(f => fileCard(f, { selectable: true, showFolder: !!S.results })).join('');
+    wireCards(list);
+    updateSelectionUI();
+}
 
-        if (f.isDirectory) {
-            thumb = '<span class="folder-icon">📁</span>';
-        } else if (imageExt.has(ext)) {
-            thumb = `<button class="thumb-preview" data-preview="${encoded}" aria-label="Preview ${esc(f.name)}">
-                <img src="${thumbnailUrl}" alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
-            </button>`;
-        } else if (videoExt.has(ext)) {
-            const streamUrl = appUrl('/api/files/stream?path=' + encodeURIComponent(f.path));
-            // The server serves a cached video frame from the same endpoint as
-            // image thumbnails once one has been contributed, so try that first
-            // and only fall back to decoding the video in the browser.
-            thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" data-thumb-key="${esc(videoThumbKey(f))}" data-thumb-path="${encoded}" data-thumb-src="${thumbnailUrl}" data-has-thumb="${f.hasThumbnail ? 1 : 0}" aria-label="Play ${esc(f.name)}">
-                <img alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
-                <span class="video-thumb-status" aria-hidden="true">Generating thumbnail…</span>
-                <span class="video-thumb-play" aria-hidden="true">▶</span>
-            </button>`;
-        } else if (audioExt.has(ext)) {
-            thumb = '<span class="file-icon">🎵</span>';
-        }
+/**
+ * One file or folder as a card.
+ *
+ * Shared by the folder listing and the Favorites page so a file looks and
+ * behaves the same wherever it is shown. `selectable` adds the checkbox the
+ * selection bar works from; `showFolder` names the folder a file is in, for
+ * lists that span several.
+ */
+function fileCard(f, { selectable = true, showFolder = false } = {}) {
+    const imageExt = CARD_IMAGE_EXT, videoExt = CARD_VIDEO_EXT, audioExt = CARD_AUDIO_EXT;
+    const encoded = encodeURIComponent(f.path);
+    const ext = (f.name.includes('.') ? f.name.split('.').pop() : '').toLowerCase();
+    // "Play" on a text file reads like a bug. Label the action for what it
+    // actually does with this file.
+    const playable = videoExt.has(ext) || audioExt.has(ext);
+    const preview = f.isDirectory ? '' : `<button data-preview="${encoded}">${playable ? 'Play' : 'Preview'}</button>`;
+    const thumbnailUrl = appUrl('/api/thumbnail?path=' + encodeURIComponent(f.path) + '&v=' + encodeURIComponent(f.modified || ''));
+    let thumb = '<span class="file-icon">📄</span>';
 
-        return `<article class="file" data-path="${encoded}" tabindex="0">
-        <div class="file-select"><input type="checkbox" data-sel="${encoded}" aria-label="Select ${esc(f.name)}"></div>
-        <div class="thumb">${thumb}</div>
-        <div class="file-info"><div class="name">${esc(f.name)}${S.offlinePaths.has(f.path) ? ' <span class="offline-badge" title="Available offline">&#8681;</span>' : ''}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}${S.results ? ` · in ${esc(parentLabel(f.path))}` : ''}</div></div>
-        <div class="actions">${f.isDirectory ? `<button data-open="${encoded}">Open</button>` : `${preview}<button data-down="${encoded}">Download</button><button data-share="${encoded}">Share</button>`}<button data-menu="${encoded}" aria-label="More actions">⋮</button></div>
-        </article>`;
-    }).join('');
+    if (f.isDirectory) {
+        thumb = '<span class="folder-icon">📁</span>';
+    } else if (imageExt.has(ext)) {
+        thumb = `<button class="thumb-preview" data-preview="${encoded}" aria-label="Preview ${esc(f.name)}">
+            <img src="${thumbnailUrl}" alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
+        </button>`;
+    } else if (videoExt.has(ext)) {
+        const streamUrl = appUrl('/api/files/stream?path=' + encodeURIComponent(f.path));
+        // The server serves a cached video frame from the same endpoint as
+        // image thumbnails once one has been contributed, so try that first
+        // and only fall back to decoding the video in the browser.
+        thumb = `<button class="thumb-preview video-thumb" data-preview="${encoded}" data-video-thumb="${streamUrl}" data-thumb-key="${esc(videoThumbKey(f))}" data-thumb-path="${encoded}" data-thumb-src="${thumbnailUrl}" data-has-thumb="${f.hasThumbnail ? 1 : 0}" aria-label="Play ${esc(f.name)}">
+            <img alt="" width="300" height="300" loading="lazy" decoding="async" fetchpriority="low">
+            <span class="video-thumb-status" aria-hidden="true">Generating thumbnail…</span>
+            <span class="video-thumb-play" aria-hidden="true">▶</span>
+        </button>`;
+    } else if (audioExt.has(ext)) {
+        thumb = '<span class="file-icon">🎵</span>';
+    }
 
+    return `<article class="file" data-path="${encoded}" tabindex="0">
+    ${selectable ? `<div class="file-select"><input type="checkbox" data-sel="${encoded}" aria-label="Select ${esc(f.name)}"></div>` : ''}
+    <div class="thumb">${thumb}</div>
+    <div class="file-info"><div class="name">${esc(f.name)}${S.offlinePaths.has(f.path) ? ' <span class="offline-badge" title="Available offline">&#8681;</span>' : ''}</div><div class="meta">${f.isDirectory ? 'Folder' : fmt(f.size)} · ${new Date(f.modified).toLocaleString()}${showFolder ? ` · in ${esc(parentLabel(f.path))}` : ''}</div></div>
+    <div class="actions">${f.isDirectory ? `<button data-open="${encoded}">Open</button>` : `${starButton(f.path)}${preview}<button data-down="${encoded}">Download</button><button data-share="${encoded}">Share</button>`}<button data-menu="${encoded}" aria-label="More actions">⋮</button></div>
+    </article>`;
+}
+
+/**
+ * Give a container's cards their behaviour.
+ *
+ * Scoped to the container rather than the document, so a list rendered twice,
+ * or two lists on one page, never gains a second listener on the same button.
+ */
+function wireCards(root) {
     // Images still use the authenticated server-side image thumbnail endpoint.
-    document.querySelectorAll('.thumb-preview:not(.video-thumb) img').forEach(img => {
+    root.querySelectorAll('.thumb-preview:not(.video-thumb) img').forEach(img => {
         img.addEventListener('error', () => {
             const button = img.closest('.thumb-preview');
             if (!button) return;
@@ -713,40 +909,46 @@ function renderFiles() {
 
     initVideoThumbnails();
 
-    document.querySelectorAll('[data-open]').forEach(b => {
+    root.querySelectorAll('[data-open]').forEach(b => {
         b.addEventListener('click', e => {
             e.stopPropagation();
             loadFiles(decodeURIComponent(b.dataset.open));
         });
     });
-    document.querySelectorAll('[data-preview]').forEach(b => {
+    root.querySelectorAll('[data-preview]').forEach(b => {
         b.addEventListener('click', e => {
             e.stopPropagation();
             openPreview(decodeURIComponent(b.dataset.preview));
         });
     });
-    document.querySelectorAll('[data-down]').forEach(b => {
+    root.querySelectorAll('[data-down]').forEach(b => {
         b.addEventListener('click', e => {
             e.stopPropagation();
             download(decodeURIComponent(b.dataset.down));
         });
     });
-    document.querySelectorAll('[data-share]').forEach(b => {
+    root.querySelectorAll('[data-share]').forEach(b => {
         b.addEventListener('click', e => {
             e.stopPropagation();
             share(decodeURIComponent(b.dataset.share));
         });
     });
-    document.querySelectorAll('[data-menu]').forEach(b => {
+    root.querySelectorAll('[data-fav]').forEach(b => {
+        b.addEventListener('click', e => {
+            e.stopPropagation();
+            toggleFavorite(decodeURIComponent(b.dataset.fav));
+        });
+    });
+    root.querySelectorAll('[data-menu]').forEach(b => {
         b.addEventListener('click', e => {
             e.stopPropagation();
             showContextMenu(decodeURIComponent(b.dataset.menu), e.clientX, e.clientY);
         });
     });
-    document.querySelectorAll('[data-sel]').forEach(c => {
+    root.querySelectorAll('[data-sel]').forEach(c => {
         c.addEventListener('change', () => toggleSelection(decodeURIComponent(c.dataset.sel), c.checked));
     });
-    document.querySelectorAll('.file').forEach(card => {
+    root.querySelectorAll('.file').forEach(card => {
         card.addEventListener('contextmenu', e => {
             e.preventDefault();
             showContextMenu(decodeURIComponent(card.dataset.path), e.clientX, e.clientY);
@@ -757,7 +959,6 @@ function renderFiles() {
             f?.isDirectory ? loadFiles(p) : openPreview(p);
         });
     });
-    updateSelectionUI();
 }
 
 /** Bumped per preview, so a slow response cannot fill a dialog opened after it. */
@@ -793,7 +994,7 @@ async function openPreview(path) {
         body = `<div class="preview-unsupported"><div class="preview-file-icon">📄</div><p>No inline preview is available for this file type.</p><button data-preview-download>Download file</button></div>`;
     }
 
-    showPreviewDialog(name, body);
+    showPreviewDialog(name, body, path);
 
     // Where an asynchronous preview may still write: gone if the dialog was
     // closed, or replaced by a newer preview, while the request was running.
@@ -859,13 +1060,15 @@ async function openPreview(path) {
 }
 
 /** Creates the modal shell used by all preview types. */
-function showPreviewDialog(name, body) {
+function showPreviewDialog(name, body, path) {
     closePreview();
     const overlay = document.createElement('div');
     overlay.id = 'preview-overlay';
     overlay.className = 'preview-overlay';
-    overlay.innerHTML = `<section class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title"><header class="preview-header"><h2 id="preview-title">${esc(name)}</h2><button id="preview-close" class="preview-close" aria-label="Close preview">×</button></header><div id="preview-body" class="preview-body">${body}</div></section>`;
+    // Starred from here too: looking at the photo is when you decide.
+    overlay.innerHTML = `<section class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title"><header class="preview-header"><h2 id="preview-title">${esc(name)}</h2>${path ? starButton(path) : ''}<button id="preview-close" class="preview-close" aria-label="Close preview">×</button></header><div id="preview-body" class="preview-body">${body}</div></section>`;
     document.body.appendChild(overlay);
+    overlay.querySelector('[data-fav]')?.addEventListener('click', () => toggleFavorite(path));
     $('#preview-close').addEventListener('click', closePreview);
     overlay.addEventListener('click', e => {
         if (e.target === overlay) closePreview();
@@ -1493,7 +1696,13 @@ function showContextMenu(path, x, y) {
     const f = currentEntries().find(item => item.path === path);
     const menu = $('#file-context');
     if (!f) return;
-    menu.innerHTML = `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}${f.isDirectory || !isVideoPath(path) ? '' : '<button data-cmd="subtitles">Add subtitles…</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : '<button data-cmd="versions">Previous versions</button>'}${f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>')}<button data-cmd="delete" class="danger-text">Delete</button>`;
+    const star = f.isDirectory ? '' : `<button data-cmd="favorite">${S.favorites.has(path) ? 'Remove from favorites' : 'Add to favorites'}</button>`;
+    const offline = f.isDirectory ? '' : (S.offlinePaths.has(path) ? '<button data-cmd="unkeep">Remove offline copy</button>' : '<button data-cmd="keep">Keep offline</button>');
+    // Favorites is a place to find a file, not to manage it: renaming, moving
+    // and deleting stay in the folder the file lives in, one click away.
+    menu.innerHTML = S.page === '/favorites'
+        ? `<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button><button data-cmd="reveal">Show in folder</button>${offline}${star}`
+        : `${f.isDirectory ? '<button data-cmd="open">Open</button>' : '<button data-cmd="preview">Preview</button><button data-cmd="download">Download</button><button data-cmd="share">Share</button>'}${star}${f.isDirectory || !isVideoPath(path) ? '' : '<button data-cmd="subtitles">Add subtitles…</button>'}<button data-cmd="rename">Rename</button><button data-cmd="move">Move to…</button><button data-cmd="copy">Copy to…</button>${f.isDirectory ? '' : '<button data-cmd="versions">Previous versions</button>'}${offline}<button data-cmd="delete" class="danger-text">Delete</button>`;
     menu.hidden = false;
     menu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
     menu.style.top = `${Math.min(y, window.innerHeight - 240)}px`;
@@ -1504,6 +1713,8 @@ function showContextMenu(path, x, y) {
         if (c === 'preview') openPreview(path);
         if (c === 'download') download(path);
         if (c === 'share') share(path);
+        if (c === 'favorite') toggleFavorite(path);
+        if (c === 'reveal') showInFolder(path);
         if (c === 'subtitles') addSubtitles(path);
         if (c === 'rename') ren(path);
         if (c === 'move') relocate([path], 'move');
@@ -1669,7 +1880,11 @@ $('#selection-move').addEventListener('click', () => relocateSelected('move'));
 $('#selection-copy').addEventListener('click', () => relocateSelected('copy'));
 
 $('#mkdir').addEventListener('click', makeFolder);
-$('#refresh').addEventListener('click', () => loadFiles());
+$('#refresh').addEventListener('click', () => {
+    // A star added on another device shows up here too.
+    loadFavoriteSet();
+    loadFiles();
+});
 $('#search').addEventListener('input', () => {
     if (S.scope === 'all') {
         clearTimeout(searchTimer);
@@ -2485,9 +2700,13 @@ $('#duplicates-delete').addEventListener('click', async () => {
 
 async function route() {
     const p = window.CLOUDHUB_ROUTE || new URLSearchParams(location.search).get('route') || '/';
-    ['files', 'servers', 'browse', 'users', 'trash', 'storage', 'duplicates'].forEach(x => $(`#${x}-page`).hidden = true);
+    S.page = p;
+    ['files', 'favorites', 'servers', 'browse', 'users', 'trash', 'storage', 'duplicates'].forEach(x => $(`#${x}-page`).hidden = true);
     document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', (a.dataset.route || '/') === p));
-    if (p === '/trash') {
+    if (p === '/favorites') {
+        $('#favorites-page').hidden = false;
+        await loadFavorites();
+    } else if (p === '/trash') {
         $('#trash-page').hidden = false;
         await loadTrash();
     } else if (p === '/storage') {
@@ -2507,7 +2726,10 @@ async function route() {
         const a = await (await api('/api/servers/active')).json();
         $('#active-servers').innerHTML = a.map(s => `<div class="server">${esc(s.name)} · ${s.type}</div>`).join('');
     } else {
+        S.page = '/';
         $('#files-page').hidden = false;
+        // In parallel with the folder: whichever lands second paints the stars.
+        loadFavoriteSet();
         await loadFiles();
     }
 }

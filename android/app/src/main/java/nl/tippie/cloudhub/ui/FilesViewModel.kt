@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
@@ -35,6 +37,19 @@ data class FilesState(
     val searchTruncated: Boolean = false,
     val sort: Sort = Sort.NAME,
     val grid: Boolean = true,
+    /**
+     * The paths this account has starred.
+     *
+     * A folder listing does not say -- on the server it touches no database --
+     * so this is read once and kept in step with every star and unstar. Held
+     * here rather than by the Favorites screen so a star changed anywhere, in
+     * the viewer or the player, is right everywhere else too.
+     */
+    val favorites: Set<String> = emptySet(),
+    /** The same, as listing rows, most recently starred first. */
+    val favoriteEntries: List<FileEntry> = emptyList(),
+    val favoritesLoad: LoadState = LoadState.LOADING,
+    val favoritesError: String? = null,
 ) {
     enum class Sort { NAME, NEWEST, LARGEST }
 
@@ -77,10 +92,14 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
     val state: StateFlow<FilesState> = _state.asStateFlow()
 
     fun start() {
+        // A new sign-in, possibly as somebody else: the last account's stars
+        // must not decorate this one's files while the real ones load.
+        _state.update { it.copy(favorites = emptySet(), favoriteEntries = emptyList()) }
         viewModelScope.launch {
             runCatching { api.status() }
                 .onSuccess { _state.update { s -> s.copy(user = it.user) } }
             open("/")
+            loadFavorites()
         }
     }
 
@@ -117,7 +136,14 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
         }
     }
 
-    fun refresh() = open(_state.value.path)
+    /**
+     * The folder again, and the favorites with it: refresh follows every
+     * rename, move and delete, and each of those can change a starred path.
+     */
+    fun refresh() {
+        open(_state.value.path)
+        loadFavorites()
+    }
 
     /** After a failure: back to the skeleton, and try the same folder again. */
     fun retry() = open(_state.value.path)
@@ -160,6 +186,78 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
     fun setGrid(grid: Boolean) = _state.update { it.copy(grid = grid) }
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
+
+    /* ---- favorites -------------------------------------------------------- */
+
+    /**
+     * One favorites request at a time, in the order they were made.
+     *
+     * Two taps are two requests, and on separate connections the server could
+     * see the unstar before the star. And a listing fetched while a star is on
+     * its way describes the server before that star -- painted over the screen
+     * it would put back a file just unstarred.
+     */
+    private val favoriteTraffic = Mutex()
+
+    /** Bumped by every star and unstar, so a listing can tell it is out of date. */
+    private var favoriteEdits = 0
+
+    fun loadFavorites() {
+        viewModelScope.launch {
+            _state.update { it.copy(favoritesLoad = LoadState.LOADING, favoritesError = null) }
+            val edits = favoriteEdits
+            try {
+                val listing = favoriteTraffic.withLock { api.favorites() }
+                // A star changed while this was being fetched. Ask again: the
+                // next request queues behind that star's, so it will include it.
+                if (edits != favoriteEdits) {
+                    loadFavorites()
+                    return@launch
+                }
+                _state.update {
+                    it.copy(
+                        favoriteEntries = listing.favorites,
+                        favorites = listing.favorites.map { entry -> entry.path }.toSet(),
+                        favoritesLoad = LoadState.READY,
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(favoritesLoad = LoadState.FAILED, favoritesError = e.message ?: "Could not reach the server")
+                }
+            }
+        }
+    }
+
+    /**
+     * Star or unstar a file.
+     *
+     * The star changes at once -- it is the whole of the feedback, and a star
+     * that waits on the network feels broken -- and is put back, with the
+     * reason, if the server refuses.
+     */
+    fun toggleFavorite(entry: FileEntry) {
+        if (entry.isDirectory) return
+        val starring = entry.path !in _state.value.favorites
+        favoriteEdits++
+        _state.update { it.withFavorite(entry, starring) }
+        viewModelScope.launch {
+            try {
+                favoriteTraffic.withLock {
+                    if (starring) api.addFavorite(entry.path) else api.removeFavorite(entry.path)
+                }
+            } catch (e: Exception) {
+                _state.update { it.withFavorite(entry, !starring).copy(message = e.message ?: "That did not work") }
+                // Where it sat in the list is the server's to say again.
+                loadFavorites()
+            }
+        }
+    }
+
+    private fun FilesState.withFavorite(entry: FileEntry, starred: Boolean) = copy(
+        favorites = if (starred) favorites + entry.path else favorites - entry.path,
+        favoriteEntries = FavoriteRules.afterToggle(favoriteEntries, entry, starred),
+    )
 
     /* ---- actions -------------------------------------------------------- */
 

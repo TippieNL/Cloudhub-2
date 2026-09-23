@@ -1407,6 +1407,152 @@ scenario('a multipart upload never replaces a file silently', function () use ($
     check('and keeps the replaced bytes as a version', count($versions->json['versions'] ?? []) >= 1, $versions->describe());
 });
 
+/* ---- favorites ------------------------------------------------------------ */
+
+/** Upload one small file into the scratch folder for the favorites scenarios. */
+$favPut = function (string $relative, string $body) use ($client, $scratch): void {
+    // mkdir wants the parent to exist, so each level is made in turn.
+    $folder = $scratch;
+    foreach (array_filter(explode('/', dirname('/'.$relative)), 'strlen') as $part) {
+        $folder .= '/'.$part;
+        $client->post('/api/files/mkdir', ['path' => $folder]);
+    }
+    $init = $client->post('/api/uploads/init', ['targetPath' => $folder, 'name' => basename($relative),
+        'size' => strlen($body), 'uploadId' => 'fav'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    $client->putChunk($init->json['id'] ?? '', 0, $body);
+    $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+};
+/**
+ * The paths an account has starred under this run's scratch folder, in the
+ * order the server lists them -- anything the account starred before this run
+ * is not this run's business.
+ */
+$favPaths = fn(Client $who): array => array_values(array_filter(
+    array_column($who->get('/api/favorites')->json['favorites'] ?? [], 'path'),
+    fn(string $p): bool => str_starts_with($p, $scratch.'/')));
+
+scenario('a viewer keeps favorites of their own', function () use ($base, $client, $scratch, $favPut, $favPaths) {
+    // Starring is a preference, not a write to the store: the viewer who may
+    // not rename a file must still be able to star it.
+    $favPut('fav/holiday.jpg', 'not really a jpeg');
+    $favPut('fav/notes.txt', 'some notes');
+    $viewer = new Client($base);
+    $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+
+    $added = $viewer->post('/api/favorites', ['path' => $scratch.'/fav/holiday.jpg']);
+    check('a viewer can star a file', $added->ok() && ($added->json['added'] ?? null) === true, $added->describe());
+    $again = $viewer->post('/api/favorites', ['path' => $scratch.'//fav/holiday.jpg']);
+    check('starring it again is not an error, and stores nothing new',
+        $again->ok() && ($again->json['added'] ?? null) === false && ($again->json['path'] ?? '') === $scratch.'/fav/holiday.jpg',
+        $again->describe());
+
+    $listed = $viewer->get('/api/favorites');
+    $row = array_values(array_filter($listed->json['favorites'] ?? [],
+        fn(array $r): bool => ($r['path'] ?? '') === $scratch.'/fav/holiday.jpg'))[0] ?? [];
+    check('the list holds it once', $favPaths($viewer) === [$scratch.'/fav/holiday.jpg'], json_encode($favPaths($viewer)));
+    check('a favorite is described like a listing row',
+        ($row['name'] ?? '') === 'holiday.jpg' && ($row['isDirectory'] ?? true) === false
+        && ($row['size'] ?? 0) === 17 && isset($row['modified'], $row['favoritedAt']), json_encode($row));
+
+    check('another account does not see it', !in_array($scratch.'/fav/holiday.jpg', $favPaths($client), true));
+
+    $folder = $viewer->post('/api/favorites', ['path' => $scratch.'/fav']);
+    check('a folder cannot be a favorite', $folder->status === 400, $folder->describe());
+    $missing = $viewer->post('/api/favorites', ['path' => $scratch.'/fav/nothing-here.jpg']);
+    check('a missing file cannot be one', $missing->status === 404, $missing->describe());
+    $noCsrf = $viewer->postWithoutCsrf('/api/favorites', ['path' => $scratch.'/fav/notes.txt']);
+    check('starring still needs the CSRF token', in_array($noCsrf->status, [403, 419], true), $noCsrf->describe());
+
+    $removed = $viewer->delete('/api/favorites', ['path' => $scratch.'/fav/holiday.jpg']);
+    check('a viewer can unstar it', $removed->ok() && ($removed->json['removed'] ?? null) === true, $removed->describe());
+    check('and it leaves the list', $favPaths($viewer) === [], json_encode($favPaths($viewer)));
+    $gone = $viewer->delete('/api/favorites', ['path' => $scratch.'/fav/never-was.jpg']);
+    check('unstarring what is not there is not an error', $gone->ok() && ($gone->json['removed'] ?? null) === false, $gone->describe());
+
+    $anon = new Client($base);
+    check('an anonymous visitor has no favorites to read', $anon->get('/api/favorites')->status === 401);
+});
+
+scenario('a favorite follows its file wherever it goes', function () use ($client, $scratch, $favPut, $favPaths) {
+    $favPut('follow/a.txt', 'first');
+    // No extension, so the WebDAV move below is addressed by a path PHP 8.2's
+    // built-in server routes like any other: it takes a URL ending ".txt" for
+    // a script name and mangles the base path. That is a development-server
+    // quirk with tests of its own; it is not what this scenario is about.
+    $favPut('follow/b', 'second');
+    $client->post('/api/favorites', ['path' => $scratch.'/follow/a.txt']);
+    $client->post('/api/favorites', ['path' => $scratch.'/follow/b']);
+    check('the newest favorite is listed first',
+        array_slice($favPaths($client), 0, 2) === [$scratch.'/follow/b', $scratch.'/follow/a.txt'],
+        json_encode($favPaths($client)));
+
+    $client->post('/api/files/rename', ['oldPath' => $scratch.'/follow/a.txt', 'newPath' => $scratch.'/follow/renamed.txt']);
+    check('a rename carries the star', in_array($scratch.'/follow/renamed.txt', $favPaths($client), true)
+        && !in_array($scratch.'/follow/a.txt', $favPaths($client), true), json_encode($favPaths($client)));
+
+    // A folder moved takes the stars of everything inside it along.
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/follow-dest']);
+    $client->post('/api/files/move', ['paths' => [$scratch.'/follow'], 'destination' => $scratch.'/follow-dest']);
+    $moved = $favPaths($client);
+    check('a folder move carries the stars inside it',
+        in_array($scratch.'/follow-dest/follow/renamed.txt', $moved, true)
+        && in_array($scratch.'/follow-dest/follow/b', $moved, true), json_encode($moved));
+
+    $dav = $client->dav('MOVE', '/webdav'.$scratch.'/follow-dest/follow/b',
+        ['Destination: /webdav'.$scratch.'/follow-dest/follow/b-dav']);
+    check('a WebDAV move carries the star too', $dav->ok()
+        && in_array($scratch.'/follow-dest/follow/b-dav', $favPaths($client), true), $dav->describe());
+
+    // MySQL compares the path column without regard to case; the filesystem
+    // here does not. Renaming "pics" must leave the stars in "Pics" alone.
+    $favPut('case/Pics/p.txt', 'upper');
+    $favPut('case/pics/p.txt', 'lower');
+    $both = array_column($client->get('/api/files/list', ['path' => $scratch.'/case'])->json ?? [], 'name');
+    if (count($both) !== 2) echo "    (case-insensitive storage: the case check does not apply here)\n";
+    else {
+        $client->post('/api/favorites', ['path' => $scratch.'/case/Pics/p.txt']);
+        $client->post('/api/favorites', ['path' => $scratch.'/case/pics/p.txt']);
+        $client->post('/api/files/rename', ['oldPath' => $scratch.'/case/pics', 'newPath' => $scratch.'/case/lower']);
+        $after = $favPaths($client);
+        check('a rename leaves a folder differing only in case alone',
+            in_array($scratch.'/case/Pics/p.txt', $after, true) && in_array($scratch.'/case/lower/p.txt', $after, true),
+            json_encode($after));
+    }
+});
+
+scenario('a favorite survives the trash, and not a purge', function () use ($client, $scratch, $favPut, $favPaths) {
+    $favPut('trashy/keep.txt', 'starred then deleted');
+    $client->post('/api/favorites', ['path' => $scratch.'/trashy/keep.txt']);
+    $before = $client->get('/api/favorites')->json['favorites'] ?? [];
+    $starredAt = '';
+    foreach ($before as $row) if (($row['path'] ?? '') === $scratch.'/trashy/keep.txt') $starredAt = (string)$row['favoritedAt'];
+
+    $deleted = $client->delete('/api/files/delete', ['path' => $scratch.'/trashy/keep.txt']);
+    $id = (string)($deleted->json['id'] ?? '');
+    check('the file went to the trash', ($deleted->json['trashed'] ?? false) === true, $deleted->describe());
+    check('a trashed file is no longer listed', !in_array($scratch.'/trashy/keep.txt', $favPaths($client), true));
+
+    $restored = $client->post('/api/trash/restore', ['id' => $id]);
+    $after = $client->get('/api/favorites')->json['favorites'] ?? [];
+    $back = array_values(array_filter($after, fn($r) => ($r['path'] ?? '') === $scratch.'/trashy/keep.txt'));
+    check('a restore gives the star back', $restored->ok() && count($back) === 1, $restored->describe());
+    check('with the date it was first starred', ($back[0]['favoritedAt'] ?? '') === $starredAt,
+        $starredAt.' vs '.($back[0]['favoritedAt'] ?? 'none'));
+
+    // Delete it again and empty that entry: a file saved later under the same
+    // name is someone else's business and must not arrive starred.
+    $again = $client->delete('/api/files/delete', ['path' => $scratch.'/trashy/keep.txt']);
+    $client->post('/api/trash/purge', ['id' => (string)($again->json['id'] ?? '')]);
+    $favPut('trashy/keep.txt', 'a different file');
+    check('a new file under the old name is not starred', !in_array($scratch.'/trashy/keep.txt', $favPaths($client), true),
+        json_encode($favPaths($client)));
+});
+
+scenario('the Favorites page is served', function () use ($client) {
+    $page = $client->get('/favorites');
+    check('the page loads', $page->status === 200 && str_contains($page->body, 'id="favorites-page"'), (string)$page->status);
+});
+
 scenario('tidying the scratch folder', function () use ($client, $scratch) {
     $client->delete('/api/files/delete', ['path' => $scratch]);
     $trash = $client->get('/api/trash');

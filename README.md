@@ -352,7 +352,7 @@ Sign in, browse with thumbnails, full-screen image viewing with pinch-zoom and
 swipe, video and audio playback, download to the device, upload from the
 gallery, the camera, a recorded clip, the file browser or the Android share
 sheet, new folder, rename, delete to trash, move, copy, recursive search, trash
-restore and empty, and share links.
+restore and empty, share links, and favorites.
 
 **Not covered**, deliberately: Users, Storage usage, Storage servers and the
 security event log — four administrator screens that stay in the browser. There
@@ -1070,6 +1070,46 @@ addressed through any file route, so the trash cannot be browsed or emptied
 except through `/api/trash`. Listing the trash needs only read access;
 restoring and purging need write access, like any other change to the store.
 
+## Favorites
+
+Star a file and it is kept on the **Favorites** page, whatever folder it lives
+in — photos, videos and any other file. In the browser the star is on every
+file card, in its ⋮ menu and in the preview dialog; the page shows everything
+starred, most recent first, filtered to All, Photos, Videos or Other. In the
+Android app the star is in a file's action sheet and on the photo viewer's and
+the player's bar, a gold badge marks starred files in any folder, and the star
+on the file list's top bar opens the Favorites screen.
+
+Favorites belong to the account. Nobody else sees them, and a **viewer** can
+keep them as freely as an editor: starring is a preference, not a change to a
+file, so it is exempt from the write capability (never from CSRF) and works in
+read-only mode. Only files can be starred; a folder is a place, and the file
+browser is where places are. One account can keep up to 5,000.
+
+A favorite stays pointed at its file. Renaming or moving the file — or a
+folder above it, through the API or WebDAV — carries the star along. Deleting
+it to the trash keeps the stars with the trash entry (`favorites.json`, beside
+the metadata and never listed), so a restore gives them back with their
+original dates; deleting permanently, or emptying that entry, drops them, and
+a file saved later under the same name does not arrive starred. Deleting an
+account deletes its favorites. A file removed behind CloudHub's back, straight
+from the disk, is dropped from the list the next time it is read.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/favorites` | This account's favorites, as listing rows plus `favoritedAt`, newest first |
+| `POST /api/favorites` `{"path": …}` | Star a file; starring it again is not an error |
+| `DELETE /api/favorites` `{"path": …}` | Unstar it; unstarring what is not starred is not an error |
+
+The folder listing does not say which of its files are starred, on purpose:
+`/api/files/list` touches no database, and a gallery fires it beside dozens of
+thumbnail requests. The clients read `/api/favorites` once and keep their stars
+in step with what they change, and read it again on **Refresh**.
+
+An existing installation needs `php database/migrate.php` to create the
+`favorites` table. Until then everything else works as before and the
+Favorites page reports an error.
+
 ## Accounts and roles
 
 Administrators manage accounts from the **Users** screen: create and delete
@@ -1175,7 +1215,8 @@ the role column is added.
 The migration creates no user accounts. If the database has none, create one
 with `php tools/create-admin.php admin`.
 
-It also repairs what older installations lack: the `share_links` path index
+It also creates the `favorites` table the Favorites page needs, and repairs
+what older installations lack: the `share_links` path index
 the share dialog's lookup needs, the unique key on `users.username` (reported,
 not forced, where duplicate names already exist), and the removal of a
 `file_metadata` foreign key that cascaded a deleted storage server into every

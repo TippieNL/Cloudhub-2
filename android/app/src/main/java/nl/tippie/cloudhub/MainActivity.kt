@@ -51,6 +51,7 @@ private sealed interface Screen {
     data object Trash : Screen { override val key = "trash" }
     data object Storage : Screen { override val key = "storage" }
     data object Duplicates : Screen { override val key = "duplicates" }
+    data object Favorites : Screen { override val key = "favorites" }
     data object SettingsScreen : Screen { override val key = "settingsscreen" }
     data class Images(val images: List<FileEntry>, val index: Int) : Screen {
         override val key get() = "images"
@@ -193,6 +194,26 @@ class MainActivity : ComponentActivity() {
                 var reveal by remember { mutableStateOf<String?>(null) }
                 val state by model.state.collectAsState()
 
+                /**
+                 * Open a file where it belongs: photos in the viewer, swiping
+                 * through the others beside it -- the folder's, or the
+                 * favorites' when opened from there -- and sound and video in
+                 * the player.
+                 */
+                fun openFile(entry: FileEntry, siblings: List<FileEntry>) {
+                    when (entry.kind) {
+                        FileEntry.Kind.IMAGE -> {
+                            val images = siblings.filter { it.kind == FileEntry.Kind.IMAGE }
+                            go(Screen.Images(images, images.indexOfFirst { it.path == entry.path }))
+                        }
+                        FileEntry.Kind.VIDEO, FileEntry.Kind.AUDIO -> go(Screen.Play(entry))
+                        // Anything with no viewer of its own is handed to
+                        // whatever app on the phone does handle it, which is
+                        // not a screen of ours to go back from.
+                        else -> openExternally(entry)
+                    }
+                }
+
                 // Straight to the files if the stored session is still good.
                 //
                 // Resolved from Restoring rather than from SignIn: rendering
@@ -298,23 +319,12 @@ class MainActivity : ComponentActivity() {
                     is Screen.Files -> FilesScreen(
                         api = app.api,
                         model = model,
-                        onOpenFile = { entry ->
-                            when (entry.kind) {
-                                FileEntry.Kind.IMAGE -> {
-                                    val images = state.visible.filter { it.kind == FileEntry.Kind.IMAGE }
-                                    go(Screen.Images(images, images.indexOfFirst { it.path == entry.path }))
-                                }
-                                FileEntry.Kind.VIDEO, FileEntry.Kind.AUDIO -> go(Screen.Play(entry))
-                                // Anything with no viewer of its own is handed
-                                // to whatever app on the phone does handle it,
-                                // which is not a screen of ours to go back from.
-                                else -> openExternally(entry)
-                            }
-                        },
+                        onOpenFile = { entry -> openFile(entry, state.visible) },
                         onOpenTrash = { go(Screen.Trash) },
                         onOpenStorage = { go(Screen.Storage) },
                         onOpenDuplicates = { go(Screen.Duplicates) },
                         onOpenSettings = { go(Screen.SettingsScreen) },
+                        onOpenFavorites = { go(Screen.Favorites) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
@@ -336,6 +346,23 @@ class MainActivity : ComponentActivity() {
                         onDismissUploadFailures = { queue.clearFailures() },
                         revealPath = reveal,
                         onRevealed = { reveal = null },
+                    )
+
+                    is Screen.Favorites -> FavoritesScreen(
+                        api = app.api,
+                        model = model,
+                        onOpenFile = ::openFile,
+                        onShowInFolder = { entry ->
+                            // The folder is asked for first, so the list is
+                            // already on its way -- and the file is looked for
+                            // in it -- by the time the Files screen is back.
+                            model.open(BackRules.parentOf(entry.path))
+                            reveal = entry.path
+                            back()
+                        },
+                        onDownload = { download(it) },
+                        onShare = { sharing = it },
+                        onBack = { back() },
                     )
 
                     is Screen.Duplicates -> DuplicatesScreen(
@@ -383,12 +410,16 @@ class MainActivity : ComponentActivity() {
                     is Screen.Images -> ImageViewer(
                         api = app.api, images = current.images, startAt = current.index,
                         onBack = { photo -> reveal = photo; back() },
+                        favorites = state.favorites,
+                        onToggleFavorite = model::toggleFavorite,
                     )
 
                     is Screen.Play -> PlayerScreen(
                         api = app.api, client = app.client, settings = app.settings,
                         entry = current.entry,
                         onBack = { reveal = current.entry.path; back() },
+                        favorite = current.entry.path in state.favorites,
+                        onToggleFavorite = { model.toggleFavorite(current.entry) },
                     )
                 }
                 }

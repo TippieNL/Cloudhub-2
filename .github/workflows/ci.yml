@@ -45,10 +45,16 @@ jobs:
       - name: Migrate
         run: php database/migrate.php
 
+      # One of each role, plus a second editor: the HTTP suite proves that a
+      # viewer is refused a write an editor may make, and that one editor's
+      # staged upload and quota are not another's. Without the two editors
+      # those checks could only ever fail on a sign-in.
       - name: Create the test accounts
         run: |
-          printf 'smoke-test-pass-123\n'  | php tools/create-admin.php admin  admin
-          printf 'viewer-test-pass-123\n' | php tools/create-admin.php viewer viewer
+          printf 'smoke-test-pass-123\n'   | php tools/create-admin.php admin   admin
+          printf 'viewer-test-pass-123\n'  | php tools/create-admin.php viewer  viewer
+          printf 'editor-test-pass-123\n'  | php tools/create-admin.php editor  editor
+          printf 'editor2-test-pass-123\n' | php tools/create-admin.php editor2 editor
 
       # The static checks: 27 scripts pinning decisions a later edit could
       # quietly undo. They assert the source reads a certain way.
