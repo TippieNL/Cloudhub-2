@@ -96,6 +96,27 @@ final class Client
         return $this->perform($url, $method, $h, $body);
     }
 
+    /**
+     * A multipart/form-data POST, for the legacy upload route.
+     *
+     * @param array<string,string> $fields plain form fields
+     * @param array<string,string> $files file name => bytes, sent as files[]
+     */
+    public function multipart(string $route, array $fields, array $files): Response
+    {
+        $boundary = '----cloudhub'.bin2hex(random_bytes(8));
+        $body = '';
+        foreach ($fields as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+        foreach ($files as $filename => $bytes) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"$filename\"\r\n"
+                ."Content-Type: application/octet-stream\r\n\r\n$bytes\r\n";
+        }
+        $body .= "--$boundary--\r\n";
+        return $this->send('POST', $route, [], $body, ['Content-Type: multipart/form-data; boundary='.$boundary]);
+    }
+
     public function delete(string $route, array $body = []): Response
     {
         return $this->send('DELETE', $route, [], $body);
@@ -152,7 +173,9 @@ final class Client
             $headers[] = 'Content-Type: application/json';
         } elseif (is_string($body)) {
             $payload = $body;
-            $headers[] = 'Content-Type: application/octet-stream';
+            // A caller that names its own type (multipart below) keeps it.
+            $typed = (bool)array_filter($extraHeaders, static fn(string $h): bool => stripos($h, 'Content-Type:') === 0);
+            if (!$typed) $headers[] = 'Content-Type: application/octet-stream';
         }
         foreach ($extraHeaders as $header) $headers[] = $header;
 

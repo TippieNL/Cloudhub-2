@@ -1242,6 +1242,96 @@ scenario('source files preview as plain text, never as markup', function () use 
 
 /* ---- clean up ------------------------------------------------------------------ */
 
+/*
+ * Every way bytes arrive answers to the quota, and a restore keeps them charged.
+ *
+ * The resumable upload was the only path that checked a quota. A copy was
+ * charged afterwards but never checked; WebDAV's PUT and the legacy multipart
+ * route were neither checked nor charged; and trash-then-restore brought a
+ * file back attributed to nobody -- each a way round the quota.
+ *
+ * The quota is configuration, so this runs against a server of its own with
+ * USER_QUOTA_GB (read from the environment ahead of .env) set a few hundred KB
+ * above what editor2 already uses.
+ */
+scenario('every way bytes arrive answers to the quota', function () use ($base, $root, $scratch) {
+    $pass = getenv('CLOUDHUB_EDITOR2_PASS') ?: 'editor2-test-pass-123';
+    $probe = new Client($base);
+    $probe->signIn('editor2', $pass);
+    $used = (int)($probe->get('/api/storage/me')->json['usedBytes'] ?? -1);
+    if ($used < 0) { check('editor2 can read its usage', false); return; }
+    $piece = 400 * 1024;
+    $quota = $used + 600 * 1024;
+
+    $port = 8000 + random_int(901, 999);
+    $env = getenv();
+    $env['USER_QUOTA_GB'] = sprintf('%.12F', $quota / 1073741824);
+    $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:'.$port, '-t', $root.'/public', $root.'/router.php'],
+        [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes, $root, $env);
+    try {
+        $qbase = 'http://127.0.0.1:'.$port;
+        for ($i = 0; $i < 100 && @file_get_contents($qbase.'/?route='.rawurlencode('/api/auth/status')) === false; $i++) usleep(50000);
+        $c = new Client($qbase);
+        $c->signIn('editor2', $pass);
+        $dir = $scratch.'/quota';
+        $c->post('/api/files/mkdir', ['path' => $dir]);
+        check('the quota is in force', (int)($c->get('/api/storage/me')->json['quotaBytes'] ?? 0) > 0);
+
+        $init = $c->post('/api/uploads/init', ['targetPath' => $dir, 'name' => 'a.bin', 'size' => $piece,
+            'uploadId' => 'quota'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $id = (string)($init->json['id'] ?? '');
+        $c->putChunk($id, 0, random_bytes($piece));
+        check('a file inside the quota uploads', $c->post('/api/uploads/complete', ['id' => $id])->ok(), $init->describe());
+
+        $copy = $c->post('/api/files/copy', ['paths' => [$dir.'/a.bin'], 'destination' => $scratch]);
+        check('a copy past the quota is refused',
+            ($copy->json['completed'] ?? -1) === 0 && str_contains((string)($copy->json['failed'][0]['message'] ?? ''), 'quota'),
+            $copy->describe());
+
+        $put = $c->dav('PUT', '/webdav'.$dir.'/b.bin', ['Content-Type: application/octet-stream'], random_bytes($piece));
+        check('a WebDAV PUT past the quota is refused', $put->status === 507, $put->describe());
+
+        $form = $c->multipart('/api/files/upload', ['targetPath' => $dir], ['c.bin' => random_bytes($piece)]);
+        check('a multipart upload past the quota is refused', $form->status === 507, $form->describe());
+
+        // Relative to what is charged now, so a path above that let bytes
+        // through cannot make these pass by coincidence.
+        $before = (int)($c->get('/api/storage/me')->json['usedBytes'] ?? -1);
+        $gone = $c->delete('/api/files/delete', ['path' => $dir.'/a.bin']);
+        $trashed = (int)($c->get('/api/storage/me')->json['usedBytes'] ?? -1);
+        check('trashing frees the quota', $trashed === $before - $piece, $trashed.' after '.$before.'; '.$gone->describe());
+        $c->post('/api/trash/restore', ['id' => (string)($gone->json['id'] ?? '')]);
+        $back = (int)($c->get('/api/storage/me')->json['usedBytes'] ?? -1);
+        check('a restore charges the bytes again', $back === $before, $back.' of '.$before);
+
+        $again = $c->post('/api/uploads/init', ['targetPath' => $dir, 'name' => 'd.bin', 'size' => $piece,
+            'uploadId' => 'quota'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        check('so a restore cannot make room for more', $again->status === 507, $again->describe());
+    } finally {
+        if (is_resource($server)) { proc_terminate($server); proc_close($server); }
+    }
+});
+
+/*
+ * The legacy multipart route keeps both by default, as the resumable API does.
+ * It used to move the upload straight over an existing file of that name --
+ * no version, no trash -- whenever ALLOW_OVERWRITE was on, its default.
+ */
+scenario('a multipart upload never replaces a file silently', function () use ($client, $scratch) {
+    $first = $client->multipart('/api/files/upload', ['targetPath' => $scratch], ['same.txt' => 'first']);
+    $second = $client->multipart('/api/files/upload', ['targetPath' => $scratch], ['same.txt' => 'second']);
+    check('both uploads succeed', $first->ok() && $second->ok(), $second->describe());
+    check('the original is untouched', $client->get('/api/files/download', ['path' => $scratch.'/same.txt'])->body === 'first');
+    check('the newcomer is kept beside it', ($second->json['files'][0] ?? '') === 'same (2).txt'
+        && $client->get('/api/files/download', ['path' => $scratch.'/same (2).txt'])->body === 'second',
+        (string)json_encode($second->json['files'] ?? null));
+    $replace = $client->multipart('/api/files/upload', ['targetPath' => $scratch, 'conflict' => 'overwrite'], ['same.txt' => 'third']);
+    check('an explicit overwrite still replaces it', $replace->ok()
+        && $client->get('/api/files/download', ['path' => $scratch.'/same.txt'])->body === 'third', $replace->describe());
+    $versions = $client->get('/api/files/versions', ['path' => $scratch.'/same.txt']);
+    check('and keeps the replaced bytes as a version', count($versions->json['versions'] ?? []) >= 1, $versions->describe());
+});
+
 scenario('tidying the scratch folder', function () use ($client, $scratch) {
     $client->delete('/api/files/delete', ['path' => $scratch]);
     $trash = $client->get('/api/trash');
