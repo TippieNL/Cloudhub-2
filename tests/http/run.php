@@ -649,7 +649,7 @@ scenario('resuming a range only continues the same file', function () use ($clie
  * every media client already handles. Verified in Chromium as well as here:
  * a file played from start to end over 41 short range answers.
  */
-scenario('one request does not carry a whole film', function () use ($client, $scratch) {
+scenario('one request does not carry a whole film', function () use ($client, $base, $scratch) {
     $big = str_repeat(random_bytes(1024), 12 * 1024);   // 12 MiB, over the cap
     $init = $client->post('/api/uploads/init', [
         'targetPath' => $scratch, 'name' => 'long.wav', 'size' => strlen($big),
@@ -694,6 +694,19 @@ scenario('one request does not carry a whole film', function () use ($client, $s
     $download = $client->get('/api/files/download', ['path' => $media]);
     check('a download is whole too', $download->status === 200 && $download->body === $big,
         $download->status.' '.strlen($download->body).' bytes');
+
+    /*
+     * Nor is an attachment ever chunked. A download manager resuming one with
+     * "bytes=N-" -- curl -C, a browser picking up an interrupted download --
+     * takes the answer as the rest of the file, so a short one was saved as a
+     * truncated download.
+     */
+    $shared = $client->post('/api/shares/create', ['filePath' => $media, 'expiresInHours' => 1]);
+    $token = (string)($shared->json['token'] ?? '');
+    $resumed = (new Client($base))->get('/share/'.$token.'/download', [], ['Range: bytes=1000-']);
+    check('a resumed shared download gets the whole remainder',
+        $token !== '' && $resumed->status === 206 && $resumed->body === substr($big, 1000),
+        $resumed->status.' '.strlen($resumed->body).' bytes');
 
     // Below the cap nothing changes.
     $small = $client->get('/api/files/stream', ['path' => $scratch.'/resumed.wav'], ['Range: bytes=0-']);
@@ -1076,6 +1089,155 @@ scenario('a viewer is refused a write', function () use ($base, $scratch) {
 
     $list = $viewer->get('/api/files/list', ['path' => '/']);
     check('but reading is allowed', $list->ok(), $list->describe());
+});
+
+scenario('WebDAV write verbs need the write capability', function () use ($base, $client, $scratch) {
+    // MKCOL and MOVE are not GET/POST/PUT/PATCH/DELETE, so a guard that named
+    // those verbs let them past with nothing but a session -- a viewer could
+    // create folders and, worse, MOVE one file over another, which deletes the
+    // file it lands on, permanently and unaudited.
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/dav']);
+    $keep = $scratch.'/dav/keep.txt';
+    $init = $client->post('/api/uploads/init', ['targetPath' => $scratch.'/dav', 'name' => 'keep.txt',
+        'size' => 5, 'uploadId' => 'dav'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    $client->putChunk($init->json['id'] ?? '', 0, 'keepy');
+    $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+
+    $viewer = new Client($base);
+    $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+
+    $mkcol = $viewer->dav('MKCOL', '/webdav'.$scratch.'/dav/viewer-made');
+    check('a viewer MKCOL is refused', in_array($mkcol->status, [403, 401], true), $mkcol->describe());
+
+    // The classic destructive case: move something over keep.txt.
+    $up = $client->post('/api/uploads/init', ['targetPath' => $scratch.'/dav', 'name' => 'weapon.txt',
+        'size' => 6, 'uploadId' => 'dav'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    $client->putChunk($up->json['id'] ?? '', 0, 'attack');
+    $client->post('/api/uploads/complete', ['id' => $up->json['id'] ?? '']);
+    $move = $viewer->dav('MOVE', '/webdav'.$scratch.'/dav/weapon.txt',
+        ['Destination: /webdav'.$scratch.'/dav/keep.txt', 'Overwrite: T']);
+    check('a viewer MOVE is refused', in_array($move->status, [403, 401], true), $move->describe());
+
+    $back = $client->get('/api/files/download', ['path' => $keep]);
+    check('the target file is untouched', $back->body === 'keepy', $back->body);
+
+    // An editor still gets WebDAV, so the guard blocks the role, not the verb.
+    $editor = new Client($base);
+    $editor->signIn('editor', getenv('CLOUDHUB_EDITOR_PASS') ?: 'editor-test-pass-123');
+    $ok = $editor->dav('MKCOL', '/webdav'.$scratch.'/dav/editor-made');
+    check('an editor MKCOL still works', in_array($ok->status, [201, 405], true), $ok->describe());
+});
+
+scenario('rename never overwrites what is already there', function () use ($client, $scratch) {
+    foreach (['keep-a.txt' => 'first', 'other-a.txt' => 'second'] as $name => $body) {
+        $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name,
+            'size' => strlen($body), 'uploadId' => 'ren'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $client->putChunk($init->json['id'] ?? '', 0, $body);
+        $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+    }
+    $r = $client->post('/api/files/rename', ['oldPath' => $scratch.'/other-a.txt', 'newPath' => $scratch.'/keep-a.txt']);
+    check('the rename succeeds', $r->ok(), $r->describe());
+    $keep = $client->get('/api/files/download', ['path' => $scratch.'/keep-a.txt']);
+    check('the original contents survive', $keep->body === 'first', $keep->body);
+    check('the moved file kept its bytes under a fresh name',
+        ($r->json['path'] ?? '') !== $scratch.'/keep-a.txt', (string)($r->json['path'] ?? ''));
+
+    // Its own name is not "already there". The Android prompt opens filled
+    // in with the current name, and confirming it unchanged renamed the file
+    // to "keep-a (2).txt".
+    $same = $client->post('/api/files/rename', ['oldPath' => $scratch.'/keep-a.txt', 'newPath' => $scratch.'/keep-a.txt']);
+    check('renaming a file to its own name leaves it where it is',
+        $same->ok() && ($same->json['path'] ?? '') === $scratch.'/keep-a.txt'
+            && $client->get('/api/files/download', ['path' => $scratch.'/keep-a.txt'])->body === 'first',
+        $same->describe());
+});
+
+scenario('a filename containing a percent escape round-trips', function () use ($client, $scratch) {
+    // Names like wget's "Report%20(1).txt" were listed but could not be
+    // opened, because sanitize() decoded the %20 into a space before lookup.
+    $name = 'Report%20(1).txt';
+    $body = 'literal percent name';
+    $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name,
+        'size' => strlen($body), 'uploadId' => 'pct'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    check('it uploads', $client->post('/api/uploads/complete',
+        (function () use ($client, $init, $body) { $client->putChunk($init->json['id'] ?? '', 0, $body); return ['id' => $init->json['id'] ?? '']; })())->ok());
+    $back = $client->get('/api/files/download', ['path' => $scratch.'/'.$name]);
+    check('and downloads unchanged', $back->status === 200 && $back->body === $body, $back->describe());
+});
+
+scenario('one upload id cannot wipe another account\'s staged bytes', function () use ($base, $scratch) {
+    // Upload ids are a deterministic hash of path|name|size|lastModified, so
+    // two accounts uploading the same file to the same folder collide. init()
+    // must refuse the intruder, not delete the owner's session.
+    $id = 'collide'.bin2hex(random_bytes(6));
+    $a = new Client($base); $a->signIn('editor', getenv('CLOUDHUB_EDITOR_PASS') ?: 'editor-test-pass-123');
+    $b = new Client($base); $b->signIn('editor2', getenv('CLOUDHUB_EDITOR2_PASS') ?: 'editor2-test-pass-123');
+    $a->post('/api/files/mkdir', ['path' => $scratch.'/collide']);
+    $ai = $a->post('/api/uploads/init', ['targetPath' => $scratch.'/collide', 'name' => 'c.bin',
+        'size' => 1000, 'uploadId' => $id, 'conflict' => 'rename']);
+    $a->putChunk($id, 0, str_repeat('A', 400));
+    $bi = $b->post('/api/uploads/init', ['targetPath' => $scratch.'/collide', 'name' => 'c.bin',
+        'size' => 1000, 'uploadId' => $id, 'conflict' => 'rename']);
+    check('the second account is refused, not served', $bi->status === 404, $bi->describe());
+    $status = $a->get('/api/uploads/status', ['id' => $id]);
+    check('the first account\'s staged bytes survive', ($status->json['received'] ?? -1) === 400, $status->describe());
+});
+
+scenario('a share link belongs to its file, not to its path', function () use ($client, $base, $scratch) {
+    // Links are stored against a path. Deleting the file used to leave the
+    // link alive, so the next file saved under that name was served to anyone
+    // holding the old link -- a file nobody had chosen to share.
+    $put = function (string $name, string $body) use ($client, $scratch): void {
+        $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name,
+            'size' => strlen($body), 'uploadId' => 'shl'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $client->putChunk($init->json['id'] ?? '', 0, $body);
+        $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+    };
+    $anon = new Client($base);
+
+    $put('shared-once.txt', 'the file that was shared');
+    $link = $client->post('/api/shares/create', ['filePath' => $scratch.'/shared-once.txt']);
+    $token = (string)($link->json['token'] ?? '');
+    check('a link is made', $token !== '', $link->describe());
+    $client->delete('/api/files/delete', ['path' => $scratch.'/shared-once.txt']);
+    $put('shared-once.txt', 'a different, private file');
+    $after = $anon->fetchUrl($base.'/share/'.$token.'/raw');
+    check('the old link does not serve the new file', $after->status === 404, $after->status.' '.substr($after->body, 0, 40));
+
+    // A rename keeps the link working rather than breaking it.
+    $put('moving.txt', 'follows the rename');
+    $moving = $client->post('/api/shares/create', ['filePath' => $scratch.'/moving.txt']);
+    $movingToken = (string)($moving->json['token'] ?? '');
+    $client->post('/api/files/rename', ['oldPath' => $scratch.'/moving.txt', 'newPath' => $scratch.'/moved.txt']);
+    $followed = $anon->fetchUrl($base.'/share/'.$movingToken.'/raw');
+    check('a renamed file keeps its link', $followed->status === 200 && $followed->body === 'follows the rename',
+        $followed->status.' '.substr($followed->body, 0, 40));
+});
+
+scenario('source files preview as plain text, never as markup', function () use ($client, $scratch) {
+    // The dialog shows these as escaped source, but libmagic calls them
+    // application/json, text/html, image/svg+xml... and the route refused them.
+    $files = [
+        'data.json' => '{"a": 1, "b": [true, null]}',
+        'page.html' => "<!DOCTYPE html>\n<html><body><p>hi</p></body></html>",
+        'pic.svg' => '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>',
+    ];
+    foreach ($files as $name => $body) {
+        $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name,
+            'size' => strlen($body), 'uploadId' => 'pv'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $client->putChunk($init->json['id'] ?? '', 0, $body);
+        $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+
+        $r = $client->get('/api/files/preview', ['path' => $scratch.'/'.$name]);
+        check("$name previews", $r->status === 200 && $r->body === $body, $r->describe());
+        check("$name arrives as text/plain", str_starts_with((string)$r->header('Content-Type'), 'text/plain'),
+            (string)$r->header('Content-Type'));
+        check("$name carries nosniff", strtolower((string)$r->header('X-Content-Type-Options')) === 'nosniff');
+    }
+
+    // The dialog asks for the first 512 KB only; a ranged preview must answer 206.
+    $r = $client->getRange('/api/files/preview', ['path' => $scratch.'/data.json'], 0, 9);
+    check('a ranged text preview is partial', $r->status === 206 && strlen($r->body) === 10, $r->describe());
 });
 
 /* ---- clean up ------------------------------------------------------------------ */

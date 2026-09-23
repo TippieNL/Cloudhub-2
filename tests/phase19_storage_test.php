@@ -207,7 +207,7 @@ foreach ([
     'a permanent delete forgets its row' => "\$fs->deleteTree(\$p);\n        ledger()->forget(\$rel);",
     'trashing forgets its row' => "ledger()->forget(\$meta['originalPath']);",
     'a move carries attribution with it' => "if (\$verb === 'move') {\n                ledger()->relocate(",
-    'a rename carries attribution with it' => "ledger()->relocate(\$from, \$fs->relative(\$z));",
+    'a rename carries attribution with it' => "\$to = \$fs->relative(\$z);\n    ledger()->relocate(\$from, \$to);",
     'a restore reconciles by sweeping' => "\$restored = \$fs->restore(Http::string(\$b, 'id', 1, 64));\n    // The file is back on disk",
 ] as $name => $needle) {
     $checks[$name] = str_contains($index, $needle);

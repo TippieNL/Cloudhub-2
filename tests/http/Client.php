@@ -75,6 +75,27 @@ final class Client
         return $this->send('GET', $route, $query, null, ["Range: bytes=$from-$to"]);
     }
 
+    /**
+     * A WebDAV request to a clean /webdav path, carrying the session and CSRF
+     * token like a real client. WebDAV uses its own verbs (MKCOL, MOVE, …) on
+     * real paths rather than the ?route= form, so this bypasses send()'s route
+     * builder and hits the path directly -- which is exactly what the
+     * authorization guard has to cover.
+     */
+    public function dav(string $method, string $path, array $headers = [], ?string $body = null): Response
+    {
+        $url = rtrim($this->base, '/').$path;
+        $h = ['Accept: */*'];
+        if ($this->cookies) {
+            $pairs = [];
+            foreach ($this->cookies as $name => $value) $pairs[] = $name.'='.$value;
+            $h[] = 'Cookie: '.implode('; ', $pairs);
+        }
+        if ($this->csrf !== '') $h[] = 'X-CSRF-Token: '.$this->csrf;
+        foreach ($headers as $header) $h[] = $header;
+        return $this->perform($url, $method, $h, $body);
+    }
+
     public function delete(string $route, array $body = []): Response
     {
         return $this->send('DELETE', $route, [], $body);
