@@ -12,6 +12,8 @@ import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -48,6 +50,9 @@ fun ImageViewer(
     startAt: Int,
     /** Handed the photo on show when it closes, so the folder comes back to it. */
     onBack: (String?) -> Unit,
+    /** The starred paths, so the star on the bar is right for the photo on show. */
+    favorites: Set<String> = emptySet(),
+    onToggleFavorite: ((FileEntry) -> Unit)? = null,
 ) {
     val pager = rememberPagerState(initialPage = startAt.coerceIn(0, maxOf(0, images.size - 1))) { images.size }
 
@@ -71,10 +76,18 @@ fun ImageViewer(
                         Icon(Icons.Default.ArrowBack, "Back")
                     }
                 },
+                actions = {
+                    // Looking at the photo is when you decide you like it.
+                    val current = images.getOrNull(pager.currentPage)
+                    if (current != null && onToggleFavorite != null) {
+                        FavoriteToggle(starred = current.path in favorites, onClick = { onToggleFavorite(current) })
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Black.copy(alpha = 0.6f),
                     titleContentColor = Color.White,
                     navigationIconContentColor = Color.White,
+                    actionIconContentColor = Color.White,
                 ),
             )
         },
@@ -161,6 +174,23 @@ fun ImageViewer(
                 )
             }
         }
+    }
+}
+
+/**
+ * The star on a viewer's bar: gold when starred, an outline when not.
+ *
+ * The icon changes the moment it is tapped; that change is the confirmation,
+ * as it is in every photo app, rather than a message over the picture.
+ */
+@Composable
+fun FavoriteToggle(starred: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(
+            if (starred) Icons.Default.Star else Icons.Default.StarBorder,
+            if (starred) "Remove from favorites" else "Add to favorites",
+            tint = if (starred) FAVORITE_GOLD else LocalContentColor.current,
+        )
     }
 }
 

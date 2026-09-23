@@ -67,6 +67,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SortByAlpha
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
@@ -115,6 +116,7 @@ fun FilesScreen(
     onOpenStorage: () -> Unit,
     onOpenDuplicates: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenFavorites: () -> Unit,
     onSignOut: () -> Unit,
     onPickMedia: () -> Unit,
     onPickFile: () -> Unit,
@@ -185,6 +187,7 @@ fun FilesScreen(
                 onStorage = onOpenStorage,
                 onDuplicates = onOpenDuplicates,
                 onSettings = onOpenSettings,
+                onFavorites = onOpenFavorites,
                 onSignOut = onSignOut,
             )
         },
@@ -284,6 +287,8 @@ fun FilesScreen(
             onDelete = { menuFor = null; model.delete(listOf(entry.path)) },
             onAddSubtitles = { menuFor = null; subtitlesFor = entry; subtitlePicker.launch("*/*") },
             onProperties = { menuFor = null; propertiesFor = entry },
+            favorite = entry.path in state.favorites,
+            onFavorite = { menuFor = null; model.toggleFavorite(entry) },
         )
     }
 
@@ -567,6 +572,7 @@ private fun EntryList(
                     // animateItem gives filtering-as-you-type a re-flow rather
                     // than a snap; the stagger only touches the first screenful.
                     modifier = Modifier.animateItem().staggered(entrance.value, index),
+                    favorite = entry.path in state.favorites,
                 )
             }
         }
@@ -583,6 +589,7 @@ private fun EntryList(
                     onLongPress = { onLongPress(entry.path) },
                     onMenu = { onMenu(entry) },
                     modifier = Modifier.animateItem().staggered(entrance.value, index),
+                    favorite = entry.path in state.favorites,
                 )
             }
         }
@@ -610,9 +617,10 @@ private val ScrollMemorySaver = listSaver<ScrollMemory, Any>(
     },
 )
 
-private val GRID_MIN_CELL = 158.dp
-private val GRID_PADDING = 14.dp
-private val GRID_GAP = 12.dp
+// Internal so the Favorites grid is laid out exactly like a folder's.
+internal val GRID_MIN_CELL = 158.dp
+internal val GRID_PADDING = 14.dp
+internal val GRID_GAP = 12.dp
 
 /** Items past this appear at once: scrolling should never pay for an entrance. */
 private const val STAGGER_LIMIT = 12
@@ -745,6 +753,7 @@ private fun BrowserTopBar(
     onStorage: () -> Unit,
     onDuplicates: () -> Unit,
     onSettings: () -> Unit,
+    onFavorites: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     TopAppBar(
@@ -765,6 +774,9 @@ private fun BrowserTopBar(
             }
         },
         actions = {
+            // On the bar rather than in the overflow: it is a place you go
+            // back to, not a setting you visit once.
+            IconButton(onClick = onFavorites) { Icon(Icons.Default.Star, "Favorites") }
             IconButton(onClick = onToggleView) {
                 AnimatedContent(
                     targetState = grid,

@@ -187,6 +187,22 @@ class CloudHubApi(
     suspend fun emptyTrash(): SimpleResult =
         postJson("/api/trash/purge", """{"all":true}""") { decode(it) }
 
+    /* ---- favorites ---------------------------------------------------------
+     *
+     * The account's own stars. Not gated on the write capability -- a viewer
+     * keeps favorites too -- but both writes still carry the CSRF token, which
+     * request() adds. Starring twice and unstarring what is not starred are
+     * both answered with success, so a double tap is never an error.
+     */
+
+    suspend fun favorites(): FavoritesListing = get("/api/favorites") { decode(it) }
+
+    suspend fun addFavorite(path: String): FavoriteResult =
+        postJson("/api/favorites", """{"path":${str(path)}}""") { decode(it) }
+
+    suspend fun removeFavorite(path: String): FavoriteResult =
+        request("/api/favorites", "DELETE", """{"path":${str(path)}}""") { decode(it) }
+
     /* ---- share links ------------------------------------------------------ */
 
     suspend fun createShare(path: String, expiresInHours: Int?): ShareLink =

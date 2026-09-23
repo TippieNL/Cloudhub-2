@@ -67,7 +67,7 @@ header>nav a{padding:8px 12px;white-space:nowrap;flex:0 0 auto}
 .file-controls #search{grid-column:1/-1}
 .file-controls select{max-width:none;width:100%}
 .selection-bar{gap:6px}
-.selection-bar button{min-height:40px}.selection-bar{top:60px}.file-list-view .file{grid-template-columns:30px 44px minmax(0,1fr) auto}.file-list-view .actions button:not([data-menu]){display:none}.file-grid .actions button[data-share],.file-grid .actions button[data-down]{display:none}}
+.selection-bar button{min-height:40px}.selection-bar{top:60px}.file-list-view .file{grid-template-columns:30px 44px minmax(0,1fr) auto}.file-list-view .actions button:not([data-menu]):not([data-fav]){display:none}.file-grid .actions button[data-share],.file-grid .actions button[data-down]{display:none}}
 
 /* v11.1: consistent file-toolbar controls.
    54px made the toolbar dominate a phone screen; 44px is still a comfortable
@@ -265,3 +265,23 @@ html.dark #offline-banner{background:#a06b00}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 /* Marks a file whose bytes are stored on this device. */
 .offline-badge{display:inline-block;font-size:11px;line-height:1;padding:2px 4px;border-radius:4px;background:color-mix(in srgb,var(--primary) 18%,transparent);color:var(--primary);vertical-align:middle}
+
+/* Favorites ---------------------------------------------------------------
+   The star sits with the card's other actions, and is the one besides the
+   menu that survives the narrow list view: it is the action a phone reaches
+   for while scrolling. Gold when on, in both themes, so a starred file is
+   visible at a glance and not only to someone reading the button. */
+.fav-button{line-height:1;min-width:30px;color:var(--muted)}
+/* Two classes, to outrank the 12px every other card action is set in. */
+.actions .fav-button{font-size:15px;padding:3px 7px}
+.fav-button.on{color:#c98a00}
+html.dark .fav-button.on{color:#f2c14e}
+.preview-header .fav-button{font-size:1.4rem;border:0;background:transparent;padding:4px 8px}
+.favorites-filter button:disabled{opacity:.45;cursor:default}
+#favorites-page .toolbar{flex-wrap:wrap;gap:10px}
+/* On a phone the four filters share the row equally rather than running off
+   the edge of it. */
+@media(max-width:650px){
+ .favorites-filter{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
+ .favorites-filter button{min-height:40px;padding:0 4px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+}
