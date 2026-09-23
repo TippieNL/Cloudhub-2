@@ -102,6 +102,14 @@ $checks['Apache lets share links through before the deny rules'] =
 $checks['the development server does the same'] =
     (bool)preg_match("#if \(preg_match\('\#\^/share/\[A-Za-z0-9_-\]\{20,128\}\(\?:/\|\\\$\)\#', \\\$uri\)\)#", $router)
     && strpos($router, '/share/') < strpos($router, '$denied =');
+// PHP 8.2's built-in server takes a path ending in an extension -- which is
+// what a named share link is -- for a script, and says so in SCRIPT_NAME; the
+// application then read "/share/TOKEN" as its install folder and answered
+// "Not found". The router corrects it before either of its two boots.
+$checks['the development server tells the application its real script'] =
+    str_contains($router, "if (realpath((string)(\$_SERVER['SCRIPT_FILENAME'] ?? '')) !== __FILE__) return;")
+    && str_contains($router, "dev_front_controller(\$uri);\n    require __DIR__ . '/public/index.php';")
+    && str_contains($router, "dev_front_controller(\$uri);\nrequire __DIR__ . '/public/index.php';");
 $checks['the nginx example says so too'] =
     str_contains($nginx, 'location ~ ^/share/[A-Za-z0-9_-]{20,128}(/|$)')
     && strpos($nginx, '^/share/') < strpos($nginx, 'sqlite|bak');
