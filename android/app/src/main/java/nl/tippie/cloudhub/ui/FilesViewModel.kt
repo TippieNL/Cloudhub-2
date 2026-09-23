@@ -167,8 +167,15 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
         api.makeFolder(joinPath(_state.value.path, name))
     }
 
-    fun rename(entry: FileEntry, newName: String) = act("Renamed") {
-        api.rename(entry.path, joinPath(entry.path.substringBeforeLast('/', ""), newName))
+    fun rename(entry: FileEntry, newName: String) {
+        // Confirming the prompt unchanged is not a rename, as in the web client.
+        if (!isRename(entry.name, newName)) return
+        act(null) {
+            val result = api.rename(entry.path, joinPath(entry.path.substringBeforeLast('/', ""), newName))
+            // The server picks a free name when the one asked for is taken, and
+            // says so; a bare "Renamed" hid that the file now has another name.
+            object { val message = result.message.ifBlank { "Renamed" } }
+        }
     }
 
     fun delete(paths: List<String>) = act(null) {
@@ -220,5 +227,9 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
     companion object {
         fun joinPath(parent: String, name: String): String =
             if (parent == "/" || parent.isEmpty()) "/$name" else "$parent/$name"
+
+        /** Whether a rename prompt's answer asks for anything at all. */
+        fun isRename(current: String, requested: String): Boolean =
+            requested.isNotBlank() && requested != current
     }
 }

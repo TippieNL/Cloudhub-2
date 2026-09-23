@@ -262,7 +262,13 @@ data class StorageBucket(val bytes: Long = 0, val files: Int = 0, val entries: I
 data class ServerStorage(
     val bytes: Long = 0,
     val files: Int = 0,
-    val folders: Int = 0,
+    // /api/storage/usage sends `folders` as a list of per-folder rows, not a
+    // count -- so a `folders: Int` here made kotlinx throw on the whole
+    // payload (a JSON array is not an Int, and ignoreUnknownKeys does not cover
+    // a type mismatch on a declared key), and every admin's serverStorage()
+    // call failed silently, leaving the "By account" section blank. This
+    // client does not display the per-folder breakdown, so the key is left as
+    // a tolerated unknown rather than modelled.
     val diskFree: Long = 0,
     val diskTotal: Long = 0,
     val trash: StorageBucket = StorageBucket(),
