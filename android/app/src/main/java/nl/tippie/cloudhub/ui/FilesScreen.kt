@@ -222,26 +222,40 @@ fun FilesScreen(
 
             SearchField(
                 query = state.query,
-                searching = state.searchResults != null,
+                // Offered to start a search, or to try a failed one again; while
+                // one is on, an edit already searches again by itself.
+                offerAllFolders = SearchRules.canSearch(state.query) && !state.searching &&
+                    (!state.searchMode || state.searchError != null),
                 onQuery = model::setQuery,
                 onSearchAll = model::searchEverywhere,
                 onClear = model::clearSearch,
             )
 
             AnimatedVisibility(
-                visible = state.searchResults != null,
+                visible = state.searchMode,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically(),
             ) {
-                val results = state.searchResults.orEmpty()
-                Text(
-                    if (results.isEmpty()) "No matches for \"${state.query}\""
-                    else "${results.size} match${if (results.size == 1) "" else "es"}" +
-                        if (state.searchTruncated) " (showing the first ${results.size})" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-                )
+                Column {
+                    Text(
+                        SearchRules.summary(
+                            query = state.query.trim(),
+                            results = state.searchResults,
+                            truncated = state.searchTruncated,
+                            scanned = state.searchScanned,
+                            searching = state.searching,
+                            error = state.searchError,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (state.searchError != null) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                    )
+                    // The folder, or the results so far, stay on screen under it.
+                    if (state.searching) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 20.dp))
+                    }
+                }
             }
 
             AnimatedVisibility(
@@ -394,7 +408,7 @@ private fun BrowserContent(
             Shown.SKELETON -> SkeletonList(grid = state.grid)
             Shown.ERROR -> LoadFailed(state.loadError, onRetry)
             Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
-            Shown.NO_MATCHES -> NoMatches(state.query)
+            Shown.NO_MATCHES -> NoMatches(state.query, searchedEverywhere = state.searchMode, stillSearching = state.searching)
             Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, revealPath, onRevealed)
         }
     }
@@ -658,7 +672,7 @@ private fun EmptyFolder(canWrite: Boolean, onNewFolder: () -> Unit) {
 }
 
 @Composable
-private fun NoMatches(query: String) {
+private fun NoMatches(query: String, searchedEverywhere: Boolean, stillSearching: Boolean) {
     StateMessage(
         icon = {
             Icon(
@@ -667,9 +681,15 @@ private fun NoMatches(query: String) {
                 modifier = Modifier.size(56.dp),
             )
         },
-        title = "Nothing matched",
-        detail = if (query.isBlank()) "Try a different search."
-        else "No file here is called \"$query\". Try All folders to search everywhere.",
+        title = if (stillSearching) "Searching…" else "Nothing matched",
+        detail = when {
+            stillSearching -> "Looking in every folder for \"${query.trim()}\"."
+            // All folders has already been searched; suggesting it again would
+            // send the user round in a circle.
+            searchedEverywhere -> "Check the spelling, or try part of the name."
+            query.isBlank() -> "Try a different search."
+            else -> "No file here is called \"$query\". Try All folders to search everywhere."
+        },
     )
 }
 
@@ -988,13 +1008,14 @@ private fun Crumb(label: String, onClick: () -> Unit) {
  * Search.
  *
  * Typing filters what is on screen without a request; All folders asks the
- * server to walk the tree, which is the web app's This folder / All folders
- * split and the reason the two are not merged into one live search.
+ * server to walk every folder, which is the web app's This folder / All
+ * folders split. Once All folders is on, edits search again by themselves;
+ * see FilesViewModel.setQuery.
  */
 @Composable
 private fun SearchField(
     query: String,
-    searching: Boolean,
+    offerAllFolders: Boolean,
     onQuery: (String) -> Unit,
     onSearchAll: () -> Unit,
     onClear: () -> Unit,
@@ -1046,7 +1067,7 @@ private fun SearchField(
             modifier = Modifier.weight(1f),
         )
         AnimatedVisibility(
-            visible = query.length >= 2 && !searching,
+            visible = offerAllFolders,
             enter = fadeIn() + expandHorizontally(),
             exit = fadeOut() + shrinkHorizontally(),
         ) {

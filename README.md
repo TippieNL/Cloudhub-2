@@ -354,6 +354,12 @@ gallery, the camera, a recorded clip, the file browser or the Android share
 sheet, new folder, rename, delete to trash, move, copy, recursive search, trash
 restore and empty, share links, and favorites.
 
+Search filters the folder on screen as you type; **All folders** (or the
+keyboard's search key) searches every folder from the root, whichever folder
+is open. Against a server that answers in slices (Cloudhub-web) results appear
+within a couple of seconds and grow until the whole storage has been searched;
+once All folders is on, editing the query searches again after a pause.
+
 **Not covered**, deliberately: Users, Storage usage, Storage servers and the
 security event log — four administrator screens that stay in the browser. There
 is no offline mode; the progressive web app has one.

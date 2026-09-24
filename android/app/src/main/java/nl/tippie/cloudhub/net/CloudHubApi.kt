@@ -153,8 +153,13 @@ class CloudHubApi(
     suspend fun list(path: String): List<FileEntry> =
         get("/api/files/list", "path" to path) { decode(it) }
 
-    suspend fun search(query: String, under: String = "/"): SearchResult =
-        get("/api/files/search", "q" to query, "path" to under) { decode(it) }
+    /**
+     * [budgetMs] asks the server to answer with what it has found after that
+     * long; see [SearchResult.incomplete]. A server without the parameter
+     * ignores it.
+     */
+    suspend fun search(query: String, under: String = "/", budgetMs: Int? = null): SearchResult =
+        get("/api/files/search", "q" to query, "path" to under, "budget" to budgetMs?.toString()) { decode(it) }
 
     /* ---- changing things -------------------------------------------------- */
 
