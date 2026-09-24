@@ -2,6 +2,9 @@ package nl.tippie.cloudhub.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +38,18 @@ data class FilesState(
     /** Null while browsing; set while showing results from the server. */
     val searchResults: List<FileEntry>? = null,
     val searchTruncated: Boolean = false,
+    /**
+     * An All folders search is on: asked for, or showing its results. The
+     * results are then always the query in the box -- an edit searches again
+     * rather than leaving the last query's answer under the new text.
+     */
+    val searchMode: Boolean = false,
+    /** A request for the search is out; the results so far stay on screen. */
+    val searching: Boolean = false,
+    /** What the server said it examined, for "No matches in the first N files". */
+    val searchScanned: Int = 0,
+    /** Why the search failed. A failed search is not a failed listing. */
+    val searchError: String? = null,
     val sort: Sort = Sort.NAME,
     val grid: Boolean = true,
     /**
@@ -73,7 +88,7 @@ data class FilesState(
     val canWrite get() = user?.canWrite == true
 
     /** True while a filter or a server search is narrowing what is shown. */
-    val filtering get() = searchResults != null || query.isNotBlank()
+    val filtering get() = searchMode || searchResults != null || query.isNotBlank()
 
     val loading get() = load == LoadState.LOADING
 
@@ -104,6 +119,8 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
     }
 
     fun open(path: String) {
+        // Leaving for a folder -- a search result's, or any other -- ends the search.
+        endSearch()
         viewModelScope.launch {
             // Entries are dropped when moving to a different folder so the
             // skeleton appears; a refresh of the same folder keeps them, and
@@ -112,7 +129,6 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
             _state.update {
                 it.copy(
                     load = LoadState.LOADING, loadError = null, selected = emptySet(),
-                    searchResults = null,
                     entries = if (movingOn) emptyList() else it.entries,
                 )
             }
@@ -148,32 +164,79 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
     /** After a failure: back to the skeleton, and try the same folder again. */
     fun retry() = open(_state.value.path)
 
+    /** The search running now, so a newer one can cancel it before its answer lands. */
+    private var searchJob: Job? = null
+
+    /**
+     * Typing filters the folder on screen, until All folders has been asked
+     * for. From then on an edit searches all folders again, once typing
+     * pauses; it used to leave the last query's results under the new text,
+     * with the All folders button gone, so a second search looked broken.
+     */
     fun setQuery(query: String) {
-        _state.update { it.copy(query = query, searchResults = if (query.isBlank()) null else it.searchResults) }
+        _state.update { it.copy(query = query) }
+        if (!_state.value.searchMode) return
+        if (SearchRules.canSearch(query)) runSearch(SearchRules.DEBOUNCE_MS)
+        else endSearch()
     }
 
-    /** The explicit all-folders search, mirroring the web app's scope toggle. */
+    /** All folders: the explicit search, from the button or the keyboard. */
     fun searchEverywhere() {
-        val query = _state.value.query.trim()
-        if (query.length < 2) {
+        if (!SearchRules.canSearch(_state.value.query)) {
             _state.update { it.copy(message = "Enter at least two characters") }
             return
         }
-        viewModelScope.launch {
-            _state.update { it.copy(load = LoadState.LOADING, loadError = null) }
+        runSearch(0)
+    }
+
+    /**
+     * Ask the server, slice by slice, while it says there is more.
+     *
+     * The folder stays on screen until the first answer arrives. A search
+     * that is replaced -- by an edit, another tap, leaving the folder -- is
+     * cancelled, so a slow older answer can never land on top of a newer one.
+     */
+    private fun runSearch(debounceMs: Long) {
+        searchJob?.cancel()
+        _state.update { it.copy(searchMode = true, searching = true, searchError = null) }
+        searchJob = viewModelScope.launch {
+            if (debounceMs > 0) delay(debounceMs)
+            val query = _state.value.query.trim()
+            var scanned = -1
+            var slices = 0
             try {
-                val found = api.search(query, _state.value.path)
-                _state.update {
-                    it.copy(load = LoadState.READY, searchResults = found.results,
-                        searchTruncated = found.truncated, selected = emptySet())
+                while (true) {
+                    val found = api.search(query, SearchRules.SCOPE, SearchRules.SLICE_MS)
+                    slices++
+                    val more = SearchRules.shouldContinue(found, scanned, slices)
+                    _state.update {
+                        it.copy(searchResults = found.results, searchTruncated = found.truncated,
+                            searchScanned = found.scanned, searching = more, selected = emptySet())
+                    }
+                    if (!more) break
+                    scanned = found.scanned
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _state.update { it.copy(load = LoadState.FAILED, loadError = e.message) }
+                _state.update { it.copy(searching = false, searchError = e.message ?: "Could not reach the server") }
             }
         }
     }
 
-    fun clearSearch() = _state.update { it.copy(query = "", searchResults = null) }
+    private fun endSearch() {
+        searchJob?.cancel()
+        searchJob = null
+        _state.update {
+            it.copy(searchMode = false, searching = false, searchResults = null,
+                searchTruncated = false, searchScanned = 0, searchError = null)
+        }
+    }
+
+    fun clearSearch() {
+        endSearch()
+        _state.update { it.copy(query = "") }
+    }
 
     fun toggleSelected(path: String) = _state.update {
         it.copy(selected = if (path in it.selected) it.selected - path else it.selected + path)

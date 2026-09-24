@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import nl.tippie.cloudhub.net.*
 import nl.tippie.cloudhub.ui.DuplicateRules
 import okhttp3.RequestBody.Companion.toRequestBody
+import nl.tippie.cloudhub.ui.SearchRules
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.FixMethodOrder
@@ -179,6 +180,26 @@ class ApiIntegrationTest {
         val found = api.search("renamed", scratch)
         assertTrue(found.results.any { it.path == "$scratch/sub/renamed.bin" },
             "recursive search missed it: ${found.results.map { it.path }}")
+    }
+
+    /**
+     * What All folders does: from the root, in slices, until the server says
+     * the answer is whole. A server without slices answers in one go and the
+     * loop ends after one request; either way the file must be found.
+     */
+    @Test fun `08b an all-folders search in slices finds it from the root`() = runBlocking {
+        requireServer()
+        var found = api.search("renamed", SearchRules.SCOPE, 250)
+        var slices = 1
+        var scanned = -1
+        while (SearchRules.shouldContinue(found, scanned, slices)) {
+            scanned = found.scanned
+            found = api.search("renamed", SearchRules.SCOPE, 250)
+            slices++
+        }
+        assertFalse(found.incomplete, "gave up after $slices slices at ${found.scanned} entries")
+        assertTrue(found.results.any { it.path == "$scratch/sub/renamed.bin" },
+            "all-folders search missed it after $slices slices: ${found.results.map { it.path }}")
     }
 
     @Test fun `09 delete goes to the trash and restores`() = runBlocking {

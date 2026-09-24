@@ -65,6 +65,11 @@ data class SearchResult(
     val results: List<FileEntry> = emptyList(),
     /** A cap was reached, so this is not the whole answer. */
     val truncated: Boolean = false,
+    /**
+     * The server stopped for time, not at a cap: the same request again carries
+     * on where it stopped. Absent from servers that answer in one go.
+     */
+    val incomplete: Boolean = false,
     val scanned: Int = 0,
 )
 
