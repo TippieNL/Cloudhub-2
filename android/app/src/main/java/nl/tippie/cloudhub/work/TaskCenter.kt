@@ -100,6 +100,8 @@ class TaskCenter(
     /** The Tasks screen is showing, so finished tasks are listed too. */
     private var screenOpen = false
     private var lastKick = 0L
+    /** First looks that failed in a row; see TaskRules.FIRST_LOOK_RETRIES. */
+    private var firstLookFailures = 0
 
     /** A new sign-in: forget the last account's tasks, and look for this one's. */
     fun start() {
@@ -113,6 +115,7 @@ class TaskCenter(
         loop?.cancel()
         loop = null
         signedIn = false
+        firstLookFailures = 0
         watched.clear()
         autoDownloads.clear()
         showChecksums.clear()
@@ -256,12 +259,13 @@ class TaskCenter(
             }
             if (e.isUnauthorized) return null
             _state.update { it.copy(error = e.message) }
-            return TaskRules.nextPollMs(null, failed = true, watching = watching())
+            return afterFailure()
         } catch (e: Exception) {
             _state.update { it.copy(error = e.message ?: "Could not reach the server") }
-            return TaskRules.nextPollMs(null, failed = true, watching = watching())
+            return afterFailure()
         }
 
+        firstLookFailures = 0
         _state.value = State(supported = true, list = list, complete = all)
 
         // Everything queued or running is watched, whoever queued it and from
@@ -335,6 +339,16 @@ class TaskCenter(
     }
 
     private fun watching() = watched.isNotEmpty() || autoDownloads.isNotEmpty()
+
+    /**
+     * When to look again after a failed look. Nothing is offered until a
+     * look has succeeded, so a failure before the first success -- a network
+     * blip at sign-in -- is tried again a few times rather than hiding every
+     * task action until the app is next reopened.
+     */
+    private fun afterFailure(): Long? =
+        if (_state.value.supported == null && firstLookFailures++ < TaskRules.FIRST_LOOK_RETRIES) TaskRules.RETRY_POLL_MS
+        else TaskRules.nextPollMs(null, failed = true, watching = watching())
 
     private fun say(text: String) {
         _events.trySend(Event.Message(text))

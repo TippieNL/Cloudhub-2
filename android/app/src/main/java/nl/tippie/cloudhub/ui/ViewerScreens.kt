@@ -201,6 +201,8 @@ fun TrashScreen(
     api: CloudHubApi,
     canWrite: Boolean,
     onBack: () -> Unit,
+    /** The server has a task queue it can use: a large trash may be emptied in the background. */
+    background: Boolean = false,
     /** Emptying a large trash was handed to a background task on the server. */
     onQueued: (nl.tippie.cloudhub.net.BackgroundTask) -> Unit = {},
 ) {
@@ -231,7 +233,7 @@ fun TrashScreen(
                     if (canWrite && (listing?.entries?.isNotEmpty() == true)) {
                         TextButton(onClick = {
                             scope.launch {
-                                runCatching { api.emptyTrash() }
+                                runCatching { api.emptyTrash(background) }
                                     .onSuccess { result ->
                                         // The entries leave the trash at once; the
                                         // server deletes them in the background.

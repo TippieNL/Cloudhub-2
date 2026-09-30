@@ -350,7 +350,7 @@ class FilesViewModel(private val api: CloudHubApi, private val tasks: TaskCenter
         var trashed = false
         var queued = 0
         for (path in paths) {
-            val result = api.delete(path)
+            val result = api.delete(path, background = tasks.state.value.available)
             trashed = result.trashed || trashed
             // A large folder deleted for good leaves the listing at once and
             // the server deletes it in the background.
@@ -372,7 +372,8 @@ class FilesViewModel(private val api: CloudHubApi, private val tasks: TaskCenter
     private fun relocate(paths: List<String>, destination: String, moving: Boolean) {
         viewModelScope.launch {
             try {
-                val result = if (moving) api.move(paths, destination) else api.copy(paths, destination)
+                val result = if (moving) api.move(paths, destination)
+                else api.copy(paths, destination, background = tasks.state.value.available)
                 // Too large to copy while the app waits: the server does it in
                 // the background, and the folder is reloaded when it is done.
                 result.job?.takeIf { result.queued }?.let { task ->

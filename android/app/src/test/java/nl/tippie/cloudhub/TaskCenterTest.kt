@@ -90,7 +90,7 @@ class TaskCenterTest {
             if (baseUrl != null && hasQueue) runBlocking {
                 runCatching { api.delete(scratch) }
                 api.trash().entries.filter { it.originalPath.startsWith(scratch) }.forEach { entry ->
-                    val purged = api.purge(entry.id)
+                    val purged = api.purge(entry.id, background = true)
                     purged.job?.takeIf { purged.queued }?.let { settle(it.id) }
                 }
                 api.clearTasks()
@@ -212,7 +212,9 @@ class TaskCenterTest {
         api.makeFolder("$scratch/big")
         repeat(205) { put("$scratch/big/f$it.txt", "$it".toByteArray()) }
         api.makeFolder("$scratch/dest")
-        val result = api.copy(listOf("$scratch/big"), "$scratch/dest")
+        // Offered as the app offers it: once the follower has seen a usable queue.
+        eventually("the queue is seen") { onMain { state.value.available } }
+        val result = api.copy(listOf("$scratch/big"), "$scratch/dest", background = onMain { state.value.available })
         val job = assertNotNull(result.job?.takeIf { result.queued }, "a 205-file copy was not queued: $result")
         // What FilesViewModel does with that answer.
         onMain { follow(job) }

@@ -221,6 +221,7 @@ class MainActivity : ComponentActivity() {
                  */
                 var reveal by remember { mutableStateOf<String?>(null) }
                 val state by model.state.collectAsState()
+                val taskState by app.tasks.state.collectAsState()
 
                 /**
                  * Open a file where it belongs: photos in the viewer, swiping
@@ -447,6 +448,7 @@ class MainActivity : ComponentActivity() {
                     is Screen.Trash -> TrashScreen(
                         api = app.api,
                         canWrite = state.canWrite,
+                        background = taskState.available,
                         onQueued = { app.tasks.follow(it) },
                         onBack = { back(); model.refresh() },
                     )

@@ -44,6 +44,14 @@ object TaskRules {
     const val RETRY_POLL_MS = 10_000L
 
     /**
+     * How often a first look that failed is tried again, while it is not yet
+     * known whether the server has a queue: enough to get past a network
+     * blip at sign-in, not so many that a server that always fails is asked
+     * all day.
+     */
+    const val FIRST_LOOK_RETRIES = 3
+
+    /**
      * The least time between two requests to run the queue. A queue that is
      * already running needs no second runner; one that is not is asked again
      * this often while tasks wait. Queueing a task always asks at once.

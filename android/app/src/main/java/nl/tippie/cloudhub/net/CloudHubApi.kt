@@ -177,21 +177,22 @@ class CloudHubApi(
         postJson("/api/files/move", buildRelocateBody(paths, destination)) { decode(it) }
 
     /**
-     * A server with a task queue may copy a large selection in the background
-     * instead, answering at once with [RelocateResult.queued] and the task --
-     * the same offer the web app makes. Moves are renames, quick whatever
-     * their size, so they are never offered.
+     * With [background], a server with a task queue may copy a large selection
+     * in the background instead, answering at once with
+     * [RelocateResult.queued] and the task -- the same offer the web app
+     * makes. Moves are renames, quick whatever their size, so they are never
+     * offered.
      */
-    suspend fun copy(paths: List<String>, destination: String): RelocateResult =
-        postJson("/api/files/copy", buildRelocateBody(paths, destination, BACKGROUND_AUTO)) { decode(it) }
+    suspend fun copy(paths: List<String>, destination: String, background: Boolean = false): RelocateResult =
+        postJson("/api/files/copy", buildRelocateBody(paths, destination, offer(background))) { decode(it) }
 
     /**
      * Goes to the trash unless the server has it disabled; the reply says
-     * which. A permanent delete of a large folder may be queued instead; see
-     * [SimpleResult.queued].
+     * which. With [background], a permanent delete of a large folder may be
+     * queued instead; see [SimpleResult.queued].
      */
-    suspend fun delete(path: String): SimpleResult =
-        request("/api/files/delete", "DELETE", """{"path":${str(path)}$BACKGROUND_AUTO}""") { decode(it) }
+    suspend fun delete(path: String, background: Boolean = false): SimpleResult =
+        request("/api/files/delete", "DELETE", """{"path":${str(path)}${offer(background)}}""") { decode(it) }
 
     /* ---- trash ------------------------------------------------------------ */
 
@@ -200,12 +201,12 @@ class CloudHubApi(
     suspend fun restore(id: String): SimpleResult =
         post("/api/trash/restore", mapOf("id" to id)) { decode(it) }
 
-    suspend fun purge(id: String): SimpleResult =
-        postJson("/api/trash/purge", """{"id":${str(id)}$BACKGROUND_AUTO}""") { decode(it) }
+    suspend fun purge(id: String, background: Boolean = false): SimpleResult =
+        postJson("/api/trash/purge", """{"id":${str(id)}${offer(background)}}""") { decode(it) }
 
-    /** Emptying a large trash may be queued as a task; see [SimpleResult.queued]. */
-    suspend fun emptyTrash(): SimpleResult =
-        postJson("/api/trash/purge", """{"all":true$BACKGROUND_AUTO}""") { decode(it) }
+    /** With [background], emptying a large trash may be queued as a task; see [SimpleResult.queued]. */
+    suspend fun emptyTrash(background: Boolean = false): SimpleResult =
+        postJson("/api/trash/purge", """{"all":true${offer(background)}}""") { decode(it) }
 
     /* ---- background tasks -----------------------------------------------------
      *
@@ -436,13 +437,16 @@ class CloudHubApi(
         }
     }
 
-    private companion object {
-        /**
-         * Offered with every copy, delete and purge: "do this in the
-         * background if it is large". The server decides -- it knows how big
-         * the work is and whether anything runs its queue -- and one without
-         * a queue ignores the key.
-         */
-        const val BACKGROUND_AUTO = ",\"background\":\"auto\""
-    }
+    /**
+     * "Do this in the background if it is large", for a copy, delete or
+     * purge. The server decides -- it knows how big the work is and whether
+     * anything runs its queue.
+     *
+     * Only offered where the server has shown it has a queue it can use
+     * (TaskCenter.State.available). A Cloudhub-web that took the queue
+     * without its jobs table fails the offer with a 500 on anything large,
+     * where without the key it does the work in the request as it always
+     * did; a server with no queue at all ignores the key either way.
+     */
+    private fun offer(background: Boolean) = if (background) ",\"background\":\"auto\"" else ""
 }

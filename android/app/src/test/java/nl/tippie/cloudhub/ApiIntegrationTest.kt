@@ -492,7 +492,7 @@ class ApiIntegrationTest {
         repeat(205) { put("$scratch/many/f$it.txt", "file $it".toByteArray()) }
         api.makeFolder("$scratch/copyto")
 
-        val result = api.copy(listOf("$scratch/many"), "$scratch/copyto")
+        val result = api.copy(listOf("$scratch/many"), "$scratch/copyto", background = true)
         assertTrue(result.queued, "a 205-file copy was done in the request: $result")
         val task = assertNotNull(result.job)
         assertEquals("copy", task.type)
@@ -503,9 +503,18 @@ class ApiIntegrationTest {
         assertEquals(205, api.list("$scratch/copyto/many").size)
 
         // A small copy is still done at once, as before there was a queue.
-        val small = api.copy(listOf("$scratch/zipme/a.txt"), "$scratch/copyto")
+        val small = api.copy(listOf("$scratch/zipme/a.txt"), "$scratch/copyto", background = true)
         assertFalse(small.queued)
         assertEquals(1, small.completed)
+
+        // Not offered -- the app has not seen a usable queue -- a large copy
+        // is done in the request, as it always was. A Cloudhub-web without
+        // its jobs table would answer the offer with a 500.
+        api.makeFolder("$scratch/copyto2")
+        val unoffered = api.copy(listOf("$scratch/many"), "$scratch/copyto2")
+        assertFalse(unoffered.queued, "a copy was queued without being offered")
+        assertEquals(1, unoffered.completed)
+        assertEquals(205, api.list("$scratch/copyto2/many").size)
     }
 
     @Test fun `25 a queued task can be cancelled, retried and removed`() = runBlocking {
@@ -553,12 +562,13 @@ class ApiIntegrationTest {
     @Test fun `99 clean up`() = runBlocking {
         requireServer()
         api.delete(scratch)
+        val queue = queueOrNull()?.available == true
         for (entry in api.trash().entries.filter { it.originalPath.startsWith(scratch) }) {
             // A large folder is purged in the background on a server with a
             // queue; seen through, so the run leaves no task waiting behind it.
-            val purged = api.purge(entry.id)
+            val purged = api.purge(entry.id, background = queue)
             if (purged.queued) purged.job?.let { settle(it.id) }
         }
-        if (queueOrNull()?.available == true) api.clearTasks()
+        if (queue) api.clearTasks()
     }
 }

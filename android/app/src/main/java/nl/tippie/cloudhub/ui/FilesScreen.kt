@@ -201,7 +201,9 @@ fun FilesScreen(
                 onDuplicates = onOpenDuplicates,
                 onSettings = onOpenSettings,
                 onFavorites = onOpenFavorites,
-                tasksOffered = taskState.available,
+                // Wherever the server has task routes -- also when it cannot use
+                // them, so the Tasks screen can say why and what fixes it.
+                tasksOffered = taskState.supported == true,
                 activeTasks = taskState.active,
                 onTasks = onOpenTasks,
                 onSignOut = onSignOut,

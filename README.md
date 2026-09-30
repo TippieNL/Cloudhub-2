@@ -379,9 +379,16 @@ the app does what the web app's **Tasks** page does:
 | Large copy, permanent delete, emptying a large trash | as before | editors |
 
 A copy, delete or purge is offered to the server as background work
-(`"background": "auto"`), as the web app offers it. The server decides:
+(`"background": "auto"`), as the web app offers it. The offer is made only
+once the server has shown it has a queue it can use. The server decides:
 anything over its limits (200 files or 256 MB by default) is queued and the
 reply says so, and anything smaller is done at once, as before.
+
+The offer waits for that proof because of one case. A Cloudhub-web that took
+the queue but never ran `php database/migrate.php` (KSWEB may have no PHP
+command line to run it with) has no `jobs` table. Before the fix that creates
+the table on first use, such a server answers the offer on anything large
+with a 500, and without the offer it does the work as it always did.
 
 A task runs on the server and carries on when the app is closed. While
 anything is queued or running, a badge on the Files screen says how many;
@@ -408,7 +415,9 @@ nothing running them.
 
 Against Cloudhub-2's own server, which has no task queue (`/api/jobs` answers
 404), none of this is offered and every action works as it always did. The
-same goes for a Cloudhub-web whose database has no `jobs` table.
+same goes for a Cloudhub-web whose database has no `jobs` table. Where the
+server says why its queue is unavailable, **Tasks** stays in the menu and
+shows that reason, with what to run.
 
 ### Browsing files
 
