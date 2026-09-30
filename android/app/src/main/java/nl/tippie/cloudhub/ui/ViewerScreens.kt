@@ -197,7 +197,13 @@ fun FavoriteToggle(starred: Boolean, onClick: () -> Unit) {
 /** The other half of "delete is recoverable". */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TrashScreen(api: CloudHubApi, canWrite: Boolean, onBack: () -> Unit) {
+fun TrashScreen(
+    api: CloudHubApi,
+    canWrite: Boolean,
+    onBack: () -> Unit,
+    /** Emptying a large trash was handed to a background task on the server. */
+    onQueued: (nl.tippie.cloudhub.net.BackgroundTask) -> Unit = {},
+) {
     var listing by remember { mutableStateOf<nl.tippie.cloudhub.net.TrashListing?>(null) }
     var busy by remember { mutableStateOf(true) }
     var note by remember { mutableStateOf<String?>(null) }
@@ -226,7 +232,12 @@ fun TrashScreen(api: CloudHubApi, canWrite: Boolean, onBack: () -> Unit) {
                         TextButton(onClick = {
                             scope.launch {
                                 runCatching { api.emptyTrash() }
-                                    .onSuccess { note = it.message }
+                                    .onSuccess { result ->
+                                        // The entries leave the trash at once; the
+                                        // server deletes them in the background.
+                                        if (result.queued) result.job?.let(onQueued)
+                                        note = result.message
+                                    }
                                     .onFailure { note = it.message }
                                 reload()
                             }

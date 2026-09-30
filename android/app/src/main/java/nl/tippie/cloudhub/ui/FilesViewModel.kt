@@ -12,10 +12,17 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import nl.tippie.cloudhub.net.ApiError
+import nl.tippie.cloudhub.net.BackgroundTask
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.net.User
+import nl.tippie.cloudhub.work.TaskCenter
 
 /** What is on screen, and how it got there. */
 data class FilesState(
@@ -101,7 +108,7 @@ data class FilesState(
     )
 }
 
-class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
+class FilesViewModel(private val api: CloudHubApi, private val tasks: TaskCenter) : ViewModel() {
 
     private val _state = MutableStateFlow(FilesState())
     val state: StateFlow<FilesState> = _state.asStateFlow()
@@ -341,8 +348,21 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
 
     fun delete(paths: List<String>) = act(null) {
         var trashed = false
-        for (path in paths) trashed = api.delete(path).trashed || trashed
-        object { val message = if (trashed) "Moved to trash" else "Deleted" }
+        var queued = 0
+        for (path in paths) {
+            val result = api.delete(path)
+            trashed = result.trashed || trashed
+            // A large folder deleted for good leaves the listing at once and
+            // the server deletes it in the background.
+            if (result.queued) result.job?.let { tasks.follow(it); queued++ }
+        }
+        object {
+            val message = when {
+                queued > 0 -> "Deleting in the background"
+                trashed -> "Moved to trash"
+                else -> "Deleted"
+            }
+        }
     }
 
     fun move(paths: List<String>, destination: String) = relocate(paths, destination, moving = true)
@@ -353,6 +373,13 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
         viewModelScope.launch {
             try {
                 val result = if (moving) api.move(paths, destination) else api.copy(paths, destination)
+                // Too large to copy while the app waits: the server does it in
+                // the background, and the folder is reloaded when it is done.
+                result.job?.takeIf { result.queued }?.let { task ->
+                    tasks.follow(task)
+                    _state.update { it.copy(message = result.message.ifBlank { "Copying in the background" }, selected = emptySet()) }
+                    return@launch
+                }
                 // Per-item failures are reported, never rounded to "done".
                 val note = if (result.failed.isEmpty()) {
                     "${result.completed} item${if (result.completed == 1) "" else "s"} " +
@@ -367,6 +394,56 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
             }
         }
     }
+
+    /* ---- background tasks --------------------------------------------------
+     *
+     * Each of these exists only as a task on the server, and is offered only
+     * where the server has a queue (TaskRules.offersFor). The reply is that it
+     * was queued; the result is announced when it is done.
+     */
+
+    /** A ZIP of these, made on the server and saved to the phone when ready. */
+    fun downloadAsZip(paths: List<String>) =
+        queueTask("archive", buildJsonObject { paths(paths); put("mode", "download") }, download = true) {
+            "Preparing the ZIP; it downloads when it is ready"
+        }
+
+    /** A ZIP of these saved beside them, under [name]. */
+    fun compress(paths: List<String>, name: String) =
+        queueTask("archive", buildJsonObject { paths(paths); put("mode", "save"); put("name", name) })
+
+    /** Unpack a .zip into a folder of the same name beside it. */
+    fun extract(entry: FileEntry) = queueTask("extract", buildJsonObject { put("path", entry.path) })
+
+    fun checksum(paths: List<String>) =
+        queueTask("checksum", buildJsonObject { paths(paths); put("algorithm", "sha256") }, checksums = true) {
+            "Working out the SHA-256; it shows when it is ready"
+        }
+
+    /** Make the server's thumbnails for a whole folder now, rather than one by one as they are viewed. */
+    fun makeThumbnails(entry: FileEntry) = queueTask("thumbnails", buildJsonObject { put("path", entry.path) })
+
+    private fun queueTask(
+        type: String,
+        params: JsonObject,
+        download: Boolean = false,
+        checksums: Boolean = false,
+        note: (BackgroundTask) -> String = { "Queued: ${it.label}" },
+    ) {
+        viewModelScope.launch {
+            try {
+                val task = tasks.queue(type, params, download, checksums)
+                _state.update { it.copy(message = note(task), selected = emptySet()) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(message = e.message ?: "That did not work") }
+            }
+        }
+    }
+
+    private fun kotlinx.serialization.json.JsonObjectBuilder.paths(paths: List<String>) =
+        putJsonArray("paths") { paths.forEach { add(it) } }
 
     private fun act(success: String?, block: suspend () -> Any) {
         viewModelScope.launch {

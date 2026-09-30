@@ -58,6 +58,11 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.DriveFileMove
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.PendingActions
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -89,11 +94,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.work.TaskCenter
 
 /**
  * The file browser.
@@ -117,6 +124,9 @@ fun FilesScreen(
     onOpenDuplicates: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenFavorites: () -> Unit,
+    /** Background tasks on the server, where it has them; see TaskCenter. */
+    tasks: TaskCenter,
+    onOpenTasks: () -> Unit,
     onSignOut: () -> Unit,
     onPickMedia: () -> Unit,
     onPickFile: () -> Unit,
@@ -132,6 +142,7 @@ fun FilesScreen(
     onRevealed: () -> Unit = {},
 ) {
     val state by model.state.collectAsState()
+    val taskState by tasks.state.collectAsState()
     val uploads = rememberUploadState()
     val snackbar = remember { SnackbarHostState() }
     var showNewFolder by remember { mutableStateOf(false) }
@@ -140,6 +151,8 @@ fun FilesScreen(
     var menuFor by remember { mutableStateOf<FileEntry?>(null) }
     var propertiesFor by remember { mutableStateOf<FileEntry?>(null) }
     var overflow by remember { mutableStateOf(false) }
+    /** Items waiting for a name to be compressed under. */
+    var compressing by remember { mutableStateOf<List<String>?>(null) }
 
     /* ---- adding subtitles ------------------------------------------------
      *
@@ -188,6 +201,9 @@ fun FilesScreen(
                 onDuplicates = onOpenDuplicates,
                 onSettings = onOpenSettings,
                 onFavorites = onOpenFavorites,
+                tasksOffered = taskState.available,
+                activeTasks = taskState.active,
+                onTasks = onOpenTasks,
                 onSignOut = onSignOut,
             )
         },
@@ -263,13 +279,21 @@ fun FilesScreen(
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically(),
             ) {
+                val chosen = state.selected.toList()
                 SelectionBar(
                     count = state.selected.size,
                     canWrite = state.canWrite,
+                    tasks = TaskRules.offersForSelection(
+                        (state.searchResults ?: state.entries).filter { it.path in state.selected },
+                        state.canWrite, taskState.available,
+                    ),
                     onClear = model::clearSelection,
-                    onMove = { picking = PickerRequest(state.selected.toList(), moving = true) },
-                    onCopy = { picking = PickerRequest(state.selected.toList(), moving = false) },
-                    onDelete = { model.delete(state.selected.toList()) },
+                    onMove = { picking = PickerRequest(chosen, moving = true) },
+                    onCopy = { picking = PickerRequest(chosen, moving = false) },
+                    onDelete = { model.delete(chosen) },
+                    onZipDownload = { model.downloadAsZip(chosen) },
+                    onCompress = { compressing = chosen },
+                    onChecksum = { model.checksum(chosen) },
                 )
             }
 
@@ -303,6 +327,23 @@ fun FilesScreen(
             onProperties = { menuFor = null; propertiesFor = entry },
             favorite = entry.path in state.favorites,
             onFavorite = { menuFor = null; model.toggleFavorite(entry) },
+            tasks = TaskRules.offersFor(entry, state.canWrite, taskState.available),
+            onZipDownload = { menuFor = null; model.downloadAsZip(listOf(entry.path)) },
+            onCompress = { menuFor = null; compressing = listOf(entry.path) },
+            onExtract = { menuFor = null; model.extract(entry) },
+            onChecksum = { menuFor = null; model.checksum(listOf(entry.path)) },
+            onThumbnails = { menuFor = null; model.makeThumbnails(entry) },
+        )
+    }
+
+    compressing?.let { paths ->
+        TextPrompt(
+            "Compress to ZIP", "Archive name", TaskRules.archiveName(paths),
+            onDismiss = { compressing = null },
+            onConfirm = { compressing = null; model.compress(paths, it) },
+            // The suggested name is usually the one wanted.
+            requireChange = false,
+            confirmLabel = "Compress",
         )
     }
 
@@ -774,6 +815,9 @@ private fun BrowserTopBar(
     onDuplicates: () -> Unit,
     onSettings: () -> Unit,
     onFavorites: () -> Unit,
+    tasksOffered: Boolean,
+    activeTasks: Int,
+    onTasks: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     TopAppBar(
@@ -794,6 +838,18 @@ private fun BrowserTopBar(
             }
         },
         actions = {
+            // Only while something is queued or running, with how many: work
+            // going on out of sight is worth a glance at, and none is not.
+            AnimatedVisibility(visible = activeTasks > 0, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                IconButton(onClick = onTasks) {
+                    BadgedBox(badge = { Badge { Text(activeTasks.toString()) } }) {
+                        Icon(
+                            Icons.Default.PendingActions,
+                            "$activeTasks background task${if (activeTasks == 1) "" else "s"} queued or running",
+                        )
+                    }
+                }
+            }
             // On the bar rather than in the overflow: it is a place you go
             // back to, not a setting you visit once.
             IconButton(onClick = onFavorites) { Icon(Icons.Default.Star, "Favorites") }
@@ -849,6 +905,9 @@ private fun BrowserTopBar(
                 // Next to Storage: it is a way of getting space back, which is
                 // what somebody looking at Storage is usually after.
                 MenuItem(Icons.Default.ContentCopy, "Duplicates") { onOverflow(false); onDuplicates() }
+                if (tasksOffered) {
+                    MenuItem(Icons.Default.PendingActions, "Tasks") { onOverflow(false); onTasks() }
+                }
                 MenuItem(Icons.Default.Settings, "Settings") { onOverflow(false); onSettings() }
 
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
@@ -1079,15 +1138,27 @@ private fun SearchField(
     }
 }
 
+/**
+ * What can be done with the selection.
+ *
+ * Icons rather than words: with the task actions there are more of them than
+ * three words and a count fit across a phone. Each carries its name for
+ * TalkBack, and the ones behind the overflow keep their words.
+ */
 @Composable
 private fun SelectionBar(
     count: Int,
     canWrite: Boolean,
+    tasks: TaskRules.Offers,
     onClear: () -> Unit,
     onMove: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit,
+    onZipDownload: () -> Unit,
+    onCompress: () -> Unit,
+    onChecksum: () -> Unit,
 ) {
+    var more by remember { mutableStateOf(false) }
     Surface(
         tonalElevation = 3.dp,
         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -1098,12 +1169,28 @@ private fun SelectionBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onClear) { Icon(Icons.Default.Close, "Clear selection") }
-            Text("$count selected", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.weight(1f))
+            // Takes what the buttons leave, and shortens before they are squeezed.
+            Text(
+                "$count selected",
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
             if (canWrite) {
-                TextButton(onClick = onMove) { Text("Move") }
-                TextButton(onClick = onCopy) { Text("Copy") }
-                TextButton(onClick = onDelete) { Text("Delete") }
+                IconButton(onClick = onMove) { Icon(Icons.Default.DriveFileMove, "Move to…") }
+                IconButton(onClick = onCopy) { Icon(Icons.Default.ContentCopy, "Copy to…") }
+                IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete") }
+            }
+            if (tasks.any) {
+                Box {
+                    IconButton(onClick = { more = true }) { Icon(Icons.Default.MoreVert, "More for the selection") }
+                    DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                        if (tasks.zipDownload) MenuItem(Icons.Default.Download, "Download as ZIP") { more = false; onZipDownload() }
+                        if (tasks.compress) MenuItem(Icons.Default.FolderZip, "Compress to ZIP") { more = false; onCompress() }
+                        if (tasks.checksum) MenuItem(Icons.Default.Fingerprint, "Checksum (SHA-256)") { more = false; onChecksum() }
+                    }
+                }
             }
         }
     }

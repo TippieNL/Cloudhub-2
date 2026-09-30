@@ -28,6 +28,15 @@ object DuplicateRules {
      */
     const val MAX_SLICES = 500
 
+    /**
+     * How many looks at a background scan that is not this account's -- so
+     * with no task to say whether it still runs -- may find nothing changed
+     * before it is taken to have stopped. At a look every second and a half
+     * this is five minutes: the walk that begins a scan reports nothing until
+     * it is done, and on a phone's storage that can take minutes.
+     */
+    const val STALLED_POLLS = 200
+
     /** Whether to ask for another slice. */
     fun shouldContinue(scan: DuplicateScan, slicesSoFar: Int): Boolean =
         !scan.done && slicesSoFar < MAX_SLICES

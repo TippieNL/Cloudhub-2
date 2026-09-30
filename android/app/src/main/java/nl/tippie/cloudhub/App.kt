@@ -7,8 +7,10 @@ import coil.decode.VideoFrameDecoder
 import nl.tippie.cloudhub.data.CertificatePins
 import nl.tippie.cloudhub.data.PersistentCookieStore
 import nl.tippie.cloudhub.data.Settings
+import nl.tippie.cloudhub.data.saveToDownloads
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.CloudHubClient
+import nl.tippie.cloudhub.work.TaskCenter
 
 /**
  * Everything long-lived, wired once.
@@ -23,6 +25,8 @@ class CloudHubApp : Application(), ImageLoaderFactory {
     lateinit var pins: CertificatePins; private set
     lateinit var client: CloudHubClient; private set
     lateinit var api: CloudHubApi; private set
+    /** The account's background tasks on the server, followed while the app runs. */
+    lateinit var tasks: TaskCenter; private set
 
     override fun onCreate() {
         super.onCreate()
@@ -30,6 +34,7 @@ class CloudHubApp : Application(), ImageLoaderFactory {
         pins = CertificatePins(settings)
         client = CloudHubClient(PersistentCookieStore(settings), pins)
         api = CloudHubApi(settings.serverUrl.orEmpty(), client)
+        tasks = TaskCenter(api, save = { name, input -> saveToDownloads(this, name, input) })
     }
 
     fun useServer(url: String) {

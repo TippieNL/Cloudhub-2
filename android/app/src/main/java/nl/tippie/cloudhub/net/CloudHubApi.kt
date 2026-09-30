@@ -5,6 +5,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -14,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
 import java.io.InputStream
+import java.util.concurrent.TimeUnit
 
 /**
  * One function per endpoint the app uses.
@@ -172,12 +176,22 @@ class CloudHubApi(
     suspend fun move(paths: List<String>, destination: String): RelocateResult =
         postJson("/api/files/move", buildRelocateBody(paths, destination)) { decode(it) }
 
+    /**
+     * A server with a task queue may copy a large selection in the background
+     * instead, answering at once with [RelocateResult.queued] and the task --
+     * the same offer the web app makes. Moves are renames, quick whatever
+     * their size, so they are never offered.
+     */
     suspend fun copy(paths: List<String>, destination: String): RelocateResult =
-        postJson("/api/files/copy", buildRelocateBody(paths, destination)) { decode(it) }
+        postJson("/api/files/copy", buildRelocateBody(paths, destination, BACKGROUND_AUTO)) { decode(it) }
 
-    /** Goes to the trash unless the server has it disabled; the reply says which. */
+    /**
+     * Goes to the trash unless the server has it disabled; the reply says
+     * which. A permanent delete of a large folder may be queued instead; see
+     * [SimpleResult.queued].
+     */
     suspend fun delete(path: String): SimpleResult =
-        request("/api/files/delete", "DELETE", """{"path":${str(path)}}""") { decode(it) }
+        request("/api/files/delete", "DELETE", """{"path":${str(path)}$BACKGROUND_AUTO}""") { decode(it) }
 
     /* ---- trash ------------------------------------------------------------ */
 
@@ -187,10 +201,70 @@ class CloudHubApi(
         post("/api/trash/restore", mapOf("id" to id)) { decode(it) }
 
     suspend fun purge(id: String): SimpleResult =
-        post("/api/trash/purge", mapOf("id" to id)) { decode(it) }
+        postJson("/api/trash/purge", """{"id":${str(id)}$BACKGROUND_AUTO}""") { decode(it) }
 
+    /** Emptying a large trash may be queued as a task; see [SimpleResult.queued]. */
     suspend fun emptyTrash(): SimpleResult =
-        postJson("/api/trash/purge", """{"all":true}""") { decode(it) }
+        postJson("/api/trash/purge", """{"all":true$BACKGROUND_AUTO}""") { decode(it) }
+
+    /* ---- background tasks -----------------------------------------------------
+     *
+     * Cloudhub-web runs long file operations as tasks on the server: they
+     * carry on with the app closed, and this account's tasks can be listed,
+     * stopped, retried and removed. Cloudhub-2's own server has none of these
+     * routes and answers 404, which is how the app knows to offer none of it.
+     */
+
+    /** This account's tasks, newest first; [activeOnly] leaves out finished ones. */
+    suspend fun tasks(activeOnly: Boolean = false): TaskList =
+        get("/api/jobs", "active" to if (activeOnly) "1" else null) { decode(it) }
+
+    suspend fun task(id: String): BackgroundTask = get("/api/jobs/$id") { taskOf(it) }
+
+    /**
+     * Queue a task: copy, archive, extract, checksum, thumbnails or
+     * duplicates, with the parameters that type takes.
+     */
+    suspend fun queueTask(type: String, params: JsonObject): BackgroundTask =
+        postJson("/api/jobs", buildJsonObject {
+            put("type", type)
+            put("params", params)
+        }.toString()) { taskOf(it) }
+
+    /** Stop a task: at once if it is still queued, at its next checkpoint if it runs. */
+    suspend fun cancelTask(id: String): TaskReply = postJson("/api/jobs/$id/cancel", "{}") { decode(it) }
+
+    /** Queue a failed or cancelled task again; a copy carries on where it stopped. */
+    suspend fun retryTask(id: String): TaskReply = postJson("/api/jobs/$id/retry", "{}") { decode(it) }
+
+    /** Forget a finished task, and the archive it kept for download. */
+    suspend fun removeTask(id: String): SimpleResult = request("/api/jobs/$id", "DELETE", "{}") { decode(it) }
+
+    /** Forget every finished task. */
+    suspend fun clearTasks(): TaskReply = postJson("/api/jobs/clear", "{}") { decode(it) }
+
+    /**
+     * Ask the web server to work through the queue, where no worker process
+     * does it ([TaskList.runner] is "inline"): KSWEB on a phone, typically.
+     *
+     * The server answers at once and carries on after answering, so this
+     * returns in a moment. It goes through a client with a short read timeout
+     * all the same: a server that cannot hand its answer back early only sends
+     * it once the queue is empty, and the connection would be held for all of
+     * that. Giving up on the answer stops nothing -- the server ignores the
+     * client going away.
+     */
+    suspend fun runQueue(): TaskReply = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(url("/api/jobs/run"))
+            .post("{}".toRequestBody(jsonType))
+            .header("X-CSRF-Token", client.csrfToken)
+            .build()
+        execute(request, kickClient) { decode<TaskReply>(it) }
+    }
+
+    /** A finished archive, for streaming to disk; the caller closes the body. */
+    suspend fun openTaskDownload(id: String): ResponseBody = open(url("/api/jobs/$id/download"))
 
     /* ---- favorites ---------------------------------------------------------
      *
@@ -263,8 +337,10 @@ class CloudHubApi(
     /* ---- raw bytes --------------------------------------------------------- */
 
     /** Opens a download for streaming to disk; the caller closes the body. */
-    suspend fun openDownload(path: String): ResponseBody = withContext(Dispatchers.IO) {
-        val response = client.okHttp.newCall(Request.Builder().url(downloadUrl(path)).build()).execute()
+    suspend fun openDownload(path: String): ResponseBody = open(downloadUrl(path))
+
+    private suspend fun open(url: HttpUrl): ResponseBody = withContext(Dispatchers.IO) {
+        val response = client.okHttp.newCall(Request.Builder().url(url).build()).execute()
         if (!response.isSuccessful) {
             val body = response.body?.string()
             response.close()
@@ -282,10 +358,21 @@ class CloudHubApi(
 
     private fun str(value: String) = json.encodeToString(String.serializer(), value)
 
-    private fun buildRelocateBody(paths: List<String>, destination: String) = buildString {
+    private fun buildRelocateBody(paths: List<String>, destination: String, extra: String = "") = buildString {
         append("""{"destination":${str(destination)},"paths":[""")
         append(paths.joinToString(",") { str(it) })
-        append("]}")
+        append("]")
+        append(extra)
+        append("}")
+    }
+
+    /** A task's reply is {"job": {...}}; a reply without one is not a task. */
+    private fun taskOf(body: String): BackgroundTask =
+        decode<TaskReply>(body).job ?: throw ApiError(500, "NO_TASK", "The server did not return the task.")
+
+    /** The same connections and cookies as every other call; see [runQueue] for the timeout. */
+    private val kickClient by lazy {
+        client.okHttp.newBuilder().readTimeout(15, TimeUnit.SECONDS).build()
     }
 
     private inline fun <reified T> decode(body: String): T =
@@ -296,7 +383,7 @@ class CloudHubApi(
         vararg query: Pair<String, String?>,
         parse: (String) -> T,
     ): T = withContext(Dispatchers.IO) {
-        execute(Request.Builder().url(url(route, *query)).get().build(), parse)
+        execute(Request.Builder().url(url(route, *query)).get().build(), parse = parse)
     }
 
     private suspend fun <T> post(route: String, body: Map<String, String>, parse: (String) -> T): T =
@@ -318,11 +405,15 @@ class CloudHubApi(
             // public/index.php that calls Auth::verifyCsrf().
             .header("X-CSRF-Token", client.csrfToken)
             .build()
-        execute(request, parse)
+        execute(request, parse = parse)
     }
 
-    private fun <T> execute(request: Request, parse: (String) -> T): T {
-        client.okHttp.newCall(request).execute().use { response ->
+    private fun <T> execute(
+        request: Request,
+        http: okhttp3.OkHttpClient = client.okHttp,
+        parse: (String) -> T,
+    ): T {
+        http.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 // A redirect that quietly turned a write into a GET surfaces as
@@ -343,5 +434,15 @@ class CloudHubApi(
             }
             return parse(body)
         }
+    }
+
+    private companion object {
+        /**
+         * Offered with every copy, delete and purge: "do this in the
+         * background if it is large". The server decides -- it knows how big
+         * the work is and whether anything runs its queue -- and one without
+         * a queue ignores the key.
+         */
+        const val BACKGROUND_AUTO = ",\"background\":\"auto\""
     }
 }

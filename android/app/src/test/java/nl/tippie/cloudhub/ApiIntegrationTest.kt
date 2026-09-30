@@ -1,10 +1,18 @@
 package nl.tippie.cloudhub
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import nl.tippie.cloudhub.net.*
 import nl.tippie.cloudhub.ui.DuplicateRules
+import nl.tippie.cloudhub.ui.TaskRules
 import okhttp3.RequestBody.Companion.toRequestBody
 import nl.tippie.cloudhub.ui.SearchRules
+import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.FixMethodOrder
@@ -360,10 +368,197 @@ class ApiIntegrationTest {
         }
     }
 
+    /* ---- background tasks (Cloudhub-web) ------------------------------------------
+     *
+     * Only a server with a task queue has these routes. Cloudhub-2's own server
+     * answers 404, which is what the app reads as "offer none of it", so there
+     * the tests below only check that answer and skip the rest.
+     */
+
+    /** The server's tasks, or null where it has no queue. */
+    private suspend fun queueOrNull(): TaskList? = try {
+        api.tasks()
+    } catch (e: ApiError) {
+        if (e.status == 404) null else throw e
+    }
+
+    private fun requireQueue() {
+        requireServer()
+        val list = runBlocking { queueOrNull() }
+        assumeTrue("this server has no task queue", list != null && list.available)
+    }
+
+    /** Wait for a task to end, asking the server to run the queue as the app does. */
+    private suspend fun settle(id: String, timeoutMs: Long = 120_000): BackgroundTask {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val task = api.task(id)
+            if (!TaskRules.isActive(task)) return task
+            if (System.currentTimeMillis() > deadline) fail("task $id was still ${task.status} after ${timeoutMs}ms")
+            runCatching { api.runQueue() }
+            delay(250)
+        }
+    }
+
+    @Test fun `20 a server says whether it has a task queue`() = runBlocking {
+        requireServer()
+        // Either a list, or the 404 the app reads as "no queue here" -- never
+        // anything else, or the app would offer tasks it cannot run.
+        val list = queueOrNull()
+        if (list != null) {
+            assertTrue(list.runner in setOf("cli", "inline", "none"), "unknown runner ${list.runner}")
+            assertEquals(list.jobs.count(TaskRules::isActive), list.active)
+        }
+    }
+
+    @Test fun `21 a checksum runs in the background and gives the file's SHA-256`() = runBlocking {
+        requireQueue()
+        val bytes = "checksum me\n".toByteArray()
+        put("$scratch/sum.txt", bytes)
+        val queued = api.queueTask("checksum", buildJsonObject {
+            putJsonArray("paths") { add("$scratch/sum.txt") }
+            put("algorithm", "sha256")
+        })
+        assertEquals("checksum", queued.type)
+        assertTrue(TaskRules.isActive(queued), "a new task is queued, not ${queued.status}")
+
+        val done = settle(queued.id)
+        assertEquals(TaskRules.COMPLETED, done.status, "checksum ended ${done.status}: ${done.error}")
+        val expected = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        assertEquals(listOf(TaskRules.Checksum("$scratch/sum.txt", expected)), TaskRules.checksums(done))
+        assertTrue(api.removeTask(done.id).success)
+    }
+
+    @Test fun `22 a folder is zipped on the server and downloaded`() = runBlocking {
+        requireQueue()
+        api.makeFolder("$scratch/zipme")
+        put("$scratch/zipme/a.txt", "alpha".toByteArray())
+        put("$scratch/zipme/b.txt", "bravo".toByteArray())
+
+        val queued = api.queueTask("archive", buildJsonObject {
+            putJsonArray("paths") { add("$scratch/zipme") }
+            put("mode", "download")
+        })
+        val done = settle(queued.id)
+        assertEquals(TaskRules.COMPLETED, done.status, "archive ended ${done.status}: ${done.error}")
+        assertTrue(done.hasDownload, "a finished download archive offers no download")
+        assertEquals("zipme.zip", TaskRules.downloadName(done))
+
+        val entries = mutableMapOf<String, String>()
+        api.openTaskDownload(done.id).use { body ->
+            ZipInputStream(body.byteStream()).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (!entry.isDirectory) entries[entry.name.substringAfterLast('/')] = zip.readBytes().decodeToString()
+                }
+            }
+        }
+        assertEquals(mapOf("a.txt" to "alpha", "b.txt" to "bravo"), entries)
+
+        // Removing it removes the archive with it.
+        assertTrue(api.removeTask(done.id).success)
+        try {
+            api.task(done.id)
+            fail("a removed task is still there")
+        } catch (e: ApiError) {
+            assertEquals(404, e.status)
+        }
+    }
+
+    @Test fun `23 a ZIP is made beside its folder and extracted again`() = runBlocking {
+        requireQueue()
+        val made = settle(api.queueTask("archive", buildJsonObject {
+            putJsonArray("paths") { add("$scratch/zipme") }
+            put("mode", "save")
+            put("name", "packed.zip")
+        }).id)
+        assertEquals(TaskRules.COMPLETED, made.status, "compress ended ${made.status}: ${made.error}")
+        assertTrue(api.list(scratch).any { it.name == "packed.zip" }, "the ZIP was not saved beside its folder")
+
+        val unpacked = settle(api.queueTask("extract", buildJsonObject { put("path", "$scratch/packed.zip") }).id)
+        assertEquals(TaskRules.COMPLETED, unpacked.status, "extract ended ${unpacked.status}: ${unpacked.error}")
+        val text = TaskRules.resultText(unpacked) { "$it" }
+        assertNotNull(text, "an extraction says what it did")
+        assertTrue(text.startsWith("Extracted 2 files into $scratch/packed"), text)
+        val folder = api.list(scratch).first { it.isDirectory && it.name.startsWith("packed") }
+        val inside = api.list(folder.path).flatMap { if (it.isDirectory) api.list(it.path) else listOf(it) }
+        assertEquals(setOf("a.txt", "b.txt"), inside.map { it.name }.toSet())
+    }
+
+    @Test fun `24 a copy too large to wait for is queued and followed to the end`() = runBlocking {
+        requireQueue()
+        // More files than the server copies while a request waits (200 by default).
+        api.makeFolder("$scratch/many")
+        repeat(205) { put("$scratch/many/f$it.txt", "file $it".toByteArray()) }
+        api.makeFolder("$scratch/copyto")
+
+        val result = api.copy(listOf("$scratch/many"), "$scratch/copyto")
+        assertTrue(result.queued, "a 205-file copy was done in the request: $result")
+        val task = assertNotNull(result.job)
+        assertEquals("copy", task.type)
+
+        val done = settle(task.id)
+        assertEquals(TaskRules.COMPLETED, done.status, "copy ended ${done.status}: ${done.error}")
+        assertEquals(emptyList(), TaskRules.failures(done))
+        assertEquals(205, api.list("$scratch/copyto/many").size)
+
+        // A small copy is still done at once, as before there was a queue.
+        val small = api.copy(listOf("$scratch/zipme/a.txt"), "$scratch/copyto")
+        assertFalse(small.queued)
+        assertEquals(1, small.completed)
+    }
+
+    @Test fun `25 a queued task can be cancelled, retried and removed`() = runBlocking {
+        requireQueue()
+        // Nothing asks the server to run this, so it is still waiting when
+        // cancelled -- unless a worker process runs the queue by itself.
+        val queued = api.queueTask("checksum", buildJsonObject {
+            putJsonArray("paths") { add("$scratch/sum.txt") }
+            put("algorithm", "sha256")
+        })
+        val cancel = api.cancelTask(queued.id)
+        assertTrue(cancel.status in setOf("cancelled", "cancelling"), "cancel answered ${cancel.status}")
+        val stopped = settle(queued.id)
+        if (stopped.status == TaskRules.CANCELLED) {
+            assertTrue(stopped.canRetry && stopped.canRemove && !stopped.canCancel)
+            val again = api.retryTask(queued.id)
+            assertNotNull(again.job, "a retry answers with the task")
+            assertEquals(TaskRules.COMPLETED, settle(queued.id).status)
+        }
+        assertTrue(api.clearTasks().removed >= 1, "clearing finished tasks removed nothing")
+        assertTrue(api.tasks().jobs.none { it.id == queued.id }, "a cleared task is still listed")
+    }
+
+    @Test fun `26 a duplicate scan runs as a task and its findings are read as it goes`() = runBlocking {
+        requireQueue()
+        val queued = try {
+            api.queueTask("duplicates", buildJsonObject { put("path", "/") })
+        } catch (e: ApiError) {
+            // Somebody else's scan is running: one at a time.
+            assumeTrue("a duplicate scan is already running on this server", e.status != 409)
+            throw e
+        }
+        val done = settle(queued.id, timeoutMs = 300_000)
+        assertEquals(TaskRules.COMPLETED, done.status, "the scan ended ${done.status}: ${done.error}")
+        val scan = api.lastDuplicateScan()
+        assertTrue(scan.done, "the task finished but the scan it drove did not")
+        // The copies test 14 planted are found again, by the worker this time.
+        assertTrue(
+            scan.groups.any { g -> g.files.any { it.path == "$scratch/original.jpg" } },
+            "the background scan missed the planted copy",
+        )
+        assertTrue(TaskRules.resultText(done) { "$it" } != null, "a finished scan says what it found")
+    }
+
     @Test fun `99 clean up`() = runBlocking {
         requireServer()
         api.delete(scratch)
-        api.trash().entries.filter { it.originalPath.startsWith(scratch) }
-            .forEach { api.purge(it.id) }
+        for (entry in api.trash().entries.filter { it.originalPath.startsWith(scratch) }) {
+            // A large folder is purged in the background on a server with a
+            // queue; seen through, so the run leaves no task waiting behind it.
+            val purged = api.purge(entry.id)
+            if (purged.queued) purged.job?.let { settle(it.id) }
+        }
+        if (queueOrNull()?.available == true) api.clearTasks()
     }
 }

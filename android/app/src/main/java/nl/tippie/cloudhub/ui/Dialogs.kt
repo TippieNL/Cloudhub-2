@@ -1,6 +1,8 @@
 package nl.tippie.cloudhub.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,6 +25,13 @@ fun TextPrompt(
     initial: String,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
+    /**
+     * Whether the answer has to differ from [initial]: a rename that keeps
+     * the name is not a rename. A suggestion to accept as it is -- the name
+     * for a new ZIP -- turns this off.
+     */
+    requireChange: Boolean = true,
+    confirmLabel: String = "OK",
 ) {
     var value by remember { mutableStateOf(initial) }
     AlertDialog(
@@ -38,8 +47,8 @@ fun TextPrompt(
         confirmButton = {
             TextButton(
                 onClick = { onConfirm(value.trim()) },
-                enabled = value.isNotBlank() && value.trim() != initial,
-            ) { Text("OK") }
+                enabled = value.isNotBlank() && (!requireChange || value.trim() != initial),
+            ) { Text(confirmLabel) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -136,34 +145,51 @@ fun FileActionsSheet(
     onFavorite: () -> Unit = {},
     /** Offered where a file is shown away from its folder, as on Favorites. */
     onShowInFolder: (() -> Unit)? = null,
+    /** What the server's background tasks can do with this; see TaskRules.offersFor. */
+    tasks: TaskRules.Offers = TaskRules.Offers(),
+    onZipDownload: () -> Unit = {},
+    onCompress: () -> Unit = {},
+    onExtract: () -> Unit = {},
+    onChecksum: () -> Unit = {},
+    onThumbnails: () -> Unit = {},
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Text(entry.name, style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp), maxLines = 2)
-        HorizontalDivider()
-        SheetAction(Icons.Default.OpenInNew, if (entry.isDirectory) "Open" else "Preview", onOpen)
-        onShowInFolder?.let { SheetAction(Icons.Default.FolderOpen, "Show in folder", it) }
-        if (!entry.isDirectory) {
-            SheetAction(Icons.Default.Download, "Download", onDownload)
-            SheetAction(Icons.Default.Link, "Share link", onShare)
-            // Anyone's, whatever their role: a star changes nothing but their
-            // own Favorites.
-            if (favorite) SheetAction(Icons.Default.StarBorder, "Remove from favorites", onFavorite)
-            else SheetAction(Icons.Default.Star, "Add to favorites", onFavorite)
-        }
-        if (canWrite) {
-            // Only for a video: a subtitle beside anything else is a text file
-            // nothing will ever read.
-            if (entry.kind == FileEntry.Kind.VIDEO) {
-                SheetAction(Icons.Default.ClosedCaption, "Add subtitles…", onAddSubtitles)
+        // Scrollable: with the task actions an editor's sheet for a file runs
+        // to a dozen rows, more than a small phone shows at once.
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text(entry.name, style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp), maxLines = 2)
+            HorizontalDivider()
+            SheetAction(Icons.Default.OpenInNew, if (entry.isDirectory) "Open" else "Preview", onOpen)
+            onShowInFolder?.let { SheetAction(Icons.Default.FolderOpen, "Show in folder", it) }
+            // A folder comes to the phone as a ZIP the server makes in the background.
+            if (tasks.zipDownload) SheetAction(Icons.Default.Download, "Download as ZIP", onZipDownload)
+            if (!entry.isDirectory) {
+                SheetAction(Icons.Default.Download, "Download", onDownload)
+                SheetAction(Icons.Default.Link, "Share link", onShare)
+                // Anyone's, whatever their role: a star changes nothing but their
+                // own Favorites.
+                if (favorite) SheetAction(Icons.Default.StarBorder, "Remove from favorites", onFavorite)
+                else SheetAction(Icons.Default.Star, "Add to favorites", onFavorite)
             }
-            SheetAction(Icons.Default.DriveFileRenameOutline, "Rename", onRename)
-            SheetAction(Icons.Default.DriveFileMove, "Move to…", onMove)
-            SheetAction(Icons.Default.ContentCopy, "Copy to…", onCopy)
-            SheetAction(Icons.Default.Delete, "Delete", onDelete, danger = true)
+            if (canWrite) {
+                // Only for a video: a subtitle beside anything else is a text file
+                // nothing will ever read.
+                if (entry.kind == FileEntry.Kind.VIDEO) {
+                    SheetAction(Icons.Default.ClosedCaption, "Add subtitles…", onAddSubtitles)
+                }
+                SheetAction(Icons.Default.DriveFileRenameOutline, "Rename", onRename)
+                SheetAction(Icons.Default.DriveFileMove, "Move to…", onMove)
+                SheetAction(Icons.Default.ContentCopy, "Copy to…", onCopy)
+            }
+            if (tasks.compress) SheetAction(Icons.Default.FolderZip, "Compress to ZIP", onCompress)
+            if (tasks.extract) SheetAction(Icons.Default.Unarchive, "Extract here", onExtract)
+            if (tasks.checksum) SheetAction(Icons.Default.Fingerprint, "Checksum (SHA-256)", onChecksum)
+            if (tasks.thumbnails) SheetAction(Icons.Default.Image, "Make thumbnails", onThumbnails)
+            if (canWrite) SheetAction(Icons.Default.Delete, "Delete", onDelete, danger = true)
+            SheetAction(Icons.Default.Info, "Properties", onProperties)
+            Spacer(Modifier.height(20.dp))
         }
-        SheetAction(Icons.Default.Info, "Properties", onProperties)
-        Spacer(Modifier.height(20.dp))
     }
 }
 

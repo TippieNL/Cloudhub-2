@@ -16,9 +16,11 @@ import androidx.compose.runtime.*
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -26,9 +28,12 @@ import kotlinx.coroutines.withContext
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import nl.tippie.cloudhub.data.MediaCache
+import nl.tippie.cloudhub.data.saveToDownloads
+import nl.tippie.cloudhub.net.BackgroundTask
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
 import nl.tippie.cloudhub.work.StageResult
+import nl.tippie.cloudhub.work.TaskCenter
 import nl.tippie.cloudhub.work.UploadQueue
 import nl.tippie.cloudhub.work.UploadWorker
 
@@ -52,6 +57,7 @@ private sealed interface Screen {
     data object Storage : Screen { override val key = "storage" }
     data object Duplicates : Screen { override val key = "duplicates" }
     data object Favorites : Screen { override val key = "favorites" }
+    data object Tasks : Screen { override val key = "tasks" }
     data object SettingsScreen : Screen { override val key = "settingsscreen" }
     data class Images(val images: List<FileEntry>, val index: Int) : Screen {
         override val key get() = "images"
@@ -146,7 +152,7 @@ class MainActivity : ComponentActivity() {
 
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
-                    override fun <T : ViewModel> create(modelClass: Class<T>) = FilesViewModel(app.api) as T
+                    override fun <T : ViewModel> create(modelClass: Class<T>) = FilesViewModel(app.api, app.tasks) as T
                 })
                 val signIn: SignInViewModel = viewModel(
                     key = "sign-in",
@@ -186,6 +192,28 @@ class MainActivity : ComponentActivity() {
                     stack.clear(); stack.add(next)
                 }
                 var sharing by remember { mutableStateOf<FileEntry?>(null) }
+                /** Checksums just worked out, on show. */
+                var checksums by remember { mutableStateOf<BackgroundTask?>(null) }
+
+                /*
+                 * What the background tasks have to say, wherever the user is.
+                 * Collected only while the app is on screen; what happens
+                 * meanwhile waits in the channel and is said on return.
+                 */
+                LaunchedEffect(Unit) {
+                    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        app.tasks.events.collect { event ->
+                            when (event) {
+                                is TaskCenter.Event.Message ->
+                                    Toast.makeText(this@MainActivity, event.text, Toast.LENGTH_LONG).show()
+                                // A copy or an extraction landed: the folder
+                                // on screen may be one it changed.
+                                TaskCenter.Event.FilesChanged -> model.refresh()
+                                is TaskCenter.Event.Checksums -> checksums = event.task
+                            }
+                        }
+                    }
+                }
                 /*
                  * The file a viewer was closed on, so the list comes back to
                  * it. Swiping through thirty photos and pressing Back should
@@ -223,7 +251,7 @@ class MainActivity : ComponentActivity() {
                     if (screen is Screen.Restoring) {
                         val ok = runCatching { withContext(Dispatchers.IO) { app.api.status() }.authenticated }
                             .getOrDefault(false)
-                        if (ok) { reset(Screen.Files); model.start() } else reset(Screen.SignIn)
+                        if (ok) { reset(Screen.Files); model.start(); app.tasks.start() } else reset(Screen.SignIn)
                     }
                 }
 
@@ -311,6 +339,7 @@ class MainActivity : ComponentActivity() {
                             app.settings.rememberedUsername = if (remember) username else null
                             reset(Screen.Files)
                             model.start()
+                            app.tasks.start()
                             UploadWorker.enqueue(this@MainActivity)
                         },
                         onChangeServer = { go(Screen.Setup) },
@@ -325,10 +354,13 @@ class MainActivity : ComponentActivity() {
                         onOpenDuplicates = { go(Screen.Duplicates) },
                         onOpenSettings = { go(Screen.SettingsScreen) },
                         onOpenFavorites = { go(Screen.Favorites) },
+                        tasks = app.tasks,
+                        onOpenTasks = { go(Screen.Tasks) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
+                                app.tasks.reset()
                                 reset(Screen.SignIn)
                             }
                         },
@@ -367,8 +399,18 @@ class MainActivity : ComponentActivity() {
 
                     is Screen.Duplicates -> DuplicatesScreen(
                         api = app.api,
+                        tasks = app.tasks,
                         canWrite = state.canWrite,
                         onBack = { back(); model.refresh() },
+                    )
+
+                    is Screen.Tasks -> TasksScreen(
+                        tasks = app.tasks,
+                        onBack = { back() },
+                        onCopy = { text ->
+                            copyToClipboard(text)
+                            Toast.makeText(this@MainActivity, "Copied", Toast.LENGTH_SHORT).show()
+                        },
                     )
 
                     is Screen.Storage -> StorageScreen(
@@ -395,6 +437,7 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
+                                app.tasks.reset()
                                 reset(Screen.SignIn)
                             }
                         },
@@ -404,6 +447,7 @@ class MainActivity : ComponentActivity() {
                     is Screen.Trash -> TrashScreen(
                         api = app.api,
                         canWrite = state.canWrite,
+                        onQueued = { app.tasks.follow(it) },
                         onBack = { back(); model.refresh() },
                     )
 
@@ -424,6 +468,17 @@ class MainActivity : ComponentActivity() {
                 }
                 }
 
+                checksums?.let { task ->
+                    ChecksumDialog(
+                        task = task,
+                        onCopy = { text ->
+                            copyToClipboard(text)
+                            Toast.makeText(this@MainActivity, "Copied", Toast.LENGTH_SHORT).show()
+                        },
+                        onDismiss = { checksums = null },
+                    )
+                }
+
                 sharing?.let { entry ->
                     ShareDialog(
                         api = app.api, entry = entry,
@@ -437,6 +492,21 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /*
+     * Background tasks are only followed while the app is on screen -- apart
+     * from a ZIP the user is waiting for -- and looked at again on return,
+     * when anything that finished meanwhile is announced.
+     */
+    override fun onStart() {
+        super.onStart()
+        app.tasks.setForeground(true)
+    }
+
+    override fun onStop() {
+        app.tasks.setForeground(false)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -633,29 +703,5 @@ class MainActivity : ComponentActivity() {
     private companion object {
         /** The photo picker's own ceiling; asking for more than it allows throws. */
         const val MAX_PICKED = 30
-    }
-}
-
-/** Stream into the device's Downloads folder without buffering the whole file. */
-private fun saveToDownloads(context: Context, name: String, input: java.io.InputStream) {
-    val safe = name.substringAfterLast('/').ifBlank { "download" }
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-        val values = android.content.ContentValues().apply {
-            put(android.provider.MediaStore.Downloads.DISPLAY_NAME, safe)
-            put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
-        }
-        val resolver = context.contentResolver
-        val item = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            ?: throw java.io.IOException("The Downloads folder refused the file")
-        resolver.openOutputStream(item)?.use { input.copyTo(it) }
-            ?: throw java.io.IOException("The Downloads folder could not be opened")
-        values.clear()
-        values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
-        resolver.update(item, values, null, null)
-    } else {
-        val dir = android.os.Environment
-            .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-        dir.mkdirs()
-        java.io.File(dir, safe).outputStream().use { input.copyTo(it) }
     }
 }

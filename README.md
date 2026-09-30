@@ -364,6 +364,52 @@ once All folders is on, editing the query searches again after a pause.
 security event log — four administrator screens that stay in the browser. There
 is no offline mode; the progressive web app has one.
 
+### Background tasks
+
+Against Cloudhub-web, which runs long file operations as tasks on the server,
+the app does what the web app's **Tasks** page does:
+
+| Action | Where | Who |
+|---|---|---|
+| **Download as ZIP** | a folder's menu, or ⋮ on a selection | anyone |
+| **Compress to ZIP** (saved beside the items) | the file menu, or ⋮ on a selection | editors |
+| **Extract here** | a `.zip`'s menu | editors |
+| **Checksum (SHA-256)** | a file's menu, or ⋮ on a selection of files | anyone |
+| **Make thumbnails** | a folder's menu | editors |
+| Large copy, permanent delete, emptying a large trash | as before | editors |
+
+A copy, delete or purge is offered to the server as background work
+(`"background": "auto"`), as the web app offers it. The server decides:
+anything over its limits (200 files or 256 MB by default) is queued and the
+reply says so, and anything smaller is done at once, as before.
+
+A task runs on the server and carries on when the app is closed. While
+anything is queued or running, a badge on the Files screen says how many;
+**Tasks** (in the ⋮ menu) lists them all with their progress, what they did,
+and Cancel, Retry, Remove, **Clear finished** and, for an archive, Download.
+A task that finishes is announced wherever you are in the app. A folder it
+changed is reloaded. Checksums open in a dialog you can copy them from.
+
+A ZIP you asked for is saved to Downloads as soon as it is ready. Its task is
+then removed, because an account may keep only three waiting on the server.
+One downloaded by hand from Tasks stays until you remove it.
+
+The Duplicates scan runs as a task too, so leaving the screen no longer stops
+it. The screen follows it while open and picks it up again when you come back;
+**Stop** cancels it. A scan that someone else started is followed rather than
+restarted underneath them.
+
+The app looks at the server every 1.5 seconds, and only while a task is queued
+or running. In the background it stops looking unless a ZIP you asked for is
+still being made. When a server has no CLI worker (KSWEB, typically), queued
+tasks run inside the web server, but only when a client asks. The app asks
+when it queues something, and again every 5 seconds while tasks wait with
+nothing running them.
+
+Against Cloudhub-2's own server, which has no task queue (`/api/jobs` answers
+404), none of this is offered and every action works as it always did. The
+same goes for a Cloudhub-web whose database has no `jobs` table.
+
 ### Browsing files
 
 A folder that is loading draws placeholder cards with a slow shimmer rather
@@ -923,6 +969,15 @@ Those tests sign in and exercise the chunked upload — including interrupting
 one and resuming it from the server's offset — plus download, rename, move,
 copy, search, trash and restore, and share create and revoke. Without
 `CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
+
+Pointed at a Cloudhub-web, they also run background tasks end to end: a
+checksum, a folder zipped and downloaded, a ZIP made and extracted again, a
+205-file copy that the server queues rather than does, cancel, retry and
+clear, and a duplicate scan run by the worker. `TaskCenterTest` drives the
+app's own task follower the same way. It checks that a ZIP lands in Downloads,
+that a task finishing while the app is away is announced on return, and that
+the follower stops once nothing is left to follow. Against Cloudhub-2's own
+server these check only that the app sees no queue and offers none.
 
 Decisions that are awkward to reach by hand are pure functions or plain state
 machines, tested without a server or a device: whether a saved position is

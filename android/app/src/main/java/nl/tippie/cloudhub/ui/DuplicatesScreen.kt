@@ -23,13 +23,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import nl.tippie.cloudhub.net.ApiError
+import nl.tippie.cloudhub.net.BackgroundTask
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.DuplicateGroup
 import nl.tippie.cloudhub.net.DuplicateScan
+import nl.tippie.cloudhub.work.TaskCenter
 
 /**
  * The same photo, twice.
@@ -44,6 +50,12 @@ import nl.tippie.cloudhub.net.DuplicateScan
  * slice of the work per request and says how far it has got. Groups appear as
  * they are confirmed, which means the screen is useful before the scan ends.
  *
+ * Where the server has a task queue (Cloudhub-web) the scan runs there as a
+ * background task instead, as the web app runs it: it carries on when this
+ * screen is left or the app is closed, and the screen reads what it has found
+ * so far while it is open. A scan somebody else started is followed the same
+ * way rather than started over under them.
+ *
  * Nothing is deleted without being asked for, every group always keeps a copy,
  * and what is deleted goes to the trash like any other delete, so a mistake is
  * recoverable.
@@ -52,6 +64,7 @@ import nl.tippie.cloudhub.net.DuplicateScan
 @Composable
 fun DuplicatesScreen(
     api: CloudHubApi,
+    tasks: TaskCenter,
     canWrite: Boolean,
     onBack: () -> Unit,
 ) {
@@ -67,9 +80,73 @@ fun DuplicatesScreen(
     val keeping = remember { mutableStateMapOf<String, String>() }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirming by remember { mutableStateOf(false) }
+    /** The background scan being followed, while it runs on the server. */
+    var following by remember { mutableStateOf<BackgroundTask?>(null) }
+    /** Following a background scan that is not this account's to see. */
+    var followingOther by remember { mutableStateOf(false) }
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    /**
+     * Read a background scan's findings until it ends.
+     *
+     * [taskId] is this account's scan task; without one -- a scan another
+     * account started -- the scan's own `done` is all there is to go on, and
+     * one that stops changing for [DuplicateRules.STALLED_POLLS] looks is left
+     * alone rather than watched for ever. Leaving the screen stops the
+     * following, never the scan.
+     */
+    suspend fun follow(taskId: String?) {
+        busy = true
+        error = null
+        gaveUp = false
+        followingOther = taskId == null
+        try {
+            var unchanged = 0
+            var previous: DuplicateScan? = null
+            while (true) {
+                val latest = withContext(Dispatchers.IO) { api.lastDuplicateScan() }
+                scan = latest
+                val task = taskId?.let { withContext(Dispatchers.IO) { api.task(it) } }
+                following = task
+                unchanged = if (latest == previous) unchanged + 1 else 0
+                previous = latest
+                val running = if (task != null) TaskRules.isActive(task) else !latest.done
+                if (!running || (task == null && unchanged >= DuplicateRules.STALLED_POLLS)) {
+                    when (task?.status) {
+                        TaskRules.FAILED -> error = task.error ?: "The scan failed."
+                        TaskRules.CANCELLED -> gaveUp = true
+                    }
+                    if (task == null && !latest.done) gaveUp = true
+                    // Once more, as the scan left it.
+                    scan = withContext(Dispatchers.IO) { api.lastDuplicateScan() }
+                    break
+                }
+                delay(TaskRules.POLL_MS)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message
+        } finally {
+            following = null
+            followingOther = false
+            busy = false
+        }
+    }
+
+    /**
+     * A scan is already running in the background: this account's, which is
+     * followed with its task, or another's, followed by its findings alone.
+     */
+    suspend fun followRunning() {
+        val mine = if (tasks.state.value.available) {
+            runCatching { withContext(Dispatchers.IO) { api.tasks(activeOnly = true) } }
+                .getOrNull()?.jobs?.firstOrNull { it.type == "duplicates" }
+        } else null
+        follow(mine?.id)
+    }
 
     /**
      * Ask for slices until the server says it is done.
@@ -83,6 +160,33 @@ fun DuplicatesScreen(
         busy = true
         error = null
         gaveUp = false
+        if (tasks.state.value.available) {
+            try {
+                val task = tasks.queue("duplicates", buildJsonObject { put("path", "/") })
+                keeping.clear()
+                selected = emptySet()
+                follow(task.id)
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiError) {
+                when {
+                    // Queued or running already: follow that one instead.
+                    e.status == 409 -> { followRunning(); return }
+                    // No usable queue after all: scan here, as before.
+                    e.code == "QUEUE_UNAVAILABLE" -> Unit
+                    else -> {
+                        error = if (e.status == 403) "Your account can see a scan but not start one." else e.message
+                        busy = false
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                error = e.message
+                busy = false
+                return
+            }
+        }
         try {
             var slices = 1
             var latest = withContext(Dispatchers.IO) { api.startDuplicateScan() }
@@ -96,6 +200,13 @@ fun DuplicatesScreen(
             }
             gaveUp = !latest.done
         } catch (e: ApiError) {
+            // A scan running in the background (Cloudhub-web) must not be
+            // advanced from here too; its findings are read instead.
+            if (e.status == 409) {
+                busy = false
+                followRunning()
+                return
+            }
             // A viewer may read a scan but not start one, which is the server
             // saying something specific rather than something going wrong.
             error = if (e.status == 403) "Your account can see a scan but not start one." else e.message
@@ -117,9 +228,19 @@ fun DuplicatesScreen(
             if (supported == true) {
                 val last = withContext(Dispatchers.IO) { api.lastDuplicateScan() }
                 scan = last
-                // Nothing has ever been scanned here. Starting one is what the
-                // screen is for -- but only an account that may.
-                if (!last.started && canWrite) runScan() else busy = false
+                // This account's scan, still running in the background from
+                // an earlier visit or from the web app: carry on following it.
+                val mine = if (tasks.state.value.available) {
+                    runCatching { withContext(Dispatchers.IO) { api.tasks(activeOnly = true) } }
+                        .getOrNull()?.jobs?.firstOrNull { it.type == "duplicates" }
+                } else null
+                when {
+                    mine != null -> follow(mine.id)
+                    // Nothing has ever been scanned here. Starting one is what
+                    // the screen is for -- but only an account that may.
+                    !last.started && canWrite -> runScan()
+                    else -> busy = false
+                }
             } else {
                 busy = false
             }
@@ -181,7 +302,19 @@ fun DuplicatesScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            Header(scan, busy, error, gaveUp, minBytes, canWrite, supported)
+            Header(scan, busy, error, gaveUp, minBytes, canWrite, supported,
+                background = following != null || followingOther,
+                onStop = following?.takeIf { it.canCancel }?.let { task ->
+                    {
+                        scope.launch {
+                            runCatching { tasks.cancel(task.id) }
+                                .onSuccess { snackbar.showSnackbar(it) }
+                                .onFailure { snackbar.showSnackbar(it.message ?: "That did not work") }
+                        }
+                        Unit
+                    }
+                },
+            )
 
             when {
                 supported == false -> Message(
@@ -297,6 +430,10 @@ private fun Header(
     minBytes: Long?,
     canWrite: Boolean,
     supported: Boolean?,
+    /** The scan runs on the server as a background task. */
+    background: Boolean = false,
+    /** Stop the background scan; null when it cannot be stopped from here. */
+    onStop: (() -> Unit)? = null,
 ) {
     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(
@@ -344,6 +481,17 @@ private fun Header(
         // being wrong.
         if (scan?.truncated == true) {
             Notice("The store has more files than one scan covers, so there may be more duplicates.")
+        }
+        if (background) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                Text(
+                    "Running on the server: it carries on if you leave this screen or close the app.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                )
+                onStop?.let { TextButton(onClick = it) { Text("Stop") } }
+            }
         }
         if (gaveUp) {
             Notice("The scan did not finish. What is listed is real; scan again to carry on.")

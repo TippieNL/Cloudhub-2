@@ -2,6 +2,7 @@ package nl.tippie.cloudhub.net
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 /** One row of a folder listing, matching FileService::entry() exactly. */
 @Serializable
@@ -167,6 +168,14 @@ data class SimpleResult(
     val success: Boolean = false,
     val message: String = "",
     val trashed: Boolean = false,
+    /**
+     * The server took the work off the request and queued it as a task
+     * instead: a large permanent delete, or emptying a large trash. Only a
+     * server with a task queue (Cloudhub-web) says so, and only when asked
+     * with "background": "auto".
+     */
+    val queued: Boolean = false,
+    val job: BackgroundTask? = null,
 )
 
 /** A bulk move or copy: partial success is reported per item, never hidden. */
@@ -175,9 +184,94 @@ data class RelocateResult(
     val success: Boolean = false,
     val completed: Int = 0,
     val failed: List<Failure> = emptyList(),
+    /** A large copy the server queued as a task rather than doing in the request. */
+    val queued: Boolean = false,
+    val job: BackgroundTask? = null,
+    val message: String = "",
 ) {
     @Serializable data class Failure(val path: String = "", val message: String = "")
 }
+
+/**
+ * One background task, as JobTypes::present() on Cloudhub-web describes it.
+ *
+ * Long file operations -- a big copy, a ZIP of a folder, unpacking an
+ * archive, emptying a large trash, a duplicate scan -- run on the server
+ * while nobody waits, and carry on when the app is closed. This is one of
+ * them as its owner sees it; TaskRules reads it for the screen.
+ */
+@Serializable
+data class BackgroundTask(
+    val id: String = "",
+    /** copy, archive, extract, checksum, thumbnails, duplicates or purge. */
+    val type: String = "",
+    val label: String = "",
+    /** The folder it works in, for "in /Photos". */
+    val target: String? = null,
+    /** pending, processing, completed, failed or cancelled. */
+    val status: String = "",
+    val progress: TaskProgress = TaskProgress(),
+    /** What it is working on now; only sent while it runs. */
+    val currentItem: String? = null,
+    val error: String? = null,
+    /**
+     * What it did, which differs per type. Kept as raw JSON: PHP encodes an
+     * empty result as [] rather than {}, which a typed class would refuse,
+     * and TaskRules reads the few fields each type has.
+     */
+    val result: JsonElement? = null,
+    val attempts: Int = 0,
+    /** Asked to stop; a running task stops at its next checkpoint. */
+    val cancelRequested: Boolean = false,
+    val canCancel: Boolean = false,
+    val canRetry: Boolean = false,
+    val canRemove: Boolean = false,
+    /** A finished archive is waiting to be downloaded. */
+    val hasDownload: Boolean = false,
+    val createdAt: String? = null,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+)
+
+@Serializable
+data class TaskProgress(
+    val done: Long = 0,
+    val total: Long = 0,
+    /** "items" or "bytes". */
+    val unit: String? = null,
+    /** 0 to 99 while it runs, 100 once completed; null while it cannot be said. */
+    val percent: Int? = null,
+)
+
+/** This account's tasks, from GET /api/jobs. */
+@Serializable
+data class TaskList(
+    val jobs: List<BackgroundTask> = emptyList(),
+    /** Queued or running. */
+    val active: Int = 0,
+    /**
+     * What runs queued tasks: "cli", a worker process; "inline", the web
+     * server itself, but only when a client asks it to (POST /api/jobs/run);
+     * or "none", in which case they wait for an administrator to start one.
+     */
+    val runner: String = "none",
+    /** False where the server has the queue but no table for it; [message] says what fixes that. */
+    val available: Boolean = true,
+    val message: String? = null,
+)
+
+/** The answer to queueing, reading, cancelling, retrying or clearing tasks. */
+@Serializable
+data class TaskReply(
+    val success: Boolean = false,
+    val job: BackgroundTask? = null,
+    /** After a cancel: "cancelled" at once, or "cancelling" at its next checkpoint. */
+    val status: String? = null,
+    /** How many finished tasks a clear removed. */
+    val removed: Int = 0,
+    /** Whether the server is now working through the queue. */
+    val running: Boolean = false,
+)
 
 @Serializable
 data class ServerConfigInfo(
