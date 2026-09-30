@@ -107,7 +107,7 @@ $checks['WebDAV is handed the upload rules'] =
     && str_contains($index, "'attribution' => fn(string \$rel): array => ledger()->rowsUnder(\$rel),");
 $checks['and a PUT applies them'] =
     str_contains($dav, "if(\$fits&&ctype_digit(\$declared)){try{\$fits((int)\$declared);}")
-    && str_contains($dav, "if(\$stored)\$stored(\$fs->relative(\$full),\$size);");
+    && str_contains($dav, "if(\$stored)\$stored(\$fs->relative(\$full),\$size,\$replaced);");
 
 // The sweep cursor is how usage stays true. flock() fails outright on the
 // Android shared storage this targets, so a LOCK_EX write never advanced it,

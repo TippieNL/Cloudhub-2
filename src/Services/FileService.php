@@ -498,7 +498,7 @@ final class FileService {
   $this->deleteTree($this->trashRoot().'/'.$id);
   return ['path'=>$this->relative($target),'renamed'=>basename($target)!==$meta['name'],
    'originalPath'=>(string)$meta['originalPath'],'attribution'=>is_array($attribution)?$attribution:[],
-   'favorites'=>is_array($favorites)?$favorites:[]];
+   'favorites'=>is_array($favorites)?$favorites:[],'bytes'=>(int)($meta['bytes']??0)];
  }
 
  /** Permanently remove one trash entry, or every entry when $id is null. */

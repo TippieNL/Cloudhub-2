@@ -114,6 +114,19 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS favorites (
  INDEX idx_favorite_path(file_path(190))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+// App passwords: what WebDAV clients sign in with (AppPasswordRepository).
+// Only a hash is kept; the password itself is shown once, when it is made.
+$pdo->exec("CREATE TABLE IF NOT EXISTS app_passwords (
+ id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ user_id INT UNSIGNED NOT NULL,
+ name VARCHAR(100) NOT NULL,
+ token_hash CHAR(64) NOT NULL,
+ created_at DATETIME NOT NULL,
+ last_used_at DATETIME NULL,
+ UNIQUE KEY uq_app_password_hash(token_hash),
+ INDEX idx_app_password_user(user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 // Upgrade legacy tables in place. No existing columns or rows are removed.
 addColumn($pdo, 'users', 'is_active', 'TINYINT(1) NOT NULL DEFAULT 1');
 addColumn($pdo, 'users', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
@@ -188,6 +201,28 @@ if ($count === 0) {
     $s = $pdo->prepare('INSERT INTO storage_servers (name, type, is_active, is_default, config) VALUES (?, ?, 1, 1, ?)');
     $s->execute(['Local Storage', 'local', json_encode(['path' => 'storage/files'], JSON_UNESCAPED_SLASHES)]);
     echo "Created default local storage server.\n";
+}
+
+/*
+ * Server credentials are sealed with APP_KEY (src/Services/Secrets.php).
+ * Rows written before that hold them in plain JSON, so seal them here: an
+ * upgrade is enough, and nobody has to re-enter a password to have it
+ * encrypted. Without a key they are only reported -- sealing needs one.
+ */
+$secrets = new \CloudHub\Services\Secrets((string)env('APP_KEY', ''));
+$sealed = 0; $plain = 0;
+foreach ($pdo->query('SELECT id, config FROM storage_servers')->fetchAll() as $row) {
+    $serverConfig = json_decode((string)$row['config'], true);
+    if (!is_array($serverConfig) || !\CloudHub\Services\Secrets::hasPlaintext($serverConfig)) continue;
+    if (!$secrets->available()) { $plain++; continue; }
+    $pdo->prepare('UPDATE storage_servers SET config = ? WHERE id = ?')
+        ->execute([json_encode($secrets->sealAll($serverConfig)), (int)$row['id']]);
+    $sealed++;
+}
+if ($sealed > 0) echo "Encrypted the credentials of $sealed storage server(s).\n";
+if ($plain > 0) {
+    echo "WARNING: $plain storage server(s) hold credentials in plain text.\n"
+        .$secrets->problem()."\nThen run this migration again to encrypt them.\n";
 }
 
 /*

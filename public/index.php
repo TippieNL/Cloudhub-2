@@ -7,6 +7,7 @@ use CloudHub\Repositories\ServerRepository;
 use CloudHub\Repositories\UserRepository;
 use CloudHub\Repositories\StorageLedger;
 use CloudHub\Repositories\FavoriteRepository;
+use CloudHub\Repositories\AppPasswordRepository;
 use CloudHub\Services\Auth;
 use CloudHub\Services\UploadService;
 use CloudHub\Services\Security;
@@ -15,6 +16,7 @@ use CloudHub\Services\LoginRateLimiter;
 use CloudHub\Services\Authorization;
 use CloudHub\Services\SubtitleService;
 use CloudHub\Services\AuditLog;
+use CloudHub\Services\Secrets;
 
 $fs = new FileService($config); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
 $frontController = ($basePath === '' ? '/' : $basePath.'/');
@@ -42,7 +44,15 @@ const SHARE_ROUTE = '#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?(?:/([^
  * on the token alone and never read $_SESSION.
  */
 $isPublicShare = (bool)preg_match(SHARE_ROUTE, $path);
-if (!$isPublicShare) Auth::startSession($config);
+/*
+ * WebDAV clients sign in with HTTP Basic and an app password on every
+ * request, and none of them keeps a cookie or can send a CSRF token -- so a
+ * request that brings its own credentials runs session-less too, and is
+ * signed in by webdav_sign_in() below. Only on /webdav: the API and the web
+ * app stay on the session.
+ */
+$davCredentials = str_starts_with($path, '/webdav') ? Http::basicCredentials() : null;
+if (!$isPublicShare && $davCredentials === null) Auth::startSession($config);
 Security::applyHeaders($config);
 Security::assertProductionConfig($config);
 header('X-Request-ID: '.Http::requestId());
@@ -456,13 +466,15 @@ function api_try(callable $fn): never {
             419 => 'CSRF_FAILED',
             422 => 'VALIDATION_FAILED',
             429 => 'RATE_LIMITED',
+            503 => 'SERVICE_UNAVAILABLE',
             507 => 'INSUFFICIENT_STORAGE'];
         /*
          * 5xx messages are hidden because they can carry internal detail, but a
          * status that appears in this map was chosen deliberately and its
          * message is written for the user. 507 ("you are over quota") is
          * useless as "an internal server error occurred" -- the caller cannot
-         * act on what they are not told.
+         * act on what they are not told, and neither can an administrator
+         * told only that, rather than that a feature needs configuring (503).
          */
         $known = isset($codes[$status]);
         $msg = ($status >= 500 && !$known)?'An internal server error occurred':$e->getMessage();
@@ -496,6 +508,44 @@ function ledger(): StorageLedger {
 function favorites(): FavoriteRepository {
     static $favorites = null;
     return $favorites ??= new FavoriteRepository(db());
+}
+/**
+* App passwords, sharing the request's database connection.
+*/
+function app_passwords(): AppPasswordRepository {
+    static $passwords = null;
+    return $passwords ??= new AppPasswordRepository(db());
+}
+/**
+* Ask a WebDAV client to sign in.
+*
+* The WWW-Authenticate challenge is what makes Finder, Explorer and davfs2 ask
+* for a username and password at all; without it a 401 is just an error. Only
+* /webdav sends it, so a browser never pops a password prompt over the web app.
+*/
+function webdav_challenge(): never {
+    http_response_code(401);
+    header('WWW-Authenticate: Basic realm="CloudHub WebDAV", charset="UTF-8"');
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo "Sign in with your CloudHub username and an app password.\n"
+        ."Create one in the web app under WebDAV; your account password is not accepted here.\n";
+    exit;
+}
+/**
+* Sign a WebDAV request in with the app password it carries, for this request only.
+*
+* Nothing is started or stored: the account is put where the rest of the code
+* reads it -- $_SESSION, which without session_start() is an ordinary array --
+* so roles, the audit trail and the upload ledger apply exactly as they do to
+* a signed-in browser. Role and account state come from the database on every
+* request, so a demotion or a disabled account takes effect at once.
+*/
+function webdav_sign_in(array $credentials): void {
+    [$username, $password] = $credentials;
+    $account = app_passwords()->authenticate($username, $password);
+    if ($account === null) webdav_challenge();
+    $_SESSION = ['user_id' => $account['id'], 'username' => $account['username'], 'role' => $account['role']];
 }
 /**
 * Sidecar subtitles, found and converted on demand.
@@ -544,8 +594,44 @@ function storage_report(FileService $fs, array $config, bool $force = false): ar
     $report = $fs->storageReport();
     $report['cached'] = false;
     if (!is_dir(dirname($cache)))@mkdir(dirname($cache), 0775, true);
-    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES));
+    // Locked, so it cannot interleave with storage_changed() rewriting it.
+    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES), LOCK_EX);
     return $report;
+}
+/**
+* Apply a change CloudHub made to the live tree to the cached figure.
+*
+* assert_upload_fits() checks STORAGE_LIMIT_GB against the cached figure, so
+* until the cache expired every upload was checked against the same stale
+* total: a batch of files that each fitted on its own all went through, and
+* together ran straight past the limit. Each route that adds or removes bytes
+* reports them here, so the next check sees them.
+*
+* Rewritten under a lock, so two changes at once cannot lose one. The file's
+* timestamp is the age of the measurement and is put back afterwards: letting
+* the rewrite refresh it would keep a busy server from ever measuring again,
+* and changes made outside CloudHub are only picked up by a measurement. With
+* nothing cached there is nothing to correct -- the next check measures.
+*/
+function storage_changed(int $bytes): void {
+    if ($bytes === 0)return;
+    $cache = dirname(__DIR__).'/storage/.cache/usage.json';
+    $handle = @fopen($cache, 'r+');
+    if ($handle === false)return;
+    try {
+        if (!flock($handle, LOCK_EX))return;
+        $measuredAt = (int)(fstat($handle)['mtime'] ?? 0);
+        $report = json_decode((string)stream_get_contents($handle), true);
+        if (!is_array($report) || !isset($report['bytes']))return;
+        $report['bytes'] = max(0, (int)$report['bytes'] + $bytes);
+        rewind($handle);
+        ftruncate($handle, 0);
+        fwrite($handle, (string)json_encode($report, JSON_UNESCAPED_SLASHES));
+        fflush($handle);
+        if ($measuredAt > 0)@touch($cache, $measuredAt);
+    } finally {
+        fclose($handle);
+    }
 }
 /**
 * Refuse an upload that would breach the whole-store limit or the caller's own
@@ -753,8 +839,15 @@ function share_media_kind(string $file): string {
     return 'other';
 }
 
+/**
+ * A server record fit to send to a client: every credential in its config
+ * masked, however it is named and however deep it sits. This named only
+ * password, privateKey and apiKey, and /api/servers/active answers any
+ * signed-in account -- so a passphrase or a token went to viewers as written.
+ */
 function mask_server(array $s): array {
-    foreach (['password', 'privateKey', 'apiKey'] as $k)if (!empty($s['config'][$k]))$s['config'][$k] = '••••••••'; return $s;
+    if (is_array($s['config'] ?? null))$s['config'] = Secrets::mask($s['config']);
+    return $s;
 }
 
 if ($path === '/api/auth/login' && $method === 'POST') api_try(function()use($config) {
@@ -864,7 +957,10 @@ if ($path === '/sw.js' && ($method === 'GET' || $method === 'HEAD')) {
 }
 $isAuthEndpoint = str_starts_with($path, '/api/auth/');
 $isProtectedApi = (str_starts_with($path, '/api/')&&!$isAuthEndpoint) || str_starts_with($path, '/webdav');
+if ($davCredentials !== null) webdav_sign_in($davCredentials);
 if ($isProtectedApi && $method !== 'OPTIONS') {
+    // A WebDAV client that has not signed in is asked to, rather than told no.
+    if (str_starts_with($path, '/webdav') && Auth::user() === null) webdav_challenge();
     Authorization::requireRead();
     /*
      * These POST routes do not write to the file store, so the write
@@ -880,8 +976,11 @@ if ($isProtectedApi && $method !== 'OPTIONS') {
      *                    rotate their own credentials
      *   favorites        stars and unstars a file for the caller alone (POST
      *                    and DELETE); a preference, never a change to a file
+     *   users/me/app-passwords  issues and revokes the caller's own WebDAV
+     *                    credentials (POST and DELETE); a viewer reads over
+     *                    WebDAV too, and issuing one takes the account password
      */
-    $writeExemptPost = ['/api/files/download-zip', '/api/thumbnail/video', '/api/users/me/password', '/api/favorites'];
+    $writeExemptPost = ['/api/files/download-zip', '/api/thumbnail/video', '/api/users/me/password', '/api/favorites', '/api/users/me/app-passwords'];
     /*
      * Everything that is not a read is a write -- by default, not by list.
      *
@@ -893,7 +992,11 @@ if ($isProtectedApi && $method !== 'OPTIONS') {
      * handles, has to clear CSRF and the write capability first.
      */
     if (!in_array($method, ['GET', 'HEAD', 'OPTIONS', 'PROPFIND'], true)) {
-        Auth::verifyCsrf();
+        // An app password is sent by the client itself, not attached by a
+        // browser the way a cookie is, so there is no token to check -- but a
+        // request a browser says another site started is still refused.
+        if ($davCredentials !== null)Security::rejectCrossSite();
+        else Auth::verifyCsrf();
         if (str_starts_with($path, '/api/servers'))Authorization::requireAdmin();
         elseif (!in_array($path, $writeExemptPost, true))Authorization::requireWrite();
     }
@@ -1024,8 +1127,10 @@ if ($path === '/api/files/delete' && $method === 'DELETE') api_try(function()use
     // says which happened, so the UI never claims the wrong thing.
     if (!$config['trash_enabled']) {
         $rel = $fs->relative($p);
+        $gone = (int)($fs->measure($p)['bytes'] ?? 0);
         $fs->deleteTree($p);
         ledger()->forget($rel);
+        storage_changed(-$gone);
         shares_forget($rel);
         favorites()->forget($rel);
         AuditLog::write(db(), 'file.delete', 'success', ['path' => $rel]);
@@ -1037,6 +1142,8 @@ if ($path === '/api/files/delete' && $method === 'DELETE') api_try(function()use
     // grant to someone else, and a delete is the moment to withdraw it.
     $trashed = $fs->relative($p);
     $meta = $fs->trash($p, Auth::user()['username'] ?? null, ledger()->rowsUnder($trashed), favorites()->rowsUnder($trashed));
+    // The trash is not part of the store's figure, so what it took is room again.
+    storage_changed(-(int)($meta['bytes'] ?? 0));
     ledger()->forget($meta['originalPath']);
     shares_forget($meta['originalPath']);
     favorites()->forget($meta['originalPath']);
@@ -1097,10 +1204,15 @@ $relocate = function(callable $apply, string $verb)use($fs, $config): array {
                 shares_relocate($fs->relative($source), $fs->relative($target));
                 favorites()->relocate($fs->relative($source), $fs->relative($target));
             } else {
+                $copiedBytes = 0;
                 foreach ($fs->copiedFiles($target) as $copied) {
+                    $bytes = (int)(filesize($copied)?:0);
                     ledger()->record($fs->relative($copied), basename($copied),
-                        (int)(filesize($copied)?:0), null, Auth::user()['id'] ?? null);
+                        $bytes, null, Auth::user()['id'] ?? null);
+                    $copiedBytes += $bytes;
                 }
+                // Before the next item in this request is checked against the limit.
+                storage_changed($copiedBytes);
             }
             $done++;
         }catch(RuntimeException $e) {
@@ -1462,6 +1574,8 @@ if ($path === '/api/trash/restore' && $method === 'POST') api_try(function()use(
     // restore stepped round any quota. The sweep leaves the rest consistent.
     ledger()->reattribute($restored['attribution'], $restored['originalPath'], $restored['path']);
     ledger()->sweep($fs);
+    // And back in the store's figure, which does not count the trash.
+    storage_changed($restored['bytes']);
     favorites()->reinstate($restored['favorites'], $restored['originalPath'], $restored['path']);
     AuditLog::write(db(), 'file.restore', 'success', ['path' => $restored['path']]);
     return ['success' => true, 'path' => $restored['path'],
@@ -1510,12 +1624,17 @@ if ($path === '/api/files/versions/download' && ($method === 'GET' || $method ==
 if ($path === '/api/files/versions/restore' && $method === 'POST') api_try(function()use($fs, $config) {
     $fs->writable();
     $b = Http::body();
-    $rel = $fs->relative($fs->existing(Http::string($b, 'path', 1, 4096)));
+    $full = $fs->existing(Http::string($b, 'path', 1, 4096));
+    $rel = $fs->relative($full);
+    $before = is_file($full)?(int)(filesize($full)?:0):0;
     $done = $fs->versionRestore($rel, Http::string($b, 'id', 1, 64),
         Auth::user()['username'] ?? null, (int)$config['max_versions_per_file']);
     // The restored file is a different size from the one it replaced, so the
-    // ledger has to be told or a quota drifts from what is on disk.
+    // ledger has to be told or a quota drifts from what is on disk -- and so
+    // does the store's figure, which does not count the versions.
     ledger()->sweep($fs);
+    clearstatcache(true, $full);
+    storage_changed((is_file($full)?(int)(filesize($full)?:0):0) - $before);
     AuditLog::write(db(), 'file.version.restore', 'success', ['path' => $rel, 'version' => $done['restored']]);
     return ['success' => true, 'path' => $rel, 'message' => 'Restored the previous version'];
 });
@@ -1607,6 +1726,9 @@ if ($path === '/api/uploads/complete' && $method === 'POST') api_try(function()u
     ledger()->record((string)$done['path'], (string)$done['name'],
         is_file($full)?(int)(filesize($full)?:0):0, is_file($full)?mime_type($full):null,
         Auth::user()['id'] ?? null);
+    // Bookkeeping for the store limit, not part of the answer.
+    storage_changed((is_file($full)?(int)(filesize($full)?:0):0) - (int)$done['replacedBytes']);
+    unset($done['replacedBytes']);
     return $done;
 });
 if ($path === '/api/uploads/cancel' && $method === 'DELETE') api_try(function() {
@@ -1677,17 +1799,23 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             $size = (int)($sizes[$i]??0);
             assert_upload_fits($fs, $config, $size);
             $dest = $target.'/'.$safe;
+            $replaced = 0;
             if (file_exists($dest)) {
                 if ($conflict === 'reject' || ($conflict === 'overwrite' && (!$config['allow_overwrite'] || is_dir($dest)))) {
                     throw new RuntimeException('File already exists: '.$safe, 409);
                 }
                 if ($conflict === 'rename') $dest = $fs->freeName($dest);
-                elseif ($config['versions_enabled'] ?? true) {
-                    $fs->keepVersion($dest, Auth::user()['username'] ?? null, (int)($config['max_versions_per_file'] ?? 0));
+                else {
+                    $replaced = (int)(filesize($dest) ?: 0);
+                    if ($config['versions_enabled'] ?? true) {
+                        $fs->keepVersion($dest, Auth::user()['username'] ?? null, (int)($config['max_versions_per_file'] ?? 0));
+                    }
                 }
             }
             if (!move_uploaded_file((string)$tmp[$i], $dest)) throw new RuntimeException('Unable to save '.$safe, 500);
             ledger()->record($fs->relative($dest), basename($dest), $size, null, Auth::user()['id'] ?? null);
+            // Before the next file in this request is checked against the limit.
+            storage_changed($size - $replaced);
             $saved[] = basename($dest);
         }
         return ['success' => true,
@@ -2123,7 +2251,42 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
 
         $users->update($id, ['password' => $next]);
         AuditLog::write(db(), 'user.password', 'success');
-        return ['success' => true, 'message' => 'Password changed'];
+        return ['success' => true, 'message' => 'Password changed. WebDAV app passwords were revoked with the old one.'];
+    });
+
+    /*
+     * The caller's own app passwords, for WebDAV clients (AppPasswordRepository).
+     *
+     * Every account may keep them -- a viewer reads over WebDAV as it does here,
+     * and the role still decides what a client may do. Issuing one takes the
+     * account password: a borrowed session must not be able to mint a
+     * credential that outlives it. The password comes back once, in the answer
+     * that creates it; listing shows names and dates only.
+     */
+    if ($path === '/api/users/me/app-passwords' && $method === 'GET') api_try(function() {
+        release_session_lock();
+        return ['passwords' => app_passwords()->list((int)Auth::user()['id'])];
+    });
+    if ($path === '/api/users/me/app-passwords' && $method === 'POST') api_try(function() {
+        $b = Http::body(16384);
+        $name = Http::string($b, 'name', 1, 100);
+        $current = Http::string($b, 'currentPassword', 1, 4096);
+        $id = (int)Auth::user()['id'];
+        if (!(new UserRepository(db()))->verifyPassword($id, $current)) {
+            AuditLog::write(db(), 'app_password.create', 'failure');
+            throw new RuntimeException('The current password is incorrect', 403);
+        }
+        $created = app_passwords()->create($id, $name);
+        AuditLog::write(db(), 'app_password.create', 'success', ['name' => $name]);
+        return $created;
+    });
+    if ($path === '/api/users/me/app-passwords' && $method === 'DELETE') api_try(function() {
+        $b = Http::body();
+        $id = Http::optionalInt($b, 'id', 1, PHP_INT_MAX);
+        if ($id === null)throw new RuntimeException('id is required', 422);
+        if (!app_passwords()->revoke((int)Auth::user()['id'], $id))throw new RuntimeException('App password not found', 404);
+        AuditLog::write(db(), 'app_password.revoke', 'success', ['id' => $id]);
+        return ['success' => true, 'message' => 'App password revoked'];
     });
 
     if ($path === '/api/users' && $method === 'GET') api_try(function() {
@@ -2211,8 +2374,8 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         }, $rows);
     });
 
-    if (str_starts_with($path, '/api/servers')) api_try(function()use($path, $method) {
-        $repo = new ServerRepository();
+    if (str_starts_with($path, '/api/servers')) api_try(function()use($path, $method, $config) {
+        $repo = new ServerRepository(new Secrets($config['app_key']));
         if ($path === '/api/servers/active' && $method === 'GET')return array_map('mask_server', $repo->all(true));
         Authorization::requireAdmin();
         if ($path === '/api/servers' && $method === 'GET')return array_map('mask_server', $repo->all()); if ($path === '/api/servers' && $method === 'POST') {
@@ -2222,7 +2385,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
                 $repo->delete($id); return ['success' => true,
                     'message' => 'Server deleted'];
             }if ($method === 'PUT') {
-                $b = Http::body(); if (isset($b['config']))foreach ($b['config'] as $k => $v)if ($v === '••••••••')$b['config'][$k] = $s['config'][$k]??$v; return mask_server($repo->update($id, $b));
+                $b = Http::body(); if (isset($b['config']) && is_array($b['config']))$b['config'] = Secrets::unmask($b['config'], is_array($s['config']) ? $s['config'] : []); return mask_server($repo->update($id, $b));
             }if (($m[2]??'') === 'toggle' && $method === 'POST')return mask_server($repo->update($id, ['isActive'=>!$s['isActive']])); if (($m[2]??'') === 'set-default' && $method === 'POST') {
                 $repo->setDefault($id); return ['success' => true,
                     'message' => $s['name'].' set as default'];
@@ -2242,11 +2405,13 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
                     $fs->keepVersion($full, Auth::user()['username'] ?? null, (int)($config['max_versions_per_file'] ?? 0));
                 }
             },
-            'stored' => function(string $rel, int $bytes): void {
+            'stored' => function(string $rel, int $bytes, int $replaced = 0): void {
                 ledger()->record($rel, basename($rel), $bytes, null, Auth::user()['id'] ?? null);
+                storage_changed($bytes - $replaced);
                 AuditLog::write(db(), 'file.webdav.put', 'success', ['path' => $rel, 'bytes' => $bytes]);
             },
-            'removed' => function(string $rel): void {
+            'removed' => function(string $rel, int $bytes = 0): void {
+                storage_changed(-$bytes);
                 ledger()->forget($rel);
                 shares_forget($rel);
                 favorites()->forget($rel);

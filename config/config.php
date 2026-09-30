@@ -30,7 +30,7 @@ return [
  'session_samesite'=>(string)env('SESSION_SAMESITE','Lax'), 'session_rotate_seconds'=>(int)env('SESSION_ROTATE_SECONDS',900),
  'login_rate_window_seconds'=>(int)env('LOGIN_RATE_WINDOW_SECONDS',900), 'login_rate_user_attempts'=>(int)env('LOGIN_RATE_USER_ATTEMPTS',5),
  'login_rate_ip_attempts'=>(int)env('LOGIN_RATE_IP_ATTEMPTS',20), 'login_rate_retention_seconds'=>(int)env('LOGIN_RATE_RETENTION_SECONDS',86400),
- 'rate_limit_secret'=>(string)env('RATE_LIMIT_SECRET',''), 'security_event_retention_days'=>(int)env('SECURITY_EVENT_RETENTION_DAYS',90), 'share_expiry_hours'=>(int)env('SHARE_EXPIRY_HOURS',0),
+ 'rate_limit_secret'=>(string)env('RATE_LIMIT_SECRET',''), 'app_key'=>(string)env('APP_KEY',''), 'security_event_retention_days'=>(int)env('SECURITY_EVENT_RETENTION_DAYS',90), 'share_expiry_hours'=>(int)env('SHARE_EXPIRY_HOURS',0),
  'max_upload_mb'=>(int)env('MAX_UPLOAD_MB',2048), 'max_upload_files'=>(int)env('MAX_UPLOAD_FILES',20),
  'upload_chunk_mb'=>(int)env('UPLOAD_CHUNK_MB',8), 'upload_retry_count'=>(int)env('UPLOAD_RETRY_COUNT',3),
  'upload_abandon_hours'=>(int)env('UPLOAD_ABANDON_HOURS',24), 'upload_conflict'=>(string)env('UPLOAD_CONFLICT','rename'),

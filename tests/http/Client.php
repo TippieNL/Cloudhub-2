@@ -127,6 +127,12 @@ final class Client
         return $this->send('DELETE', $route, [], $body);
     }
 
+    /** Any other verb with a JSON body, e.g. PATCH on an account. */
+    public function request(string $route, string $method, array $body = []): Response
+    {
+        return $this->send($method, $route, [], $body);
+    }
+
     /** Sign in and keep the session for everything that follows. */
     public function signIn(string $username, string $password): Response
     {

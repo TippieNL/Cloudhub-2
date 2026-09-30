@@ -75,6 +75,28 @@ function scenario(string $name, callable $body): void
     echo '  '.$name.PHP_EOL;
 }
 
+/**
+ * Run $body against a server of its own, started with extra environment.
+ *
+ * Configuration is read from the environment ahead of .env, so a scenario
+ * that needs a limit or a key the main server does not have gets a server
+ * with exactly that, and every other scenario keeps the ordinary one.
+ */
+function with_server(array $overrides, callable $body): void
+{
+    global $root;
+    $port = 8000 + random_int(901, 999);
+    $server = proc_open([PHP_BINARY, '-S', '127.0.0.1:'.$port, '-t', $root.'/public', $root.'/router.php'],
+        [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes, $root, array_merge(getenv(), $overrides));
+    $base = 'http://127.0.0.1:'.$port;
+    try {
+        for ($i = 0; $i < 100 && @file_get_contents($base.'/?route='.rawurlencode('/api/auth/status')) === false; $i++) usleep(50000);
+        $body($base);
+    } finally {
+        if (is_resource($server)) { proc_terminate($server); proc_close($server); }
+    }
+}
+
 $client = new Client($base);
 $scratch = '/_httptest_'.bin2hex(random_bytes(4));
 
@@ -1203,6 +1225,93 @@ scenario('WebDAV write verbs need the write capability', function () use ($base,
     check('an editor MKCOL still works', in_array($ok->status, [201, 405], true), $ok->describe());
 });
 
+/*
+ * A real WebDAV client signs in with HTTP Basic and an app password.
+ *
+ * WebDAV took only the browser's session cookie and CSRF token, which no
+ * WebDAV client has -- Finder, Explorer, rclone and davfs2 could not sign in at
+ * all. These requests carry nothing but an Authorization header, the way
+ * those clients send them.
+ */
+scenario('WebDAV clients sign in with an app password', function () use ($base, $client, $scratch) {
+    $basic = static fn(string $user, string $password): string => 'Authorization: Basic '.base64_encode($user.':'.$password);
+    $dav = static fn(string $method, string $path, array $headers = [], ?string $body = null)
+        => (new Client($base))->dav($method, $path, $headers, $body);
+
+    // A throwaway editor, so changing its password and role touches no one else.
+    $name = 'davtest'.bin2hex(random_bytes(3));
+    $secret = 'dav-test-pass-'.bin2hex(random_bytes(4));
+    $made = $client->post('/api/users', ['username' => $name, 'password' => $secret, 'role' => 'editor']);
+    check('a test account is made', $made->ok(), $made->describe());
+    $uid = (int)($made->json['id'] ?? 0);
+    $me = new Client($base);
+    $me->signIn($name, $secret);
+
+    $refused = $me->post('/api/users/me/app-passwords', ['name' => 'laptop', 'currentPassword' => 'not-it']);
+    check('issuing an app password takes the account password', $refused->status === 403, $refused->describe());
+    $issued = $me->post('/api/users/me/app-passwords', ['name' => 'laptop', 'currentPassword' => $secret]);
+    $app = (string)($issued->json['password'] ?? '');
+    check('an app password is issued', $issued->ok() && preg_match('/^[a-z2-9]{5}(-[a-z2-9]{5}){3}$/', $app) === 1, $issued->describe());
+    $listed = (string)$me->get('/api/users/me/app-passwords')->body;
+    check('and listed by name, never by value', str_contains($listed, 'laptop') && !str_contains($listed, $app)
+        && !str_contains($listed, str_replace('-', '', $app)), $listed);
+
+    $anon = $dav('PROPFIND', '/webdav/', ['Depth: 0']);
+    check('a client that has not signed in is asked to', $anon->status === 401
+        && str_starts_with((string)$anon->header('WWW-Authenticate'), 'Basic '), $anon->describe());
+
+    $dir = '/webdav'.$scratch.'/davauth';
+    $list = $dav('PROPFIND', '/webdav'.$scratch.'/', ['Depth: 1', $basic($name, $app)]);
+    check('with the app password it lists', $list->status === 207, $list->describe());
+    check('without a cookie', $list->header('Set-Cookie') === null, (string)$list->header('Set-Cookie'));
+    // No CSRF token anywhere below: a WebDAV client has none to send.
+    check('and writes', $dav('MKCOL', $dir, [$basic($name, $app)])->status === 201);
+    $put = $dav('PUT', $dir.'/digits.txt', [$basic($name, $app), 'Content-Type: text/plain'], '0123456789');
+    check('a PUT stores the file', $put->status === 201, $put->describe());
+    $range = $dav('GET', $dir.'/digits.txt', [$basic($name, $app), 'Range: bytes=3-6']);
+    check('a GET answers a range, for seeking and resuming', $range->status === 206 && $range->body === '3456'
+        && $range->header('Content-Range') === 'bytes 3-6/10', $range->describe());
+    $spaced = strtoupper(str_replace('-', ' ', $app));
+    check('the password is forgiven its spaces and capitals', $dav('GET', $dir.'/digits.txt', [$basic($name, $spaced)])->body === '0123456789');
+    $moved = $dav('MOVE', $dir.'/digits.txt', [$basic($name, $app), 'Destination: '.$dir.'/moved.txt']);
+    check('a MOVE works', $moved->status === 201, $moved->describe());
+
+    check('the account password is not accepted', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $secret)])->status === 401);
+    check('nor the app password under another name', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic('editor', $app)])->status === 401);
+    $api = (new Client($base))->get('/api/files/list', ['path' => '/'], [$basic($name, $app)]);
+    check('it signs in to WebDAV only, never the API', $api->status === 401 && $api->header('WWW-Authenticate') === null,
+        $api->describe());
+    $cross = $dav('DELETE', $dir.'/moved.txt', [$basic($name, $app), 'Sec-Fetch-Site: cross-site']);
+    check('a write a browser says another site started is refused', $cross->status === 403, $cross->describe());
+
+    // The account is read on every request: no session to go stale.
+    $client->request('/api/users/'.$uid, 'PATCH', ['role' => 'viewer']);
+    check('a demotion applies at once', $dav('PUT', $dir.'/late.txt', [$basic($name, $app)], 'x')->status === 403);
+    check('and a viewer still reads', $dav('GET', $dir.'/moved.txt', [$basic($name, $app)])->body === '0123456789');
+    $client->request('/api/users/'.$uid, 'PATCH', ['isActive' => false]);
+    check('a disabled account is signed out at once', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $app)])->status === 401);
+    $client->request('/api/users/'.$uid, 'PATCH', ['isActive' => true, 'role' => 'editor']);
+    check('and back in when enabled', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $app)])->status === 207);
+
+    $second = (string)($me->post('/api/users/me/app-passwords', ['name' => 'phone', 'currentPassword' => $secret])->json['password'] ?? '');
+    $rows = $me->get('/api/users/me/app-passwords')->json['passwords'] ?? [];
+    $laptop = array_values(array_filter($rows, static fn(array $r): bool => $r['name'] === 'laptop'))[0]['id'] ?? 0;
+    $revoked = $me->delete('/api/users/me/app-passwords', ['id' => $laptop]);
+    check('an app password can be revoked', $revoked->ok(), $revoked->describe());
+    check('which ends its access', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $app)])->status === 401);
+    check('and no other', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $second)])->status === 207);
+    $foreign = $client->delete('/api/users/me/app-passwords', ['id' => $laptop]);
+    check('nobody revokes another account\'s', $foreign->status === 404, $foreign->describe());
+
+    $changed = $me->post('/api/users/me/password', ['currentPassword' => $secret, 'newPassword' => $secret.'-2']);
+    check('changing the password', $changed->ok(), $changed->describe());
+    check('revokes every app password', $dav('PROPFIND', $dir.'/', ['Depth: 0', $basic($name, $second)])->status === 401
+        && ($me->get('/api/users/me/app-passwords')->json['passwords'] ?? null) === []);
+
+    $dav('DELETE', $dir, [$basic($name, $second)]);
+    $client->request('/api/users/'.$uid, 'DELETE');
+});
+
 scenario('rename never overwrites what is already there', function () use ($client, $scratch) {
     foreach (['keep-a.txt' => 'first', 'other-a.txt' => 'second'] as $name => $body) {
         $init = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => $name,
@@ -1385,6 +1494,170 @@ scenario('every way bytes arrive answers to the quota', function () use ($base, 
     } finally {
         if (is_resource($server)) { proc_terminate($server); proc_close($server); }
     }
+});
+
+/*
+ * The store limit sees every upload, not the figure from the last measurement.
+ *
+ * STORAGE_LIMIT_GB is checked against a measurement cached for
+ * USAGE_CACHE_SECONDS. Every upload inside that window used to be checked
+ * against the same stale total, so files that each fitted on their own all
+ * went through together. Runs against a server of its own with the limit set
+ * 600 KB above a fresh measurement, and the default five-minute cache -- so
+ * nothing here passes because the cache happened to expire.
+ */
+scenario('the store limit counts what was just uploaded', function () use ($scratch, $user, $pass) {
+    $piece = 400 * 1024;
+    // Measure the store fresh, so the limit below is exact and the cache new.
+    // The placeholder limit only has to be above what is there.
+    $measured = -1;
+    with_server(['STORAGE_LIMIT_GB' => '1000', 'USAGE_CACHE_SECONDS' => '300'], function (string $sbase) use (&$measured, $user, $pass) {
+        $admin = new Client($sbase);
+        $admin->signIn($user, $pass);
+        $measured = (int)($admin->get('/api/storage/usage', ['refresh' => 1])->json['bytes'] ?? -1);
+    });
+    if ($measured < 0) { check('the store can be measured', false); return; }
+
+    $limit = ['STORAGE_LIMIT_GB' => sprintf('%.12F', ($measured + 600 * 1024) / 1073741824), 'USAGE_CACHE_SECONDS' => '300'];
+    with_server($limit, function (string $sbase) use ($scratch, $piece) {
+        $c = new Client($sbase);
+        $c->signIn('editor', getenv('CLOUDHUB_EDITOR_PASS') ?: 'editor-test-pass-123');
+        $dir = $scratch.'/store-limit';
+        $c->post('/api/files/mkdir', ['path' => $dir]);
+        $upload = function (string $name) use ($c, $dir, $piece) {
+            $init = $c->post('/api/uploads/init', ['targetPath' => $dir, 'name' => $name, 'size' => $piece,
+                'uploadId' => 'limit'.bin2hex(random_bytes(6)), 'conflict' => 'rename']);
+            if (!$init->ok()) return $init;
+            $c->putChunk((string)($init->json['id'] ?? ''), 0, random_bytes($piece));
+            return $c->post('/api/uploads/complete', ['id' => (string)($init->json['id'] ?? '')]);
+        };
+
+        $first = $upload('a.bin');
+        check('a file inside the limit uploads', $first->ok(), $first->describe());
+        $second = $upload('b.bin');
+        check('the next one is checked against a figure that includes the first', $second->status === 507,
+            $second->describe());
+
+        $put = $c->dav('PUT', '/webdav'.$dir.'/c.bin', ['Content-Type: application/octet-stream'], random_bytes($piece));
+        check('so is a WebDAV PUT', $put->status === 507, $put->describe());
+        $copy = $c->post('/api/files/copy', ['paths' => [$dir.'/a.bin'], 'destination' => $scratch]);
+        check('and a copy', ($copy->json['completed'] ?? -1) === 0
+            && str_contains((string)($copy->json['failed'][0]['message'] ?? ''), 'full'), $copy->describe());
+        $form = $c->multipart('/api/files/upload', ['targetPath' => $dir], ['d.bin' => random_bytes(300 * 1024)]);
+        check('and a multipart upload', $form->status === 507, $form->describe());
+
+        // Deleting makes room at once, rather than when the cache next expires.
+        $gone = $c->delete('/api/files/delete', ['path' => $dir.'/a.bin']);
+        check('the first file goes to the trash', $gone->ok(), $gone->describe());
+        $again = $upload('b.bin');
+        check('and the room it left can be used straight away', $again->ok(), $again->describe());
+
+        // A restore brings bytes back into the store, so they count again.
+        $c->post('/api/trash/restore', ['id' => (string)($gone->json['id'] ?? '')]);
+        $after = $upload('e.bin');
+        check('a restore counts against the limit again', $after->status === 507, $after->describe());
+    });
+});
+
+/*
+ * Storage server credentials never reach the database, or a viewer, as written.
+ *
+ * A server's config holds another system's password, and it was stored as
+ * plain JSON -- in every dump and backup -- while /api/servers/active, which
+ * any signed-in account may read, masked only three of its possible names.
+ * Credentials are sealed under APP_KEY; this reads the rows back directly to
+ * prove it, and runs the migration over a row written the old way.
+ */
+scenario('storage server credentials are sealed at rest', function () use ($root, $client, $user, $pass) {
+    // The rows are read directly, which needs the application's own reading
+    // of .env. In a scope of its own, since the bootstrap assigns $root and
+    // $config; and its exception handler would hide this harness's failures.
+    (static function (string $bootstrap): void { require_once $bootstrap; })($root.'/config/bootstrap.php');
+    restore_exception_handler();
+    $dbc = require $root.'/config/database.php';
+    $db = new PDO($dbc['dsn'], $dbc['user'], $dbc['pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $row = static function (int $id) use ($db): string {
+        $q = $db->prepare('SELECT config FROM storage_servers WHERE id = ?');
+        $q->execute([$id]);
+        return (string)$q->fetchColumn();
+    };
+    $key = bin2hex(random_bytes(32));
+    $box = new \CloudHub\Services\Secrets($key);
+    $config = ['host' => 'nas.example', 'username' => 'backup', 'password' => 'pw-'.bin2hex(random_bytes(6)),
+        'passphrase' => 'pp-'.bin2hex(random_bytes(6)), 'headers' => ['Authorization' => 'Bearer tk-'.bin2hex(random_bytes(6))]];
+    $made = [];
+    $sealedId = 0;
+
+    // No APP_KEY on the ordinary server: a credential is refused, and says why.
+    $refused = $client->post('/api/servers', ['name' => 'httptest-nokey', 'type' => 'sftp', 'config' => $config]);
+    check('without APP_KEY a credential is not stored in the clear', $refused->status === 503
+        && str_contains((string)($refused->json['error']['message'] ?? ''), 'APP_KEY'), $refused->describe());
+    if (isset($refused->json['id'])) $made[] = (int)$refused->json['id'];
+    $plain = $client->post('/api/servers', ['name' => 'httptest-plain', 'type' => 'local', 'config' => ['path' => '/srv']]);
+    check('a server with no credentials needs no key', $plain->ok(), $plain->describe());
+    if (isset($plain->json['id'])) $made[] = (int)$plain->json['id'];
+
+    with_server(['APP_KEY' => $key], function (string $kbase) use ($user, $pass, $config, $row, $box, &$made, &$sealedId) {
+        $admin = new Client($kbase);
+        $admin->signIn($user, $pass);
+        $created = $admin->post('/api/servers', ['name' => 'httptest-sealed', 'type' => 'sftp', 'config' => $config]);
+        $id = (int)($created->json['id'] ?? 0);
+        check('with APP_KEY the server is saved', $created->ok() && $id > 0, $created->describe());
+        if ($id === 0) return;
+        $made[] = $sealedId = $id;
+
+        $stored = $row($id);
+        check('no credential is in the row', !str_contains($stored, $config['password'])
+            && !str_contains($stored, $config['passphrase']) && !str_contains($stored, 'Bearer'), $stored);
+        check('the rest of the config is', str_contains($stored, 'nas.example') && str_contains($stored, 'backup'), $stored);
+        $opened = $box->openAll((array)json_decode($stored, true));
+        check('and the key opens it to exactly what was saved', $opened === $config, (string)json_encode($opened));
+
+        $answer = (string)json_encode($created->json);
+        check('the answer masks every credential', !str_contains($answer, $config['password'])
+            && !str_contains($answer, $config['passphrase']) && !str_contains($answer, 'Bearer'), $answer);
+
+        $viewer = new Client($kbase);
+        $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+        $active = (string)$viewer->get('/api/servers/active')->body;
+        check('a viewer sees no credential of an active server', str_contains($active, 'httptest-sealed')
+            && !str_contains($active, $config['passphrase']) && !str_contains($active, 'Bearer'), $active);
+
+        // An edit sends the masks back for what it did not change.
+        $edit = $created->json['config'] ?? [];
+        $edit['host'] = 'nas2.example';
+        $put = $admin->put('/api/servers/'.$id, (string)json_encode(['config' => $edit]), [], ['Content-Type: application/json']);
+        $afterEdit = $box->openAll((array)json_decode($row($id), true));
+        check('an edit keeps the credentials it did not touch', $put->ok()
+            && $afterEdit['password'] === $config['password'] && $afterEdit['headers']['Authorization'] === $config['headers']['Authorization']
+            && $afterEdit['host'] === 'nas2.example', $put->describe());
+    });
+
+    // Back on the server without a key: a toggle must not need one, nor disturb the seal.
+    if ($sealedId > 0) {
+        $before = $row($sealedId);
+        $toggle = $client->post('/api/servers/'.$sealedId.'/toggle', []);
+        check('a toggle needs no key and leaves the credentials sealed', $toggle->ok() && $row($sealedId) === $before,
+            $toggle->describe());
+    }
+
+    // A row written before this existed is sealed by the migration.
+    $legacy = ['host' => 'old.example', 'password' => 'legacy-'.bin2hex(random_bytes(6))];
+    $db->prepare("INSERT INTO storage_servers (name, type, is_active, is_default, config) VALUES ('httptest-legacy', 'ftp', 0, 0, ?)")
+        ->execute([json_encode($legacy)]);
+    $legacyId = (int)$db->lastInsertId();
+    $made[] = $legacyId;
+    $migrate = proc_open([PHP_BINARY, $root.'/database/migrate.php'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes, $root, array_merge(getenv(), ['APP_KEY' => $key]));
+    $output = stream_get_contents($pipes[1]).stream_get_contents($pipes[2]);
+    $code = proc_close($migrate);
+    $migrated = $row($legacyId);
+    check('the migration seals credentials stored in the clear', $code === 0
+        && !str_contains($migrated, $legacy['password']) && str_contains($migrated, 'old.example')
+        && str_contains($output, 'Encrypted the credentials'), $output);
+    check('without losing them', ($box->openAll((array)json_decode($migrated, true))['password'] ?? '') === $legacy['password']);
+
+    foreach ($made as $id) $client->delete('/api/servers/'.$id);
 });
 
 /*

@@ -13,7 +13,9 @@ For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatib
    stronger guarantee than any deny rule. If you must serve the project directory
    itself, Apache's bundled `.htaccess` denies those paths — other servers need
    the equivalent rules configured by hand.
-2. Copy `.env.example` to `.env` and change the database credentials.
+2. Copy `.env.example` to `.env` and change the database credentials. Set
+   `APP_KEY` too if you will save storage servers with credentials (see
+   **Storage server credentials**).
 3. Create/import the database with `database/schema.sql`, then create the first
    administrator with `php tools/create-admin.php admin` — the schema seeds no
    account (see **Login**).
@@ -239,6 +241,27 @@ Share links are stored in MySQL instead of memory, improving restart persistence
 ## Current limitation
 
 The supplied project contains FTP/SFTP/SMB/HTTP storage-adapter logic. Server records, activation/default management, local file management, uploads, sharing, thumbnails and WebDAV are migrated. Protocol-specific remote browse/test/upload implementations require the corresponding PHP extension or system client and are not enabled by default in this portable build; the UI identifies configured remote servers rather than pretending those transports work without their runtime dependencies.
+
+### Storage server credentials
+
+A server's configuration holds another system's credentials, so those are
+encrypted before they are stored: every value whose key names a credential
+(`password`, `passphrase`, `privateKey`, `apiKey`, `token`, `secret`, `auth`…,
+at any depth) is sealed with libsodium under `APP_KEY` from `.env`, and the rest
+of the configuration stays readable. A database dump or backup alone no longer
+reveals them. API answers mask every one of those values, including
+`/api/servers/active`, which any signed-in account may read.
+
+Generate the key once and keep it with your backup of `.env` — without it the
+stored credentials cannot be read back:
+
+```bash
+php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'   # put the result in APP_KEY=
+```
+
+Until `APP_KEY` is set, a server can be saved only without credentials, and the
+refusal says why. `php database/migrate.php` encrypts credentials saved by an
+earlier version once the key is set, and warns about them until then.
 
 
 ## Subdirectory installation
@@ -1136,7 +1159,10 @@ returned by any of them.
 Every request that is not a read — anything but `GET`, `HEAD`, `OPTIONS` and
 WebDAV's `PROPFIND` — needs the CSRF token and the `editor` role, WebDAV's
 `MKCOL` and `MOVE` included. The guard used to list `POST`, `PUT`, `PATCH` and
-`DELETE`, so a viewer could create folders and move any file over another.
+`DELETE`, so a viewer could create folders and move any file over another. The
+one exception to the token is a WebDAV client signed in with an app password
+(see **WebDAV**), which has no cookie for another site to borrow; the role
+rule applies to it all the same.
 
 Guards that cannot be bypassed by editing the page: you cannot delete your own
 account, you cannot remove your own administrator access, and the last enabled
@@ -1149,8 +1175,68 @@ out. The check is throttled to roughly one query per user per minute so that a
 gallery's worth of thumbnail requests does not each incur one.
 
 Passwords are stored using PHP-compatible password hashes and are re-hashed to
-the preferred algorithm on the next successful login. The browser no longer
-receives a `WWW-Authenticate` header, so native Basic Auth popups are not used.
+the preferred algorithm on the next successful login. The web app and the API
+never send a `WWW-Authenticate` header, so a browser shows no Basic Auth popup
+over them; only `/webdav` does, because that is how a WebDAV client knows to
+ask for a password. Changing a password — your own, or an administrator
+resetting it — also revokes that account's WebDAV app passwords.
+
+## WebDAV
+
+The file store is also a WebDAV share at `https://your-host/webdav/` (with the
+base path in front when installed in a folder), so Finder, Windows Explorer,
+rclone, davfs2, Cyberduck and phone file managers can open it directly. The
+**WebDAV** button in the web app shows the exact address.
+
+**Clients sign in with an app password, not your account password.** Create
+one per client under **WebDAV** — it asks for your account password, shows the
+new app password once, and lists it afterwards by name with when it was last
+used, so a lost laptop can be revoked on its own. Sign in to the client with
+your normal username and that app password; dashes, spaces and capitals in it
+do not matter.
+
+| | |
+|---|---|
+| Authentication | HTTP Basic on `/webdav` only; the API and web app never accept it |
+| What a client may do | exactly what the account's role allows, read live on every request |
+| Revoked by | the **Revoke** button, changing or resetting the password, deleting or disabling the account |
+| Stored as | a SHA-256 hash; each is 20 characters from a 31-character alphabet (about 99 bits) |
+
+Why not the account password: a WebDAV client sends its password with every
+request and keeps it, so it would sit in every client's settings, cost an
+Argon2 check on every request, and could only be withdrawn by changing it
+everywhere. App passwords are cheap to check, useless for signing in to the
+web app, and individually revocable. An app-password request carries no cookie
+and no CSRF token; a browser cannot send WebDAV's write verbs to another site
+without CORS, which the server never grants, and a request a browser marks
+`Sec-Fetch-Site: cross-site` is refused anyway.
+
+Signing in with the browser session still works for WebDAV requests the web
+app makes itself, under the usual session and CSRF rules.
+
+`GET` answers byte ranges, validators and conditional requests through the
+same code as the API's streams, so a player can seek a video and a client can
+resume a copy or read part of a file.
+
+Client notes:
+
+- **Use HTTPS.** Basic authentication sends the app password with every
+  request, and Windows refuses Basic over plain HTTP unless its `BasicAuthLevel`
+  registry value is changed.
+- **rclone:** `rclone config` → `webdav`, vendor `other`, your username and the
+  app password.
+- **davfs2:** set `use_locks 0` in `davfs2.conf`.
+- **Finder and Windows Explorer** mount the share read-only, or refuse some
+  writes: they expect WebDAV locking (`LOCK`/`UNLOCK`) and `PROPPATCH`, which
+  this server does not implement. rclone, davfs2, Cyberduck and WinSCP read and
+  write normally.
+
+The API behind the dialog is `GET`, `POST` (`{name, currentPassword}`) and
+`DELETE` (`{id}`) on `/api/users/me/app-passwords`, open to every role.
+Behind Apache with PHP-FPM, the bundled `.htaccess` files pass the
+`Authorization` header on to PHP; with nginx and PHP-FPM, `fastcgi_params`
+already does. Existing installations get the `app_passwords` table from
+`php database/migrate.php`.
 
 ## Storage and quotas
 
@@ -1177,6 +1263,17 @@ likewise a copy, a WebDAV `PUT` and the legacy multipart upload:
 Refusals come back as `507 INSUFFICIENT_STORAGE` and say where the caller
 stands (`You have used 4.1 GB of your 5 GB quota`) — 5xx messages are
 otherwise hidden, but a caller cannot act on what they are not told.
+
+`STORAGE_LIMIT_GB` is checked against the cached measurement, and every change
+CloudHub makes to the store is applied to that cached figure as it happens —
+uploads of every kind, copies, deletes, trash restores and version restores.
+Without that, every upload inside the cache window was checked against the
+same stale total, so a batch of files that each fitted went through together
+and ran past the limit; and room made by deleting could not be used until the
+cache expired. The measurement's age is kept, so changes made outside
+CloudHub are still picked up when it expires. One gap remains, shared with the
+per-account quota: uploads running at the same moment are each checked before
+any of them lands, so the limit can be overrun by what is in flight at once.
 
 ### What the per-account figure counts
 
