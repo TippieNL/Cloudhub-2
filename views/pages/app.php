@@ -45,6 +45,7 @@
             <button id="install-app" type="button" hidden>Install</button>
             <button id="theme" aria-label="Toggle dark mode">◐</button>
             <button id="change-password" type="button">Password</button>
+            <button id="webdav-open" type="button">WebDAV</button>
             <button id="logout">Log out</button>
         </div>
     </header>
@@ -215,7 +216,7 @@
                 <div class="modal-heading">
                     <div>
                         <h2>Change your password</h2>
-                        <p>Signing in elsewhere is unaffected until those sessions expire.</p>
+                        <p>Signing in elsewhere is unaffected until those sessions expire. Your WebDAV app passwords are revoked.</p>
                     </div>
                     <button id="password-close" class="icon-button" type="button" aria-label="Close">&times;</button>
                 </div>
@@ -231,6 +232,44 @@
                     <button class="primary-button" type="submit">Change password</button>
                 </div>
             </form>
+        </div>
+        <div id="webdav-overlay" class="modal-overlay" hidden>
+            <div id="webdav-dialog" class="confirm-dialog webdav-dialog" role="dialog" aria-modal="true" aria-labelledby="webdav-title">
+                <div class="modal-heading">
+                    <div>
+                        <h2 id="webdav-title">Connect with WebDAV</h2>
+                        <p>Finder, Windows Explorer, rclone and phone file apps can open your files directly. Sign in to them with your username and an app password &mdash; your account password is not accepted there.</p>
+                    </div>
+                    <button id="webdav-close" class="icon-button" type="button" aria-label="Close">&times;</button>
+                </div>
+                <label class="share-field">Address
+                    <input id="webdav-url" type="text" readonly>
+                </label>
+                <label class="share-field">Username
+                    <input id="webdav-username" type="text" readonly>
+                </label>
+                <div id="webdav-created" class="status-message success" role="status" aria-live="polite" hidden>
+                    <span id="webdav-created-label"></span>
+                    <input id="webdav-created-password" class="webdav-secret" type="text" readonly aria-label="New app password">
+                    <span class="muted">Copy it now: it is not shown again.</span>
+                    <button id="webdav-copy" type="button">Copy</button>
+                </div>
+                <h3 class="webdav-heading">App passwords</h3>
+                <div id="webdav-list" class="webdav-list" aria-live="polite"></div>
+                <form id="webdav-form">
+                    <label class="share-field">Name
+                        <input id="webdav-name" maxlength="100" placeholder="e.g. Laptop" autocomplete="off" required>
+                    </label>
+                    <label class="share-field">Your account password
+                        <input id="webdav-current" type="password" autocomplete="current-password" required>
+                    </label>
+                    <div id="webdav-message" class="status-message" role="status" aria-live="polite" hidden></div>
+                    <div class="modal-actions">
+                        <button id="webdav-cancel" type="button">Close</button>
+                        <button class="primary-button" type="submit">Create app password</button>
+                    </div>
+                </form>
+            </div>
         </div>
         <div id="picker-overlay" class="modal-overlay" hidden>
             <div id="picker-dialog" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="picker-title">

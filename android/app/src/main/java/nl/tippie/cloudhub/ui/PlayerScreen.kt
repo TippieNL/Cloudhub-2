@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -42,6 +47,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.data.ResumePolicy
 import nl.tippie.cloudhub.data.Settings
@@ -64,7 +70,7 @@ private const val SEEK_STEP_MS = 10_000L
  * re-download the film from the start.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private fun mediaItemFor(
+internal fun mediaItemFor(
     api: CloudHubApi,
     entry: FileEntry,
     tracks: List<SubtitleTrack>,
@@ -89,6 +95,36 @@ private fun mediaItemFor(
         .build()
 
 /**
+ * Where the player reads from: the app's OkHttp client, through a disk cache,
+ * so bytes are fetched once. Kept apart so a test builds the player exactly
+ * as the screen does.
+ *
+ * Skipping back ten seconds used to re-fetch ten seconds that had just
+ * arrived, and re-opening a film downloaded it again from the start --
+ * which resume makes worse, dropping you halfway into a file the
+ * player then has to reach from scratch.
+ *
+ * FLAG_IGNORE_CACHE_ON_ERROR: a cache that cannot be written must cost
+ * a cache, never the video.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal fun playerDataSource(context: android.content.Context, client: CloudHubClient, entry: FileEntry): CacheDataSource.Factory {
+    return CacheDataSource.Factory()
+        .setCache(MediaCache.get(context))
+        .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        .apply {
+            // A film bigger than the cache cannot be held by it, and
+            // trying churns the whole cache while it plays -- including
+            // evicting spans still being read, which is how a large video
+            // stops playing rather than merely playing uncached. Those
+            // read through: no writes, but anything already cached is
+            // still served from there.
+            if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)
+        }
+}
+
+/**
  * Video and audio playback.
  *
  * ExoPlayer fetches through the app's own OkHttp client, so the request
@@ -111,10 +147,18 @@ fun PlayerScreen(
     onBack: () -> Unit,
     favorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
+    /** Editors and administrators may put a subtitle file beside the video. */
+    canWrite: Boolean = false,
+    /**
+     * Queue the chosen file for upload beside the video, under the given name.
+     * The callback reports a problem copying it for upload, or null once queued.
+     */
+    onAddSubtitle: ((FileEntry, Uri, String, (String?) -> Unit) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     var fullscreen by remember { mutableStateOf(false) }
     // The controller starts hidden -- PlayerView has not been told to show it.
@@ -138,30 +182,8 @@ fun PlayerScreen(
     }
 
     val player = remember {
-        /*
-         * Read through a disk cache, so bytes are fetched once.
-         *
-         * Skipping back ten seconds used to re-fetch ten seconds that had just
-         * arrived, and re-opening a film downloaded it again from the start --
-         * which resume makes worse, dropping you halfway into a file the
-         * player then has to reach from scratch.
-         *
-         * FLAG_IGNORE_CACHE_ON_ERROR: a cache that cannot be written must cost
-         * a cache, never the video.
-         */
-        val source = CacheDataSource.Factory()
-            .setCache(MediaCache.get(context))
-            .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-            .apply {
-                // A film bigger than the cache cannot be held by it, and
-                // trying churns the whole cache while it plays -- including
-                // evicting spans still being read, which is how a large video
-                // stops playing rather than merely playing uncached. Those
-                // read through: no writes, but anything already cached is
-                // still served from there.
-                if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)
-            }
+        // Read through a disk cache; see playerDataSource().
+        val source = playerDataSource(context, client, entry)
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
@@ -225,6 +247,100 @@ fun PlayerScreen(
 
         player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
         player.prepare()
+    }
+
+    /* ---- adding a track while watching ----------------------------------
+     *
+     * The upload goes through the app's queue and lands a moment later, so the
+     * new file is waited for: the track list is asked for again every couple
+     * of seconds until it appears, then swapped in where the film is, and its
+     * language turned on -- adding Dutch subtitles and then having to find
+     * them in a menu would be one step too many.
+     */
+    var awaiting by remember { mutableStateOf<Pair<String, String>?>(null) }   // file name, language
+    val queue = remember(context) { nl.tippie.cloudhub.work.UploadQueue(context) }
+    val addSubtitles = rememberSubtitleAdder(
+        api = api,
+        onAdd = { video, uri, name, language ->
+            awaiting = name to language
+            onAddSubtitle?.invoke(video, uri, name) { problem ->
+                // The file could not even be copied for upload: say so now.
+                if (problem != null) {
+                    awaiting = null
+                    scope.launch { snackbar.showSnackbar(problem) }
+                }
+            }
+        },
+        onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
+    )
+    LaunchedEffect(awaiting) {
+        val (name, language) = awaiting ?: return@LaunchedEffect
+        val started = System.currentTimeMillis()
+        // Shown for as long as it takes; the CC button below stays greyed out
+        // until there is a track to turn on, and this says why.
+        val waiting = scope.launch {
+            snackbar.showSnackbar("Uploading subtitles…", duration = SnackbarDuration.Indefinite)
+        }
+        try {
+            while (true) {
+                delay(2_000)
+                val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
+                val listed = tracks.any { it.path.substringAfterLast('/') == name }
+                val failure = queue.failures().lastOrNull { it.name == name && it.at >= started }?.reason
+                val queued = queue.all().any { it.name == name }
+                when (val state = SubtitleRules.uploadState(listed, queued, failure, System.currentTimeMillis() - started)) {
+                    SubtitleRules.Upload.Waiting -> continue
+                    SubtitleRules.Upload.Landed -> {
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                            .setPreferredTextLanguage(language.ifEmpty { null })
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .build()
+                        if (language.isNotEmpty()) settings.subtitleLanguage = language
+                        val playing = player.playWhenReady
+                        player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
+                        player.prepare()
+                        player.playWhenReady = playing
+                        waiting.cancel()
+                        snackbar.showSnackbar("Subtitles added and switched on")
+                    }
+                    is SubtitleRules.Upload.Failed -> {
+                        waiting.cancel()
+                        snackbar.showSnackbar("The subtitles could not be uploaded: ${state.reason}")
+                    }
+                    SubtitleRules.Upload.Lost -> {
+                        waiting.cancel()
+                        snackbar.showSnackbar("The subtitles did not arrive on the server; try adding them again")
+                    }
+                }
+                break
+            }
+        } finally {
+            waiting.cancel()
+            awaiting = null
+        }
+    }
+
+    /*
+     * A subtitle the player cannot read must never cost the film. With the
+     * tracks attached, a bad file fails the whole source -- the picture stops
+     * at the start and the CC button stays grey -- so the film is reloaded
+     * without them, where it was, and the reason given.
+     */
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val item = player.currentMediaItem ?: return
+                if (item.localConfiguration?.subtitleConfigurations.isNullOrEmpty()) return
+                val at = player.currentPosition
+                player.setMediaItem(mediaItemFor(api, entry, emptyList()), at)
+                player.prepare()
+                scope.launch {
+                    snackbar.showSnackbar("The subtitles beside this video could not be read, so it plays without them")
+                }
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
     }
 
     /* ---- resume ---------------------------------------------------------
@@ -346,6 +462,11 @@ fun PlayerScreen(
                         IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
                     },
                     actions = {
+                        if (canWrite && onAddSubtitle != null) {
+                            IconButton(onClick = { addSubtitles(entry) }) {
+                                Icon(Icons.Default.ClosedCaption, "Add subtitles")
+                            }
+                        }
                         onToggleFavorite?.let { FavoriteToggle(starred = favorite, onClick = it) }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -358,12 +479,30 @@ fun PlayerScreen(
             }
         },
     ) { padding ->
-        Box(
+        /*
+         * Half-folded on a table, the video goes above the hinge and a set of
+         * large controls below it, where they can be reached without holding
+         * the screen up -- otherwise the picture would be bent across the fold.
+         * Measured against where this area starts in the window, because the
+         * hinge is reported in window coordinates.
+         */
+        val hingeTop = tabletopHingeTop()
+        var areaTop by remember { mutableFloatStateOf(0f) }
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val videoHeight = hingeTop
+            ?.let { with(density) { (it - areaTop).coerceAtLeast(0f).toDp() } }
+            ?.takeIf { it >= MIN_TABLETOP_VIDEO }
+        Column(
             Modifier
                 .fillMaxSize()
                 .background(Color.Black)
                 // In fullscreen the video takes the whole window, bars and all.
                 .padding(if (fullscreen) PaddingValues(0.dp) else padding)
+                .onGloballyPositioned { areaTop = it.positionInWindow().y }
+        ) {
+        Box(
+            if (videoHeight != null) Modifier.fillMaxWidth().height(videoHeight)
+            else Modifier.fillMaxWidth().weight(1f)
         ) {
             AndroidView(
                 factory = { viewContext ->
@@ -438,6 +577,88 @@ fun PlayerScreen(
                 }
             }
         }
+        if (videoHeight != null) {
+            TabletopControls(player, entry.name, Modifier.fillMaxWidth().weight(1f))
+        }
+        }
+    }
+}
+
+/** Less than this above the hinge is no screen to watch on; the usual layout is used. */
+private val MIN_TABLETOP_VIDEO = 160.dp
+
+/**
+ * The lower half in tabletop posture: what is playing, where it has got to,
+ * and play, pause and skip at a size meant for a thumb on a table.
+ *
+ * Its own Compose controls rather than the PlayerView's, which overlay the
+ * picture and would sit above the fold with the video. The position is polled
+ * twice a second -- the player has no listener for the passing of time -- and
+ * held still while the slider is dragged, so it does not fight the finger.
+ */
+@Composable
+private fun TabletopControls(player: ExoPlayer, title: String, modifier: Modifier) {
+    var playing by remember { mutableStateOf(player.isPlaying) }
+    var position by remember { mutableLongStateOf(player.currentPosition) }
+    var duration by remember { mutableLongStateOf(0L) }
+    var scrubbing by remember { mutableStateOf<Float?>(null) }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+    LaunchedEffect(player) {
+        while (true) {
+            position = player.currentPosition
+            duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: 0L
+            delay(500)
+        }
+    }
+
+    Column(
+        modifier.background(Color(0xFF121212)).padding(horizontal = 32.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        Slider(
+            value = scrubbing ?: if (duration > 0) position.toFloat() / duration else 0f,
+            onValueChange = { scrubbing = it },
+            onValueChangeFinished = {
+                scrubbing?.let { player.seekTo((it * duration).toLong()); position = (it * duration).toLong() }
+                scrubbing = null
+            },
+            enabled = duration > 0,
+            modifier = Modifier.widthIn(max = 640.dp),
+        )
+        Row(Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
+            val shown = scrubbing?.let { (it * duration).toLong() } ?: position
+            Text(formatTime(shown), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.weight(1f))
+            Text(formatTime(duration), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
+            FilledTonalIconButton(onClick = { player.seekBack() }, modifier = Modifier.size(56.dp)) {
+                Icon(Icons.Default.Replay10, "Back ten seconds")
+            }
+            FilledIconButton(
+                onClick = { if (player.isPlaying) player.pause() else player.play() },
+                modifier = Modifier.size(72.dp),
+            ) {
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (playing) "Pause" else "Play",
+                    modifier = Modifier.size(36.dp),
+                )
+            }
+            FilledTonalIconButton(onClick = { player.seekForward() }, modifier = Modifier.size(56.dp)) {
+                Icon(Icons.Default.Forward10, "Forward ten seconds")
+            }
+        }
     }
 }
 
@@ -477,7 +698,12 @@ private fun Activity.setFullscreen(enabled: Boolean) {
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // Turning to landscape is for a phone-shaped screen. An unfolded Fold
+        // is nearly square: forcing it sideways only letterboxes the app, and
+        // Android 16 ignores the request on large screens anyway.
+        if (resources.configuration.smallestScreenWidthDp < LARGE_SCREEN_DP) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
     } else {
         // Back to the app's baseline, which is edge-to-edge -- restoring `true`
         // here would lay every screen out differently after a video than before
@@ -487,6 +713,9 @@ private fun Activity.setFullscreen(enabled: Boolean) {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 }
+
+/** Where Android starts treating a screen as large: tablets, an unfolded Fold. */
+private const val LARGE_SCREEN_DP = 600
 
 private tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
     is Activity -> this

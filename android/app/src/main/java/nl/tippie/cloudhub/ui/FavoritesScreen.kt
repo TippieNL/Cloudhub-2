@@ -116,8 +116,9 @@ fun FavoritesScreen(
                         detail = "Star a photo, a video or any file from its menu, or from the viewer, and it will be kept here.",
                     )
 
-                state.grid -> LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+                // Sized like the folder grid, and resizable from here too.
+                state.grid -> SizedGrid(state.thumbnailSize, model::setThumbnailSize) { cells -> LazyVerticalGrid(
+                    columns = cells,
                     contentPadding = PaddingValues(GRID_PADDING),
                     horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
                     verticalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -134,7 +135,7 @@ fun FavoritesScreen(
                             favorite = true,
                         )
                     }
-                }
+                } }
 
                 else -> LazyColumn(contentPadding = PaddingValues(vertical = 6.dp), modifier = Modifier.fillMaxSize()) {
                     items(shown, key = { it.path }) { entry ->

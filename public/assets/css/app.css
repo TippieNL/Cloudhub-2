@@ -285,3 +285,13 @@ html.dark .fav-button.on{color:#f2c14e}
  .favorites-filter{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
  .favorites-filter button{min-height:40px;padding:0 4px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 }
+/* WebDAV dialog: the address, and the app passwords clients sign in with. */
+.webdav-dialog{width:min(520px,100%);max-height:92vh;overflow:auto}
+.webdav-heading{margin:20px 0 8px;font-size:15px}
+.webdav-list{display:grid;gap:6px}
+.webdav-row{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1px solid var(--border);border-radius:9px;padding:8px 10px}
+.webdav-row div{min-width:0}
+.webdav-row strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.webdav-row .muted{display:block}
+#webdav-created .muted{display:block;margin:6px 0}
+.webdav-secret{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;letter-spacing:.04em}

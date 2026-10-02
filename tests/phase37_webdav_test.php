@@ -10,9 +10,14 @@ declare(strict_types=1);
  * that have none.
  *
  * Pins: write verbs need the write capability inside the handler too; a GET
- * is a download, never a page rendered on this origin; PROPFIND does not
- * advertise CloudHub's own directories and emits encoded hrefs; DELETE and an
- * overwriting MOVE honour the trash; a MOVE onto itself deletes nothing.
+ * is a download, never a page rendered on this origin, and answers byte
+ * ranges; PROPFIND does not advertise CloudHub's own directories and emits
+ * encoded hrefs; DELETE and an overwriting MOVE honour the trash; a MOVE onto
+ * itself deletes nothing.
+ *
+ * GET streams through serve_file_range(), which lives in public/index.php, so
+ * it and its helper are lifted out of that file into the harness the way
+ * phase44 does -- the handler is exercised with the real function, not a copy.
  */
 $root = dirname(__DIR__);
 $checks = [];
@@ -22,6 +27,24 @@ mkdir($tmp.'/files/.trash', 0775, true);
 file_put_contents($tmp.'/files/docs/page one.html', '<b>hello</b>');
 file_put_contents($tmp.'/files/docs/keep.txt', 'keep');
 file_put_contents($tmp.'/files/docs/other.txt', 'other');
+file_put_contents($tmp.'/files/docs/digits.bin', '0123456789');
+
+/** Lift one top-level function out of a PHP file, braces balanced. */
+function lift37(string $source, string $name): string {
+    $start = strpos($source, 'function '.$name.'(');
+    if ($start === false) return '';
+    $open = strpos($source, '{', $start);
+    if ($open === false) return '';
+    $depth = 0;
+    for ($i = $open, $n = strlen($source); $i < $n; $i++) {
+        if ($source[$i] === '{') $depth++;
+        elseif ($source[$i] === '}') { $depth--; if ($depth === 0) return substr($source, $start, $i-$start+1); }
+    }
+    return '';
+}
+$index = (string)file_get_contents($root.'/public/index.php');
+$served = lift37($index, 'content_disposition')."\n".lift37($index, 'serve_file_range')."\n";
+$checks['serve_file_range() could be lifted from index.php'] = str_contains($served, 'function serve_file_range(');
 
 file_put_contents($tmp.'/harness.php', "<?php\n".
     "declare(strict_types=1);\n".
@@ -31,6 +54,7 @@ file_put_contents($tmp.'/harness.php', "<?php\n".
     "require '".$root."/src/Services/Authorization.php';\n".
     "require '".$root."/src/Services/WebDav.php';\n".
     'function mime_type(string $f): string { return function_exists("mime_content_type") ? (mime_content_type($f) ?: "application/octet-stream") : "application/octet-stream"; }'."\n".
+    "const MEDIA_RANGE_CHUNK_BYTES = 4;\n".$served.
     '$_SESSION = ["user_id" => 1, "username" => "tester", "role" => (string)($_GET["role"] ?? "viewer")];'."\n".
     '$config = ["root_dir" => '.var_export($tmp.'/files', true).', "read_only" => false, "allow_overwrite" => true, "allow_delete" => true, "trash_enabled" => true];'."\n".
     '$fs = new \CloudHub\Services\FileService($config);'."\n".
@@ -47,6 +71,8 @@ function dav(string $base, string $method, string $path, string $role, array $he
     $ch = curl_init($base.'?role='.rawurlencode($role).'&p='.rawurlencode($path));
     curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true,
         CURLOPT_CUSTOMREQUEST => $method, CURLOPT_HTTPHEADER => $headers, CURLOPT_TIMEOUT => 10]);
+    // A HEAD answer has no body; without this curl waits for one.
+    if ($method === 'HEAD') curl_setopt($ch, CURLOPT_NOBODY, true);
     $raw = (string)curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     $hs = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
@@ -70,6 +96,29 @@ $r = dav($base, 'GET', '/docs/page one.html', 'viewer');
 $checks['a GET still returns the bytes'] = $r['status'] === 200 && $r['body'] === '<b>hello</b>';
 $checks['a GET is served as an attachment'] = (bool)preg_match('/Content-Disposition: attachment/i', $r['headers']);
 $checks['a GET carries a sandbox CSP'] = (bool)preg_match("/Content-Security-Policy: default-src 'none'; sandbox/i", $r['headers']);
+$checks['a GET says it takes ranges'] = (bool)preg_match('/Accept-Ranges: bytes/i', $r['headers']);
+
+// --- ranges: seeking a video, resuming a copy, reading part of a file ------
+// readfile() sent the whole file for every one of these.
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer', ['Range: bytes=2-5']);
+$checks['a range is answered 206 with just those bytes'] = $r['status'] === 206 && $r['body'] === '2345'
+    && (bool)preg_match('#Content-Range: bytes 2-5/10#i', $r['headers']);
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer', ['Range: bytes=3-']);
+// MEDIA_RANGE_CHUNK_BYTES is 4 here: an open range still runs to the end,
+// because a resuming client takes the answer as the rest of the file.
+$checks['an open range runs to the end, never cut short'] = $r['status'] === 206 && $r['body'] === '3456789';
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer', ['Range: bytes=-3']);
+$checks['a suffix range is honoured'] = $r['status'] === 206 && $r['body'] === '789';
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer', ['Range: bytes=20-30']);
+$checks['a range past the end is 416'] = $r['status'] === 416;
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer');
+$etag = preg_match('/^ETag: (.+)$/mi', $r['headers'], $m) ? trim($m[1]) : '';
+$checks['a GET carries a validator'] = $etag !== '';
+$r = dav($base, 'GET', '/docs/digits.bin', 'viewer', ['If-None-Match: '.$etag]);
+$checks['an unchanged file revalidates as 304'] = $etag !== '' && $r['status'] === 304 && $r['body'] === '';
+$r = dav($base, 'HEAD', '/docs/digits.bin', 'viewer');
+$checks['HEAD sends the length and no body'] = $r['status'] === 200 && $r['body'] === ''
+    && (bool)preg_match('/Content-Length: 10\b/i', $r['headers']);
 
 // --- PROPFIND: no internals, encoded hrefs --------------------------------
 $r = dav($base, 'PROPFIND', '/', 'viewer', ['Depth: 1']);
@@ -103,11 +152,10 @@ $checks['and the deleted file went to the trash'] = count($trashed()) === 2;
 if (is_resource($server)) { proc_terminate($server); proc_close($server); }
 
 // --- the shape that keeps the front controller's guard honest -------------
-$index = (string)file_get_contents($root.'/public/index.php');
 $checks['the front controller gates every non-read verb'] =
     str_contains($index, "!in_array(\$method, ['GET', 'HEAD', 'OPTIONS', 'PROPFIND'], true)");
 $checks['the front controller passes bookkeeping hooks'] =
-    str_contains($index, "'removed' => function(string \$rel): void {") && str_contains($index, 'shares_forget($rel);');
+    str_contains($index, "'removed' => function(string \$rel, int \$bytes = 0): void {") && str_contains($index, 'shares_forget($rel);');
 
 $rmrf = static function (string $p) use (&$rmrf): void {
     if (is_link($p) || is_file($p)) { @unlink($p); return; }

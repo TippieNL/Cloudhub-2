@@ -75,7 +75,14 @@ final class UserRepository
         return $created;
     }
 
-    /** Apply role / active / password changes. Only supplied keys are touched. */
+    /**
+     * Apply role / active / password changes. Only supplied keys are touched.
+     *
+     * A new password also revokes the account's app passwords, in the same
+     * transaction: changing it is what someone does when they think the
+     * account is compromised, and a WebDAV client holding an app password
+     * would otherwise keep its access through that.
+     */
     public function update(int $id, array $changes): array
     {
         $sets = [];
@@ -96,8 +103,16 @@ final class UserRepository
 
         if ($sets) {
             $values[] = $id;
-            $stmt = $this->db->prepare('UPDATE users SET '.implode(', ', $sets).' WHERE id = ?');
-            $stmt->execute($values);
+            $this->db->beginTransaction();
+            try {
+                $stmt = $this->db->prepare('UPDATE users SET '.implode(', ', $sets).' WHERE id = ?');
+                $stmt->execute($values);
+                if (array_key_exists('password', $changes)) $this->revokeAppPasswords($id);
+                $this->db->commit();
+            } catch (\Throwable $e) {
+                $this->db->rollBack();
+                throw $e;
+            }
         }
 
         $updated = $this->get($id);
@@ -105,11 +120,36 @@ final class UserRepository
         return $updated;
     }
 
+    /** Delete an account and the app passwords that sign it in. */
     public function delete(int $id): void
     {
-        $stmt = $this->db->prepare('DELETE FROM users WHERE id = ?');
-        $stmt->execute([$id]);
-        if (!$stmt->rowCount()) throw new RuntimeException('Account not found', 404);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare('DELETE FROM users WHERE id = ?');
+            $stmt->execute([$id]);
+            if (!$stmt->rowCount()) throw new RuntimeException('Account not found', 404);
+            $this->revokeAppPasswords($id);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Revoke every app password of an account.
+     *
+     * An installation that has not run the migration has no app_passwords
+     * table and so none to revoke; anything else that goes wrong fails the
+     * change it belongs to, rather than leaving a client signed in.
+     */
+    private function revokeAppPasswords(int $id): void
+    {
+        try {
+            $this->db->prepare('DELETE FROM app_passwords WHERE user_id = ?')->execute([$id]);
+        } catch (\PDOException $e) {
+            if ((string)$e->getCode() !== '42S02') throw $e;
+        }
     }
 
     /**

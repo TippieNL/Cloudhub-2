@@ -1,4 +1,8 @@
 RewriteEngine On
+# WebDAV clients sign in with HTTP Basic. Under PHP-FPM/CGI Apache does not
+# hand PHP the Authorization header unless it is passed on explicitly.
+RewriteCond %{HTTP:Authorization} .
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^ index.php [QSA,L]

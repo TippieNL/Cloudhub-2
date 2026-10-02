@@ -373,12 +373,12 @@ val FAVORITE_GOLD = Color(0xFFF2C14E)
  */
 @Composable
 private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
-    val context = LocalContext.current
+    val large = LocalLargeThumbnails.current
     when (entry.kind) {
         FileEntry.Kind.FOLDER -> FolderGlyph(modifier)
 
         FileEntry.Kind.IMAGE -> ThumbnailImage(
-            url = api.thumbnailUrl(entry).toString(),
+            url = api.thumbnailUrl(entry, large).toString(),
             description = entry.name,
             modifier = modifier,
         )
@@ -386,7 +386,7 @@ private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
         FileEntry.Kind.VIDEO -> Box(modifier, contentAlignment = Alignment.Center) {
             if (entry.hasThumbnail) {
                 ThumbnailImage(
-                    url = api.thumbnailUrl(entry).toString(),
+                    url = api.thumbnailUrl(entry, large).toString(),
                     description = entry.name,
                     modifier = Modifier.fillMaxSize(),
                 )

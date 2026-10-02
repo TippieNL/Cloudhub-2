@@ -152,7 +152,8 @@ class MainActivity : ComponentActivity() {
 
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
-                    override fun <T : ViewModel> create(modelClass: Class<T>) = FilesViewModel(app.api, app.tasks) as T
+                    override fun <T : ViewModel> create(modelClass: Class<T>) =
+                        FilesViewModel(app.api, app.tasks, app.settings) as T
                 })
                 val signIn: SignInViewModel = viewModel(
                     key = "sign-in",
@@ -321,7 +322,39 @@ class MainActivity : ComponentActivity() {
                     if (state.user == null) screenState.removeState(Screen.Files.key)
                 }
 
+                /*
+                 * Unfolded, the places live on a rail down the side. A choice
+                 * there replaces the screen above the files rather than
+                 * stacking on it, so Back from any of them is Back to the
+                 * files (BackRules.switchedTo).
+                 */
+                fun switchTo(place: RailPlace) {
+                    val target = when (place) {
+                        RailPlace.FILES -> Screen.Files
+                        RailPlace.FAVORITES -> Screen.Favorites
+                        RailPlace.TRASH -> Screen.Trash
+                        RailPlace.STORAGE -> Screen.Storage
+                        RailPlace.DUPLICATES -> Screen.Duplicates
+                        RailPlace.SETTINGS -> Screen.SettingsScreen
+                    }
+                    val updated = BackRules.switchedTo(stack.toList(), Screen.Files, target)
+                    stack.clear(); stack.addAll(updated)
+                    // Trash and Duplicates can change the files; the list is
+                    // fetched again on the way back, as their Back does.
+                    if (target == Screen.Files) model.refresh()
+                }
+                val railPlace = when (screen) {
+                    is Screen.Files -> RailPlace.FILES
+                    is Screen.Favorites -> RailPlace.FAVORITES
+                    is Screen.Trash -> RailPlace.TRASH
+                    is Screen.Storage -> RailPlace.STORAGE
+                    is Screen.Duplicates -> RailPlace.DUPLICATES
+                    is Screen.SettingsScreen -> RailPlace.SETTINGS
+                    else -> null
+                }
+
                 screenState.SaveableStateProvider(screen.key) {
+                WithRail(current = railPlace, onSelect = ::switchTo) {
                 when (val current = screen) {
                     is Screen.Setup -> SetupScreen(
                         api = app.api,
@@ -429,6 +462,10 @@ class MainActivity : ComponentActivity() {
                         videoCacheBytes = MediaCache.sizeBytes(this@MainActivity),
                         theme = theme,
                         onTheme = { theme = it; app.settings.themeChoice = it.name },
+                        grid = state.grid,
+                        onGrid = model::setGrid,
+                        thumbnailSize = state.thumbnailSize,
+                        onThumbnailSize = model::setThumbnailSize,
                         onClearCache = { clearThumbnailCache() },
                         onClearVideoCache = { MediaCache.clear(this@MainActivity) },
                         onChangeServer = { go(Screen.Setup) },
@@ -466,7 +503,10 @@ class MainActivity : ComponentActivity() {
                         onBack = { reveal = current.entry.path; back() },
                         favorite = current.entry.path in state.favorites,
                         onToggleFavorite = { model.toggleFavorite(current.entry) },
+                        canWrite = state.canWrite,
+                        onAddSubtitle = { video, uri, name, done -> attachSubtitle(video, uri, name, done) },
                     )
+                }
                 }
                 }
 
@@ -641,7 +681,7 @@ class MainActivity : ComponentActivity() {
      * survives the app being closed and shows in the upload tracker like any
      * other file.
      */
-    private fun attachSubtitle(video: FileEntry, uri: Uri, name: String) {
+    private fun attachSubtitle(video: FileEntry, uri: Uri, name: String, done: (String?) -> Unit = {}) {
         val folder = video.path.substringBeforeLast('/', "").ifEmpty { "/" }
         lifecycleScope.launch(Dispatchers.IO) {
             val result = UploadWorker.stage(this@MainActivity, uri, name)
@@ -651,11 +691,16 @@ class MainActivity : ComponentActivity() {
                         queue.add(result.upload.copy(name = name, targetPath = folder))
                         UploadWorker.enqueue(this@MainActivity)
                         Toast.makeText(this@MainActivity, "Adding $name", Toast.LENGTH_SHORT).show()
+                        done(null)
                     }
-                    is StageResult.NoRoom -> Toast.makeText(
-                        this@MainActivity, "Not enough space on this phone", Toast.LENGTH_LONG).show()
-                    StageResult.Unreadable -> Toast.makeText(
-                        this@MainActivity, "That file could not be read", Toast.LENGTH_LONG).show()
+                    is StageResult.NoRoom -> {
+                        Toast.makeText(this@MainActivity, "Not enough space on this phone", Toast.LENGTH_LONG).show()
+                        done("there is not enough space on this phone to stage it")
+                    }
+                    StageResult.Unreadable -> {
+                        Toast.makeText(this@MainActivity, "That file could not be read", Toast.LENGTH_LONG).show()
+                        done("that file could not be read")
+                    }
                 }
             }
         }

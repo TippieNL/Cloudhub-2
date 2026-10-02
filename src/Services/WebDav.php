@@ -4,16 +4,19 @@ namespace CloudHub\Services;
 use CloudHub\Helpers\Http;
 function xml_escape(string $s): string{return htmlspecialchars($s,ENT_XML1|ENT_QUOTES,'UTF-8');}
 /**
- * WebDAV, under the same session, CSRF and role rules as the rest of the API.
+ * WebDAV, under the same role rules as the rest of the API. The front
+ * controller signs the request in first -- with the session and CSRF token like
+ * the API, or with an app password over HTTP Basic, as WebDAV clients do.
  *
  * $hooks keep the front controller's bookkeeping (upload ledger, share links,
- * audit trail) in step with changes made here: removed(string $relative),
- * moved(string $from, string $to), attribution(string $relative) and
- * favorites(string $relative) for the ledger rows and favorites a trash entry
- * keeps, and for PUT the API's upload rules --
- * fits(int $bytes) throws when a quota or the store limit would be exceeded,
- * replacing(string $full) keeps what is about to be overwritten, and
- * stored(string $relative, int $bytes) records who uploaded it.
+ * audit trail, the store's cached size) in step with changes made here:
+ * removed(string $relative, int $bytes), moved(string $from, string $to),
+ * attribution(string $relative) and favorites(string $relative) for the
+ * ledger rows and favorites a trash entry keeps, and for PUT the API's upload
+ * rules -- fits(int $bytes) throws when a quota or the store limit would be
+ * exceeded, replacing(string $full) keeps what is about to be overwritten,
+ * and stored(string $relative, int $bytes, int $replaced) records who
+ * uploaded it and how much the store grew.
  */
 function handle_webdav(FileService $fs,array $config,string $path,string $method,array $hooks=[]): never {
  // The router already percent-decoded the path once; a second decode here
@@ -41,17 +44,17 @@ function handle_webdav(FileService $fs,array $config,string $path,string $method
  if($method==='GET'||$method==='HEAD'){
   try{$full=$fs->existing($rel);}catch(\RuntimeException $e){http_response_code(404);exit;}
   if(!is_file($full)){http_response_code(405);exit;}
-  $size=@filesize($full);
-  header('Content-Type: '.mime_type($full));
-  // User files are never rendered as a page on this origin: WebDAV clients
-  // ignore these headers, while a browser following a link downloads the file
-  // instead of running any markup it contains.
-  header('Content-Disposition: attachment; filename="'.str_replace(['"',"\r","\n"],'_',basename($full)).'"');
-  header("Content-Security-Policy: default-src 'none'; sandbox");
-  header('X-Content-Type-Options: nosniff');
-  if($size!==false)header('Content-Length: '.$size);
-  if($method==='GET')readfile($full);
-  exit;
+  // Nothing below writes to the session, and a download can take minutes:
+  // holding the lock that long queues every other request of the session.
+  if(session_status()===PHP_SESSION_ACTIVE)session_write_close();
+  // Through the same range-capable code as the API's streams. readfile() sent
+  // the whole file for every request, so a player could not seek and a client
+  // resuming a copy or reading part of a file got all of it again.
+  // As an attachment, which serve_file_range() never cuts short (its media
+  // chunking is inline-only) and which a browser following a link downloads
+  // rather than rendering; the sandbox keeps any markup inert regardless.
+  // WebDAV clients ignore both.
+  serve_file_range($full,mime_type($full),'attachment',$method,['Cache-Control: private,no-cache',"Content-Security-Policy: default-src 'none'; sandbox"]);
  }
  if($config['read_only']){http_response_code(403);exit;}
 
@@ -71,9 +74,11 @@ function handle_webdav(FileService $fs,array $config,string $path,string $method
   $size=(int)(@filesize($tmp)?:0);
   // A chunked body never said how large it was, so it is measured instead.
   if($ok&&$fits&&!ctype_digit($declared)){try{$fits($size);}catch(\RuntimeException $e){@unlink($tmp);$refuse($e);}}
+  // Measured before replacing() moves it into the versions.
+  $replaced=$exists?(int)(@filesize($full)?:0):0;
   if($ok&&$exists&&$replacing){try{$replacing($full);}catch(\RuntimeException){@unlink($tmp);http_response_code(500);exit;}}
   if(!$ok||!@rename($tmp,$full)){@unlink($tmp);http_response_code(500);exit;}
-  if($stored)$stored($fs->relative($full),$size);
+  if($stored)$stored($fs->relative($full),$size,$replaced);
   http_response_code($exists?204:201);exit;
  }
  if($method==='DELETE'){
@@ -81,9 +86,9 @@ function handle_webdav(FileService $fs,array $config,string $path,string $method
   try{
    $full=$fs->existing($rel);$gone=$fs->relative($full);
    // Same rule as the API's delete: to the trash unless the deployment opted out.
-   if($config['trash_enabled']??false)$fs->trash($full,Auth::user()['username']??null,$attribution?$attribution($gone):[],$favorites?$favorites($gone):[]);else $fs->deleteTree($full);
+   if($config['trash_enabled']??false)$bytes=(int)($fs->trash($full,Auth::user()['username']??null,$attribution?$attribution($gone):[],$favorites?$favorites($gone):[])['bytes']??0);else{$bytes=(int)($fs->measure($full)['bytes']??0);$fs->deleteTree($full);}
   }catch(\RuntimeException $e){http_response_code($e->getCode()===404?404:($e->getCode()===500?500:403));exit;}
-  if($removed)$removed($gone);
+  if($removed)$removed($gone,$bytes);
   http_response_code(204);exit;
  }
  if($method==='MKCOL'){
@@ -110,8 +115,8 @@ function handle_webdav(FileService $fs,array $config,string $path,string $method
   if($exists){
    // An overwrite displaces what was there; like any delete it goes to the
    // trash unless the deployment opted out.
-   try{if($config['trash_enabled']??false)$fs->trash($new,Auth::user()['username']??null,$attribution?$attribution($to):[],$favorites?$favorites($to):[]);else $fs->deleteTree($new);}catch(\RuntimeException){http_response_code(500);exit;}
-   if($removed)$removed($to);
+   try{if($config['trash_enabled']??false)$bytes=(int)($fs->trash($new,Auth::user()['username']??null,$attribution?$attribution($to):[],$favorites?$favorites($to):[])['bytes']??0);else{$bytes=(int)($fs->measure($new)['bytes']??0);$fs->deleteTree($new);}}catch(\RuntimeException){http_response_code(500);exit;}
+   if($removed)$removed($to,$bytes);
   }
   if(!rename($full,$new)){http_response_code(500);exit;}
   if($moved)$moved($from,$to);

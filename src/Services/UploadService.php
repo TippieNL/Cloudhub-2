@@ -300,6 +300,9 @@ final class UploadService
         $targetDir = $this->files->existing((string)$meta['targetPath']);
         $dest = $targetDir.'/'.$meta['name'];
         $policy = $this->normaliseConflict((string)$meta['conflict']);
+        // What an overwrite takes out of the live tree, so the caller can keep
+        // the store's cached size right: the upload adds its own size less this.
+        $replaced = 0;
 
         if (file_exists($dest)) {
             if ($policy === 'reject') throw new RuntimeException('File already exists: '.$meta['name'], 409);
@@ -308,6 +311,7 @@ final class UploadService
                 throw new RuntimeException('Overwrite is disabled by server configuration', 403);
             }
             if ($policy === 'overwrite' && is_dir($dest)) throw new RuntimeException('Destination is a directory', 409);
+            if ($policy === 'overwrite' && is_file($dest)) $replaced = (int)(filesize($dest) ?: 0);
             /*
              * The outgoing file is kept, not destroyed.
              *
@@ -360,7 +364,7 @@ final class UploadService
         // value: $dest comes from existing(), a realpath, while
         // config['root_dir'] is whatever was written in .env -- so a symlinked,
         // trailing-slash or /./ ROOT_DIR cut the string at the wrong offset.
-        return ['success'=>true,'name'=>basename($dest),'path'=>$this->files->relative($dest)];
+        return ['success'=>true,'name'=>basename($dest),'path'=>$this->files->relative($dest),'replacedBytes'=>$replaced];
     }
 
     /** Explicitly cancel an upload and remove all staged bytes. */

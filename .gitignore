@@ -31,3 +31,6 @@ Thumbs.db
 
 # The measured-usage cache, written by storage_report() and rebuilt on demand.
 /storage/.cache/
+
+# Built APKs copied out for handing over; rebuild with tools/build-apk.sh
+/dist/

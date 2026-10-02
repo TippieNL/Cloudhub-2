@@ -1,5 +1,6 @@
 import { PlayerSettings } from './PlayerSettings.js';
 import { SubtitleManager } from './SubtitleManager.js';
+import { SubtitleUpload } from './SubtitleUpload.js';
 import { ThumbnailProvider } from './ThumbnailProvider.js';
 import { ThumbnailPreview } from './ThumbnailPreview.js';
 import { SeekBar } from './SeekBar.js';
@@ -49,6 +50,7 @@ export class PlayerUI {
         this.initGestures();
         this.initSpeedMenu();
         this.initOptionalControls();
+        this.initSubtitleUpload();
         this.bindEvents();
 
         this.updatePlayState(!this.video.paused);
@@ -148,7 +150,11 @@ export class PlayerUI {
         const tracks = this.subtitleManager.tracks;
 
         list.replaceChildren();
-        if (!tracks.length) return;
+        if (!tracks.length) {
+            // Nothing to choose, but something to do for an account that may upload.
+            if (this.subtitleAction) list.appendChild(this.subtitleAction);
+            return;
+        }
 
         const select = (id) => {
             this.subtitleManager.select(id);
@@ -160,8 +166,47 @@ export class PlayerUI {
         tracks.forEach((track) => {
             list.appendChild(this.menuItem(track.label, { track: track.id }, () => select(track.id)));
         });
+        if (this.subtitleAction) list.appendChild(this.subtitleAction);
 
         this.updateSubtitleMenu();
+    }
+
+    /**
+     * "Add subtitles…" at the end of the subtitles menu, for editors and
+     * administrators -- and the menu's button shown even for a film with no
+     * subtitles yet, which is precisely when it is wanted. Viewers keep the
+     * old behaviour: no tracks, no button.
+     */
+    async initSubtitleUpload() {
+        if (!this.subtitleManager) return;
+        const uploader = new SubtitleUpload(window.CLOUDHUB_MEDIA_PATH || '');
+        if (!(await uploader.allowed())) return;
+
+        const trigger = this.container.querySelector('[data-menu="subtitles"]');
+        const item = this.menuItem('Add subtitles…', { action: 'add-subtitles' }, async () => {
+            this.hideAllMenus();
+            try {
+                const added = await uploader.add();
+                if (!added) return;
+                this.subtitleManager.setTracks(added.tracks);
+                this.buildSubtitleMenu();
+                // Matched in the server's list: the manager keeps ids and labels, not file names.
+                const raw = added.tracks.find((track) => (track.name || '') === added.name);
+                const fresh = raw ? this.subtitleManager.tracks.find((track) => track.id === String(raw.id)) : null;
+                if (fresh) this.subtitleManager.select(fresh.id);
+                this.showFeedback(`Subtitles added: ${fresh?.label || added.name}`);
+            } catch (error) {
+                this.showFeedback(error.message || 'Could not add the subtitles');
+            }
+            this.overlay?.showControlsTemporarily();
+        });
+        // An action, not one of the radio choices above it.
+        item.setAttribute('role', 'menuitem');
+        item.removeAttribute('aria-checked');
+        item.classList.add('cfh-menu-action');
+        this.subtitleAction = item;
+        this.buildSubtitleMenu();
+        if (trigger) trigger.hidden = false;
     }
 
     updateSubtitleMenu() {

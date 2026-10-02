@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS favorites (
  INDEX idx_favorite_path(file_path(190))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- What WebDAV clients sign in with. Only a hash of each is kept.
+CREATE TABLE IF NOT EXISTS app_passwords (
+ id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ user_id INT UNSIGNED NOT NULL,
+ name VARCHAR(100) NOT NULL,
+ token_hash CHAR(64) NOT NULL,
+ created_at DATETIME NOT NULL,
+ last_used_at DATETIME NULL,
+ UNIQUE KEY uq_app_password_hash(token_hash),
+ INDEX idx_app_password_user(user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT INTO storage_servers (name,type,is_active,is_default,config)
 SELECT 'Local Storage','local',1,1,JSON_OBJECT('path','storage/files')
 WHERE NOT EXISTS (SELECT 1 FROM storage_servers);
