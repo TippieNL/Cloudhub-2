@@ -423,6 +423,33 @@ it lives, all from the listing the app already has.
 Folders have no preview image: CloudHub's listing does not carry one, and
 building a mosaic would mean one extra request per folder on screen.
 
+**Thumbnail size.** The grid has six card sizes, from Smallest to Largest
+(Medium is the size it always had). Spread two fingers on the grid to make the
+cards larger and pinch to make them smaller, a step at a time; or use the − and
++ under **Thumbnail size** in the ⋮ menu, or the slider in **Settings >
+Appearance**. With a keyboard and mouse attached, Ctrl and the wheel do the
+same. The size applies to Favorites too and is remembered, as is grid or list —
+the Settings switch for that is now read at launch, which it never was. When
+cards come out wider than about twice the 300 px thumbnail, the app asks the
+server for a 640 px one (`/api/thumbnail?size=large`, cached separately), so
+large cards stay sharp; a server without it simply sends the usual one.
+
+### Foldables
+
+On a Pixel Fold or any foldable the app follows the window, so folding and
+unfolding change the layout in place without restarting anything:
+
+- **Unfolded** (or any wide window, including a phone on its side), the places
+  — Files, Favorites, Trash, Storage, Duplicates, Settings — sit on a
+  navigation rail down the side instead of in the ⋮ menu. A rail choice replaces
+  the screen rather than stacking, so Back from any of them returns to the files.
+  The grid fits more columns, and Settings and Storage keep a readable width.
+- **Half-folded on a table** (tabletop), a video plays above the hinge with
+  large play, pause, skip and seek controls below it.
+- **Fullscreen video** turns to landscape only on a phone-sized screen; the
+  unfolded screen is nearly square, so forcing it sideways would only
+  letterbox the app.
+
 ### Colours
 
 The theme names every role it uses, including the ones nothing obviously

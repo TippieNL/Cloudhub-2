@@ -16,6 +16,7 @@ import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.net.User
+import nl.tippie.cloudhub.data.ViewPrefs
 
 /** What is on screen, and how it got there. */
 data class FilesState(
@@ -52,6 +53,8 @@ data class FilesState(
     val searchError: String? = null,
     val sort: Sort = Sort.NAME,
     val grid: Boolean = true,
+    /** The grid's card size, a step of [ThumbnailSizes]. */
+    val thumbnailSize: Int = ThumbnailSizes.DEFAULT,
     /**
      * The paths this account has starred.
      *
@@ -101,9 +104,23 @@ data class FilesState(
     )
 }
 
-class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
+class FilesViewModel(
+    private val api: CloudHubApi,
+    /** Where grid-or-list and the card size are kept; none in tests. */
+    private val prefs: ViewPrefs? = null,
+) : ViewModel() {
 
-    private val _state = MutableStateFlow(FilesState())
+    /*
+     * Seeded from the stored choices. The grid toggle in Settings wrote one of
+     * these and nothing ever read it back, so every launch opened in the grid
+     * whatever had been chosen.
+     */
+    private val _state = MutableStateFlow(
+        FilesState(
+            grid = prefs?.gridView ?: true,
+            thumbnailSize = ThumbnailSizes.clamp(prefs?.thumbnailSize ?: ThumbnailSizes.DEFAULT),
+        )
+    )
     val state: StateFlow<FilesState> = _state.asStateFlow()
 
     fun start() {
@@ -246,7 +263,21 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
 
     fun setSort(sort: FilesState.Sort) = _state.update { it.copy(sort = sort) }
 
-    fun setGrid(grid: Boolean) = _state.update { it.copy(grid = grid) }
+    fun setGrid(grid: Boolean) {
+        _state.update { it.copy(grid = grid) }
+        prefs?.gridView = grid
+    }
+
+    /** Bigger or smaller cards, by whole steps; remembered for next time. */
+    fun setThumbnailSize(level: Int) {
+        val next = ThumbnailSizes.clamp(level)
+        if (next == _state.value.thumbnailSize) return
+        _state.update { it.copy(thumbnailSize = next) }
+        prefs?.thumbnailSize = next
+    }
+
+    fun growThumbnails() = setThumbnailSize(_state.value.thumbnailSize + 1)
+    fun shrinkThumbnails() = setThumbnailSize(_state.value.thumbnailSize - 1)
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
 

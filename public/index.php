@@ -348,13 +348,24 @@ function release_session_lock(): void {
  * Keyed by absolute path and modification time, so editing or replacing a
  * file yields a new key and the stale thumbnail is simply never read again.
  */
-function thumbnail_cache_path(string $file): ?string {
+function thumbnail_cache_path(string $file, int $edge = THUMBNAIL_EDGE): ?string {
     $mtime = @filemtime($file);
     if ($mtime === false)return null;
     $dir = dirname(__DIR__).'/storage/.thumbnails/images';
     if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir))return null;
-    return $dir.'/'.md5($file.':'.$mtime).'.webp';
+    // The default size keeps the key it always had, so existing caches stay valid.
+    return $dir.'/'.md5($file.':'.$mtime.($edge === THUMBNAIL_EDGE ? '' : ':'.$edge)).'.webp';
 }
+
+/**
+ * How large an image thumbnail is: 300px, or 640px when a client asks for
+ * ?size=large. The Android app's largest grid sizes draw a tile well over
+ * 300 device pixels wide, where the small one was visibly soft. Each size is
+ * cached on its own. Video frames are contributed by clients at up to 640px
+ * already and are served as they are, whatever is asked for.
+ */
+const THUMBNAIL_EDGE = 300;
+const THUMBNAIL_EDGE_LARGE = 640;
 
 /**
  * Flag a video row that already has a cached frame.
@@ -2071,7 +2082,9 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         if (!is_file($f))throw new RuntimeException('File not found', 404);
 
         $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
-        $cache = thumbnail_cache_path($f);
+        $edge = (($_GET['size'] ?? '') === 'large' && in_array($ext, THUMBNAIL_IMAGE_EXTENSIONS, true))
+            ? THUMBNAIL_EDGE_LARGE : THUMBNAIL_EDGE;
+        $cache = thumbnail_cache_path($f, $edge);
         if ($cache === null)throw new RuntimeException('Unable to prepare the thumbnail cache', 500);
 
         // A cached entry is served the same way whatever produced it, so a
@@ -2126,7 +2139,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             throw new RuntimeException('Failed to generate thumbnail', 500);
         }
 
-        $scale = min(300 / $w, 300 / $h, 1);
+        $scale = min($edge / $w, $edge / $h, 1);
         $nw = max(1, (int)round($w * $scale));
         $nh = max(1, (int)round($h * $scale));
         $im = imagecreatetruecolor($nw, $nh);

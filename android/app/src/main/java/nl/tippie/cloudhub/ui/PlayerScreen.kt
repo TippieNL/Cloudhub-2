@@ -15,6 +15,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,6 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -358,12 +362,30 @@ fun PlayerScreen(
             }
         },
     ) { padding ->
-        Box(
+        /*
+         * Half-folded on a table, the video goes above the hinge and a set of
+         * large controls below it, where they can be reached without holding
+         * the screen up -- otherwise the picture would be bent across the fold.
+         * Measured against where this area starts in the window, because the
+         * hinge is reported in window coordinates.
+         */
+        val hingeTop = tabletopHingeTop()
+        var areaTop by remember { mutableFloatStateOf(0f) }
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val videoHeight = hingeTop
+            ?.let { with(density) { (it - areaTop).coerceAtLeast(0f).toDp() } }
+            ?.takeIf { it >= MIN_TABLETOP_VIDEO }
+        Column(
             Modifier
                 .fillMaxSize()
                 .background(Color.Black)
                 // In fullscreen the video takes the whole window, bars and all.
                 .padding(if (fullscreen) PaddingValues(0.dp) else padding)
+                .onGloballyPositioned { areaTop = it.positionInWindow().y }
+        ) {
+        Box(
+            if (videoHeight != null) Modifier.fillMaxWidth().height(videoHeight)
+            else Modifier.fillMaxWidth().weight(1f)
         ) {
             AndroidView(
                 factory = { viewContext ->
@@ -438,6 +460,88 @@ fun PlayerScreen(
                 }
             }
         }
+        if (videoHeight != null) {
+            TabletopControls(player, entry.name, Modifier.fillMaxWidth().weight(1f))
+        }
+        }
+    }
+}
+
+/** Less than this above the hinge is no screen to watch on; the usual layout is used. */
+private val MIN_TABLETOP_VIDEO = 160.dp
+
+/**
+ * The lower half in tabletop posture: what is playing, where it has got to,
+ * and play, pause and skip at a size meant for a thumb on a table.
+ *
+ * Its own Compose controls rather than the PlayerView's, which overlay the
+ * picture and would sit above the fold with the video. The position is polled
+ * twice a second -- the player has no listener for the passing of time -- and
+ * held still while the slider is dragged, so it does not fight the finger.
+ */
+@Composable
+private fun TabletopControls(player: ExoPlayer, title: String, modifier: Modifier) {
+    var playing by remember { mutableStateOf(player.isPlaying) }
+    var position by remember { mutableLongStateOf(player.currentPosition) }
+    var duration by remember { mutableLongStateOf(0L) }
+    var scrubbing by remember { mutableStateOf<Float?>(null) }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+    LaunchedEffect(player) {
+        while (true) {
+            position = player.currentPosition
+            duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: 0L
+            delay(500)
+        }
+    }
+
+    Column(
+        modifier.background(Color(0xFF121212)).padding(horizontal = 32.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        Slider(
+            value = scrubbing ?: if (duration > 0) position.toFloat() / duration else 0f,
+            onValueChange = { scrubbing = it },
+            onValueChangeFinished = {
+                scrubbing?.let { player.seekTo((it * duration).toLong()); position = (it * duration).toLong() }
+                scrubbing = null
+            },
+            enabled = duration > 0,
+            modifier = Modifier.widthIn(max = 640.dp),
+        )
+        Row(Modifier.widthIn(max = 640.dp).fillMaxWidth()) {
+            val shown = scrubbing?.let { (it * duration).toLong() } ?: position
+            Text(formatTime(shown), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.weight(1f))
+            Text(formatTime(duration), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
+            FilledTonalIconButton(onClick = { player.seekBack() }, modifier = Modifier.size(56.dp)) {
+                Icon(Icons.Default.Replay10, "Back ten seconds")
+            }
+            FilledIconButton(
+                onClick = { if (player.isPlaying) player.pause() else player.play() },
+                modifier = Modifier.size(72.dp),
+            ) {
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (playing) "Pause" else "Play",
+                    modifier = Modifier.size(36.dp),
+                )
+            }
+            FilledTonalIconButton(onClick = { player.seekForward() }, modifier = Modifier.size(56.dp)) {
+                Icon(Icons.Default.Forward10, "Forward ten seconds")
+            }
+        }
     }
 }
 
@@ -477,7 +581,12 @@ private fun Activity.setFullscreen(enabled: Boolean) {
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // Turning to landscape is for a phone-shaped screen. An unfolded Fold
+        // is nearly square: forcing it sideways only letterboxes the app, and
+        // Android 16 ignores the request on large screens anyway.
+        if (resources.configuration.smallestScreenWidthDp < LARGE_SCREEN_DP) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
     } else {
         // Back to the app's baseline, which is edge-to-edge -- restoring `true`
         // here would lay every screen out differently after a video than before
@@ -487,6 +596,9 @@ private fun Activity.setFullscreen(enabled: Boolean) {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 }
+
+/** Where Android starts treating a screen as large: tablets, an unfolded Fold. */
+private const val LARGE_SCREEN_DP = 600
 
 private tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
     is Activity -> this

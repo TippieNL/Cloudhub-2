@@ -374,6 +374,20 @@ scenario('a thumbnail is upright and never a memory bomb', function () use ($cli
         $shown ? imagesx($shown).'x'.imagesy($shown) : $thumb->describe());
     check('turned the right way', $shown !== false && (imagecolorat($shown, intdiv(imagesx($shown), 2), 2) >> 16 & 0xFF) > 200,
         'top pixel is not the red half');
+
+    // The app's largest grid sizes ask for a sharper one; the default is unchanged.
+    $wide = imagecreatetruecolor(1200, 900);
+    ob_start(); imagejpeg($wide, null, 80); $put('wide.jpg', (string)ob_get_clean());
+    $small = $client->get('/api/thumbnail', ['path' => $scratch.'/wide.jpg']);
+    $large = $client->get('/api/thumbnail', ['path' => $scratch.'/wide.jpg', 'size' => 'large']);
+    $s = $small->status === 200 ? @imagecreatefromstring($small->body) : false;
+    $l = $large->status === 200 ? @imagecreatefromstring($large->body) : false;
+    check('the usual thumbnail is still 300 pixels', $s !== false && imagesx($s) === 300, $s ? imagesx($s).'px' : $small->describe());
+    check('size=large is 640, cached apart from it', $l !== false && imagesx($l) === 640 && imagesy($l) === 480,
+        $l ? imagesx($l).'x'.imagesy($l) : $large->describe());
+    $again = $client->get('/api/thumbnail', ['path' => $scratch.'/wide.jpg']);
+    $a = $again->status === 200 ? @imagecreatefromstring($again->body) : false;
+    check('and asking for the large one does not replace the small one', $a !== false && imagesx($a) === 300);
 });
 
 /*

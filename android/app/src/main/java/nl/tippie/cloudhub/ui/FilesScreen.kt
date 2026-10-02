@@ -72,6 +72,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -175,6 +177,8 @@ fun FilesScreen(
                 folder = state.path.substringAfterLast('/').ifEmpty { "CloudHub" },
                 atRoot = state.path == "/",
                 grid = state.grid,
+                thumbnailSize = state.thumbnailSize,
+                onThumbnailSize = model::setThumbnailSize,
                 sort = state.sort,
                 scrollBehavior = scrollBehavior,
                 overflowOpen = overflow,
@@ -283,6 +287,7 @@ fun FilesScreen(
                 onNewFolder = { showNewFolder = true },
                 revealPath = revealPath,
                 onRevealed = onRevealed,
+                onThumbnailSize = model::setThumbnailSize,
             )
         }
     }
@@ -388,6 +393,7 @@ private fun BrowserContent(
     onNewFolder: () -> Unit,
     revealPath: String?,
     onRevealed: () -> Unit,
+    onThumbnailSize: (Int) -> Unit,
 ) {
     val shown = state.shown
     // Held briefly past the answer so a fast folder does not flash a skeleton
@@ -405,11 +411,11 @@ private fun BrowserContent(
         modifier = Modifier.fillMaxSize(),
     ) { target ->
         when (target) {
-            Shown.SKELETON -> SkeletonList(grid = state.grid)
+            Shown.SKELETON -> SkeletonList(grid = state.grid, level = state.thumbnailSize, onLevel = onThumbnailSize)
             Shown.ERROR -> LoadFailed(state.loadError, onRetry)
             Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
             Shown.NO_MATCHES -> NoMatches(state.query, searchedEverywhere = state.searchMode, stillSearching = state.searching)
-            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, revealPath, onRevealed)
+            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, onThumbnailSize, revealPath, onRevealed)
         }
     }
 }
@@ -443,7 +449,7 @@ private fun rememberSettledSkeleton(target: Shown): Shown {
 }
 
 @Composable
-private fun SkeletonList(grid: Boolean) {
+private fun SkeletonList(grid: Boolean, level: Int, onLevel: (Int) -> Unit) {
     // One transition for the whole screen, its progress handed to every card.
     val progress = rememberShimmer()
     val height = LocalConfiguration.current.screenHeightDp
@@ -455,11 +461,15 @@ private fun SkeletonList(grid: Boolean) {
             .semantics { contentDescription = "Loading this folder" },
     ) {
         if (grid) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val columns = (maxWidth / GRID_MIN_CELL).toInt().coerceAtLeast(1)
+            // The same steps as the real grid, so the placeholders are the
+            // size the cards will be.
+            SizedGrid(level, onLevel) { cells ->
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                val cell = ThumbnailSizes.cellWidth(level)
+                val columns = ((maxWidth - GRID_PADDING * 2 + GRID_GAP) / (cell + GRID_GAP)).toInt().coerceAtLeast(1)
                 val cardHeight = cardHeightDp((maxWidth.value / columns).toInt())
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+                    columns = cells,
                     contentPadding = PaddingValues(GRID_PADDING),
                     horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
                     verticalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -467,6 +477,7 @@ private fun SkeletonList(grid: Boolean) {
                 ) {
                     items(skeletonCount(columns, height, cardHeight)) { SkeletonTile(progress) }
                 }
+              }
             }
         } else {
             LazyColumn(
@@ -486,6 +497,7 @@ private fun EntryList(
     onOpen: (FileEntry) -> Unit,
     onLongPress: (String) -> Unit,
     onMenu: (FileEntry) -> Unit,
+    onThumbnailSize: (Int) -> Unit,
     revealPath: String? = null,
     onRevealed: () -> Unit = {},
 ) {
@@ -568,9 +580,9 @@ private fun EntryList(
         else entrance.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
     }
 
-    if (state.grid) {
+    if (state.grid) SizedGrid(state.thumbnailSize, onThumbnailSize) { cells ->
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+            columns = cells,
             state = grid,
             contentPadding = PaddingValues(GRID_PADDING),
             horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -631,8 +643,8 @@ private val ScrollMemorySaver = listSaver<ScrollMemory, Any>(
     },
 )
 
-// Internal so the Favorites grid is laid out exactly like a folder's.
-internal val GRID_MIN_CELL = 158.dp
+// Internal so the Favorites grid is laid out exactly like a folder's. The
+// card width itself is a step of ThumbnailSizes.
 internal val GRID_PADDING = 14.dp
 internal val GRID_GAP = 12.dp
 
@@ -761,6 +773,8 @@ private fun BrowserTopBar(
     folder: String,
     atRoot: Boolean,
     grid: Boolean,
+    thumbnailSize: Int,
+    onThumbnailSize: (Int) -> Unit,
     sort: FilesState.Sort,
     scrollBehavior: TopAppBarScrollBehavior,
     overflowOpen: Boolean,
@@ -841,6 +855,13 @@ private fun BrowserTopBar(
                 }
                 SortItem("Largest", Icons.Default.DataUsage, sort == FilesState.Sort.LARGEST) {
                     onOverflow(false); onSort(FilesState.Sort.LARGEST)
+                }
+
+                // Only in the grid, the one view with thumbnails to size. The
+                // menu stays open, so several steps are several taps.
+                if (grid) {
+                    MenuHeading("Thumbnail size")
+                    ThumbnailSizeStepper(thumbnailSize, onThumbnailSize)
                 }
 
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
@@ -944,6 +965,31 @@ private fun SortItem(
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 14.dp),
     )
+}
+
+/**
+ * Smaller, the size it is, larger. The same steps a pinch moves through; this
+ * is the way to reach them without two fingers, or with TalkBack.
+ */
+@Composable
+internal fun ThumbnailSizeStepper(level: Int, onLevel: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { onLevel(level - 1) }, enabled = level > ThumbnailSizes.MIN) {
+            Icon(Icons.Default.ZoomOut, "Smaller thumbnails")
+        }
+        Text(
+            ThumbnailSizes.label(level),
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = { onLevel(level + 1) }, enabled = level < ThumbnailSizes.MAX) {
+            Icon(Icons.Default.ZoomIn, "Larger thumbnails")
+        }
+    }
 }
 
 /** A quiet label over a group, so "Name" is obviously a sort and not a screen. */

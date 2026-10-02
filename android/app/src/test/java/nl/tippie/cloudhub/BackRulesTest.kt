@@ -183,4 +183,16 @@ class BackRulesTest {
         assertEquals(listOf("files"), BackRules.popped(listOf("files")))
         assertEquals(emptyList<String>(), BackRules.popped(emptyList()))
     }
+
+    @Test fun `a rail choice replaces the screen above the files rather than stacking`() {
+        // Files > Trash, then Storage and Settings from the rail: Back is the files.
+        val viaRail = BackRules.switchedTo(listOf("files", "trash"), "files", "storage")
+        assertEquals(listOf("files", "storage"), viaRail)
+        assertEquals(listOf("files", "settings"), BackRules.switchedTo(viaRail, "files", "settings"))
+        assertEquals(listOf("files"), BackRules.popped(BackRules.switchedTo(viaRail, "files", "settings")))
+    }
+
+    @Test fun `choosing Files on the rail goes back to the root`() {
+        assertEquals(listOf("files"), BackRules.switchedTo(listOf("files", "settings", "storage"), "files", "files"))
+    }
 }
