@@ -47,4 +47,33 @@ object SubtitleRules {
         val suffix = extension.trim().lowercase().removePrefix(".")
         return if (tag.isEmpty()) "$stem.$suffix" else "$stem.$tag.$suffix"
     }
+
+    /**
+     * Where a subtitle added from the player has got to.
+     *
+     * It goes through the app's upload queue, so the player cannot just ask
+     * once: the file may still be waiting for a connection, may have failed,
+     * or may have landed. The player asks every couple of seconds and acts on
+     * the answer -- turning the track on, or saying why it will not appear --
+     * rather than giving up silently after a fixed time.
+     */
+    sealed interface Upload {
+        data object Landed : Upload
+        data object Waiting : Upload
+        data class Failed(val reason: String) : Upload
+        /** Neither queued, failed nor listed: it never reached the queue, or the server does not list it. */
+        data object Lost : Upload
+    }
+
+    fun uploadState(listed: Boolean, queued: Boolean, failure: String?, elapsedMs: Long): Upload = when {
+        listed -> Upload.Landed
+        failure != null -> Upload.Failed(failure)
+        queued -> Upload.Waiting
+        // Staging copies the file before it is queued, and the listing can lag
+        // the upload finishing by a moment: a little grace before calling it lost.
+        elapsedMs < LOST_AFTER_MS -> Upload.Waiting
+        else -> Upload.Lost
+    }
+
+    const val LOST_AFTER_MS = 20_000L
 }

@@ -273,8 +273,9 @@ $checks['tracks are handed to Media3 as WebVTT, whatever the file is'] =
 // A second media item with a different cache key would re-download the film.
 $checks['adding subtitles does not change the cache key'] =
     substr_count($player, 'setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))') === 1
-    // Defined once; built for the first item, the tracks found, and a track added while watching.
-    && substr_count($player, 'mediaItemFor(') === 4;
+    // Defined once; built for the first item, the tracks found, a track added
+    // while watching, and the film again without tracks a file failed to load.
+    && substr_count($player, 'mediaItemFor(') === 5;
 $checks['playback never waits on the subtitle lookup'] =
     str_contains($player, 'setMediaItem(mediaItemFor(api, entry, emptyList()))')
     && str_contains($player, 'runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())')
@@ -334,7 +335,7 @@ $checks['replacing an existing track is asked about'] =
     str_contains($appJs, "askConfirm(\n            'Replace subtitles',")
     && str_contains($appJs, "await api('/api/files/delete', { method: 'DELETE', body: { path: clash.path } });");
 $checks['the phone sends it through the ordinary upload queue'] =
-    str_contains($main, 'private fun attachSubtitle(video: FileEntry, uri: Uri, name: String)')
+    str_contains($main, 'private fun attachSubtitle(video: FileEntry, uri: Uri, name: String, done: (String?) -> Unit = {})')
     && str_contains($main, 'queue.add(result.upload.copy(name = name, targetPath = folder))');
 
 $bad = false;

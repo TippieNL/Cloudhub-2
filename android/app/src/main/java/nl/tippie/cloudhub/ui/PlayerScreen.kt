@@ -57,9 +57,6 @@ import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.net.SubtitleTrack
 import nl.tippie.cloudhub.work.ForegroundMedia
 
-/** About three minutes of asking for a just-added subtitle before giving up quietly. */
-private const val SUBTITLE_WAIT_TRIES = 90
-
 /** How far a double-tap jumps, matching the player's own seek increments. */
 private const val SEEK_STEP_MS = 10_000L
 
@@ -73,7 +70,7 @@ private const val SEEK_STEP_MS = 10_000L
  * re-download the film from the start.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private fun mediaItemFor(
+internal fun mediaItemFor(
     api: CloudHubApi,
     entry: FileEntry,
     tracks: List<SubtitleTrack>,
@@ -96,6 +93,36 @@ private fun mediaItemFor(
             }
         )
         .build()
+
+/**
+ * Where the player reads from: the app's OkHttp client, through a disk cache,
+ * so bytes are fetched once. Kept apart so a test builds the player exactly
+ * as the screen does.
+ *
+ * Skipping back ten seconds used to re-fetch ten seconds that had just
+ * arrived, and re-opening a film downloaded it again from the start --
+ * which resume makes worse, dropping you halfway into a file the
+ * player then has to reach from scratch.
+ *
+ * FLAG_IGNORE_CACHE_ON_ERROR: a cache that cannot be written must cost
+ * a cache, never the video.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal fun playerDataSource(context: android.content.Context, client: CloudHubClient, entry: FileEntry): CacheDataSource.Factory {
+    return CacheDataSource.Factory()
+        .setCache(MediaCache.get(context))
+        .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        .apply {
+            // A film bigger than the cache cannot be held by it, and
+            // trying churns the whole cache while it plays -- including
+            // evicting spans still being read, which is how a large video
+            // stops playing rather than merely playing uncached. Those
+            // read through: no writes, but anything already cached is
+            // still served from there.
+            if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)
+        }
+}
 
 /**
  * Video and audio playback.
@@ -122,8 +149,11 @@ fun PlayerScreen(
     onToggleFavorite: (() -> Unit)? = null,
     /** Editors and administrators may put a subtitle file beside the video. */
     canWrite: Boolean = false,
-    /** Queue the chosen file for upload beside the video, under the given name. */
-    onAddSubtitle: ((FileEntry, Uri, String) -> Unit)? = null,
+    /**
+     * Queue the chosen file for upload beside the video, under the given name.
+     * The callback reports a problem copying it for upload, or null once queued.
+     */
+    onAddSubtitle: ((FileEntry, Uri, String, (String?) -> Unit) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val activity = context.findActivity()
@@ -152,30 +182,8 @@ fun PlayerScreen(
     }
 
     val player = remember {
-        /*
-         * Read through a disk cache, so bytes are fetched once.
-         *
-         * Skipping back ten seconds used to re-fetch ten seconds that had just
-         * arrived, and re-opening a film downloaded it again from the start --
-         * which resume makes worse, dropping you halfway into a file the
-         * player then has to reach from scratch.
-         *
-         * FLAG_IGNORE_CACHE_ON_ERROR: a cache that cannot be written must cost
-         * a cache, never the video.
-         */
-        val source = CacheDataSource.Factory()
-            .setCache(MediaCache.get(context))
-            .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-            .apply {
-                // A film bigger than the cache cannot be held by it, and
-                // trying churns the whole cache while it plays -- including
-                // evicting spans still being read, which is how a large video
-                // stops playing rather than merely playing uncached. Those
-                // read through: no writes, but anything already cached is
-                // still served from there.
-                if (!PlaybackTuning.mayCache(entry.size)) setCacheWriteDataSinkFactory(null)
-            }
+        // Read through a disk cache; see playerDataSource().
+        val source = playerDataSource(context, client, entry)
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
@@ -250,35 +258,89 @@ fun PlayerScreen(
      * them in a menu would be one step too many.
      */
     var awaiting by remember { mutableStateOf<Pair<String, String>?>(null) }   // file name, language
+    val queue = remember(context) { nl.tippie.cloudhub.work.UploadQueue(context) }
     val addSubtitles = rememberSubtitleAdder(
         api = api,
         onAdd = { video, uri, name, language ->
-            onAddSubtitle?.invoke(video, uri, name)
             awaiting = name to language
+            onAddSubtitle?.invoke(video, uri, name) { problem ->
+                // The file could not even be copied for upload: say so now.
+                if (problem != null) {
+                    awaiting = null
+                    scope.launch { snackbar.showSnackbar(problem) }
+                }
+            }
         },
         onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
     )
     LaunchedEffect(awaiting) {
         val (name, language) = awaiting ?: return@LaunchedEffect
-        repeat(SUBTITLE_WAIT_TRIES) {
-            delay(2_000)
-            val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
-            if (tracks.any { it.path.substringAfterLast('/') == name }) {
-                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                    .setPreferredTextLanguage(language.ifEmpty { null })
-                    .build()
-                if (language.isNotEmpty()) settings.subtitleLanguage = language
-                val playing = player.playWhenReady
-                player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
+        val started = System.currentTimeMillis()
+        // Shown for as long as it takes; the CC button below stays greyed out
+        // until there is a track to turn on, and this says why.
+        val waiting = scope.launch {
+            snackbar.showSnackbar("Uploading subtitles…", duration = SnackbarDuration.Indefinite)
+        }
+        try {
+            while (true) {
+                delay(2_000)
+                val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
+                val listed = tracks.any { it.path.substringAfterLast('/') == name }
+                val failure = queue.failures().lastOrNull { it.name == name && it.at >= started }?.reason
+                val queued = queue.all().any { it.name == name }
+                when (val state = SubtitleRules.uploadState(listed, queued, failure, System.currentTimeMillis() - started)) {
+                    SubtitleRules.Upload.Waiting -> continue
+                    SubtitleRules.Upload.Landed -> {
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                            .setPreferredTextLanguage(language.ifEmpty { null })
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .build()
+                        if (language.isNotEmpty()) settings.subtitleLanguage = language
+                        val playing = player.playWhenReady
+                        player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
+                        player.prepare()
+                        player.playWhenReady = playing
+                        waiting.cancel()
+                        snackbar.showSnackbar("Subtitles added and switched on")
+                    }
+                    is SubtitleRules.Upload.Failed -> {
+                        waiting.cancel()
+                        snackbar.showSnackbar("The subtitles could not be uploaded: ${state.reason}")
+                    }
+                    SubtitleRules.Upload.Lost -> {
+                        waiting.cancel()
+                        snackbar.showSnackbar("The subtitles did not arrive on the server; try adding them again")
+                    }
+                }
+                break
+            }
+        } finally {
+            waiting.cancel()
+            awaiting = null
+        }
+    }
+
+    /*
+     * A subtitle the player cannot read must never cost the film. With the
+     * tracks attached, a bad file fails the whole source -- the picture stops
+     * at the start and the CC button stays grey -- so the film is reloaded
+     * without them, where it was, and the reason given.
+     */
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val item = player.currentMediaItem ?: return
+                if (item.localConfiguration?.subtitleConfigurations.isNullOrEmpty()) return
+                val at = player.currentPosition
+                player.setMediaItem(mediaItemFor(api, entry, emptyList()), at)
                 player.prepare()
-                player.playWhenReady = playing
-                snackbar.showSnackbar("Subtitles added")
-                awaiting = null
-                return@LaunchedEffect
+                scope.launch {
+                    snackbar.showSnackbar("The subtitles beside this video could not be read, so it plays without them")
+                }
             }
         }
-        snackbar.showSnackbar("The subtitles are still uploading; they will be there next time")
-        awaiting = null
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
     }
 
     /* ---- resume ---------------------------------------------------------

@@ -457,7 +457,7 @@ class MainActivity : ComponentActivity() {
                         favorite = current.entry.path in state.favorites,
                         onToggleFavorite = { model.toggleFavorite(current.entry) },
                         canWrite = state.canWrite,
-                        onAddSubtitle = { video, uri, name -> attachSubtitle(video, uri, name) },
+                        onAddSubtitle = { video, uri, name, done -> attachSubtitle(video, uri, name, done) },
                     )
                 }
                 }
@@ -608,7 +608,7 @@ class MainActivity : ComponentActivity() {
      * survives the app being closed and shows in the upload tracker like any
      * other file.
      */
-    private fun attachSubtitle(video: FileEntry, uri: Uri, name: String) {
+    private fun attachSubtitle(video: FileEntry, uri: Uri, name: String, done: (String?) -> Unit = {}) {
         val folder = video.path.substringBeforeLast('/', "").ifEmpty { "/" }
         lifecycleScope.launch(Dispatchers.IO) {
             val result = UploadWorker.stage(this@MainActivity, uri, name)
@@ -618,11 +618,16 @@ class MainActivity : ComponentActivity() {
                         queue.add(result.upload.copy(name = name, targetPath = folder))
                         UploadWorker.enqueue(this@MainActivity)
                         Toast.makeText(this@MainActivity, "Adding $name", Toast.LENGTH_SHORT).show()
+                        done(null)
                     }
-                    is StageResult.NoRoom -> Toast.makeText(
-                        this@MainActivity, "Not enough space on this phone", Toast.LENGTH_LONG).show()
-                    StageResult.Unreadable -> Toast.makeText(
-                        this@MainActivity, "That file could not be read", Toast.LENGTH_LONG).show()
+                    is StageResult.NoRoom -> {
+                        Toast.makeText(this@MainActivity, "Not enough space on this phone", Toast.LENGTH_LONG).show()
+                        done("there is not enough space on this phone to stage it")
+                    }
+                    StageResult.Unreadable -> {
+                        Toast.makeText(this@MainActivity, "That file could not be read", Toast.LENGTH_LONG).show()
+                        done("that file could not be read")
+                    }
                 }
             }
         }
