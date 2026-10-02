@@ -278,8 +278,26 @@ $checks['adding subtitles does not change the cache key'] =
     && substr_count($player, 'mediaItemFor(') === 5;
 $checks['playback never waits on the subtitle lookup'] =
     str_contains($player, 'setMediaItem(mediaItemFor(api, entry, emptyList()))')
-    && str_contains($player, 'runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())')
+    && str_contains($player, 'runCatching { subtitles.tracksFor(entry) }.getOrDefault(emptyList())')
     && str_contains($player, 'if (tracks.isEmpty()) return@LaunchedEffect');
+// Cloudhub-web has neither subtitle route. Asking only the route there found
+// nothing, ever: a subtitle that had uploaded fine was reported as never having
+// arrived. The app finds and converts the sidecars itself (SidecarSubtitles and
+// SubtitleText, this service ported), and the player reads that copy from disk.
+$loader = $readKt('data/SubtitleLoader.kt');
+$checks['a server with no subtitle route still gets its tracks'] =
+    str_contains($loader, 'fun isMissingRoute(e: ApiError) = e.status == 404 && e.message == "API endpoint not found"')
+    && str_contains($loader, 'SidecarSubtitles.find(video) { folder -> api.list(folder) }')
+    && str_contains($loader, 'SubtitleText.toWebVtt(track.name, raw)')
+    && str_contains($player, 'DefaultDataSource.Factory(context, networkDataSource(context, client, entry))')
+    && str_contains($readKt('ui/SubtitleAdder.kt'), 'loader.find(pending.video)');
+// The port keeps this service's rules: the same tables, the same cap.
+$sidecar = $readKt('ui/SidecarSubtitles.kt');
+$checks['the app claims the same names as this service'] =
+    str_contains($sidecar, '"nl" to "nl", "nld" to "nl", "dut" to "nl", "dutch" to "nl", "nederlands" to "nl"')
+    && str_contains($sidecar, 'private val SIDECAR_DIRS = setOf("subs", "subtitles", "sub", "subtitle")')
+    && str_contains($sidecar, 'const val MAX_TRACKS = 24')
+    && str_contains($readKt('ui/SubtitleRules.kt'), 'const val MAX_BYTES = 4_194_304L');
 $checks['the language is remembered on the phone too'] =
     str_contains($stores, 'var subtitleLanguage: String?')
     && str_contains($player, 'setPreferredTextLanguage(settings.subtitleLanguage)');

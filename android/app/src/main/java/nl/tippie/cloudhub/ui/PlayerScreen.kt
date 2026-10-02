@@ -40,6 +40,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -49,6 +51,7 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import nl.tippie.cloudhub.data.MediaCache
+import nl.tippie.cloudhub.data.SubtitleLoader
 import nl.tippie.cloudhub.data.ResumePolicy
 import nl.tippie.cloudhub.data.Settings
 import nl.tippie.cloudhub.net.CloudHubApi
@@ -82,9 +85,12 @@ internal fun mediaItemFor(
         .setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))
         .setSubtitleConfigurations(
             tracks.map { track ->
+                // The server's converted copy, or -- from a server without a
+                // subtitle route -- the one SubtitleLoader converted on the phone.
+                val uri = if (SubtitleLoader.isLocal(track)) track.url else api.subtitleUrl(track.path).toString()
                 MediaItem.SubtitleConfiguration
-                    .Builder(Uri.parse(api.subtitleUrl(track.path).toString()))
-                    // Always VTT: the server converts SubRip as it serves it.
+                    .Builder(Uri.parse(uri))
+                    // Always VTT, from either: SubRip is converted before it gets here.
                     .setMimeType(MimeTypes.TEXT_VTT)
                     .setLanguage(track.language.ifBlank { null })
                     .setLabel(track.label)
@@ -108,7 +114,14 @@ internal fun mediaItemFor(
  * a cache, never the video.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-internal fun playerDataSource(context: android.content.Context, client: CloudHubClient, entry: FileEntry): CacheDataSource.Factory {
+internal fun playerDataSource(context: android.content.Context, client: CloudHubClient, entry: FileEntry): DataSource.Factory {
+    // Outermost, so a subtitle converted on the phone (a file: URI) is read
+    // straight from disk; everything from the server goes through the cache.
+    return DefaultDataSource.Factory(context, networkDataSource(context, client, entry))
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun networkDataSource(context: android.content.Context, client: CloudHubClient, entry: FileEntry): CacheDataSource.Factory {
     return CacheDataSource.Factory()
         .setCache(MediaCache.get(context))
         .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(client.okHttp))
@@ -159,6 +172,8 @@ fun PlayerScreen(
     val activity = context.findActivity()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    /** The tracks beside this video, from the server's route or found and converted here. */
+    val subtitles = remember(api) { SubtitleLoader(api, java.io.File(context.cacheDir, SubtitleLoader.CACHE_DIR)) }
 
     var fullscreen by remember { mutableStateOf(false) }
     // The controller starts hidden -- PlayerView has not been told to show it.
@@ -242,7 +257,7 @@ fun PlayerScreen(
      * either way.
      */
     LaunchedEffect(player, entry.path) {
-        val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
+        val tracks = runCatching { subtitles.tracksFor(entry) }.getOrDefault(emptyList())
         if (tracks.isEmpty()) return@LaunchedEffect
 
         player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
@@ -284,13 +299,15 @@ fun PlayerScreen(
         try {
             while (true) {
                 delay(2_000)
-                val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
-                val listed = tracks.any { it.path.substringAfterLast('/') == name }
+                // Only what is there: nothing is fetched until it has landed.
+                val found = runCatching { subtitles.find(entry) }.getOrDefault(emptyList())
+                val listed = found.any { it.path.substringAfterLast('/') == name }
                 val failure = queue.failures().lastOrNull { it.name == name && it.at >= started }?.reason
                 val queued = queue.all().any { it.name == name }
                 when (val state = SubtitleRules.uploadState(listed, queued, failure, System.currentTimeMillis() - started)) {
                     SubtitleRules.Upload.Waiting -> continue
                     SubtitleRules.Upload.Landed -> {
+                        val tracks = subtitles.playable(found)
                         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                             .setPreferredTextLanguage(language.ifEmpty { null })
                             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)

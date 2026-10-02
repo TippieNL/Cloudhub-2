@@ -32,6 +32,7 @@ $stores = $read($kotlin.'/data/Stores.kt');
 $uploads = $read($kotlin.'/work/Uploads.kt');
 $app = $read($kotlin.'/App.kt');
 $main = $read($kotlin.'/MainActivity.kt');
+$downloads = $read($kotlin.'/data/Downloads.kt');
 $tests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/ApiIntegrationTest.kt');
 $player = $read($kotlin.'/ui/PlayerScreen.kt');
 $files = $read($kotlin.'/ui/FilesScreen.kt');
@@ -153,8 +154,13 @@ $checks['uploads outlive the app being closed'] =
 $checks['queued bytes are staged, not referenced'] =
     str_contains($uploads, 'fun stage(context: Context, uri: Uri, name: String)')
     && str_contains($uploads, 'input.copyTo(output)');
+// Recorded and dropped, rather than retried for ever at the head of the queue
+// where it held up every upload behind it. Part-way, a 404 or 409 means the
+// session expired or the offset moved, and starting again resumes it.
 $checks['a refusal that retrying cannot fix is dropped'] =
-    str_contains($uploads, 'if (e.isOutOfSpace || e.status == 413 || e.isForbidden)');
+    str_contains($uploads, 'if (UploadRefusal.isFinal(e.status, starting))')
+    && str_contains($uploads, '400, 403, 413, 415, 422, 507 -> true')
+    && str_contains($uploads, '404, 409 -> starting');
 $checks['a stalled chunk does not spin'] =
     str_contains($uploads, 'if (status.received <= offset) return Result.retry()');
 
@@ -181,7 +187,9 @@ $checks['only network permissions, and the notification, are requested'] =
     && str_contains($declarations, 'android.permission.INTERNET')
     && str_contains($declarations, 'android.permission.ACCESS_NETWORK_STATE')
     && str_contains($declarations, 'android.permission.POST_NOTIFICATIONS');
-$checks['downloads go through MediaStore'] = str_contains($main, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
+// Shared by a file's Download and a background task's ZIP, so it has a file of its own.
+$checks['downloads go through MediaStore'] = str_contains($downloads, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI')
+    && str_contains($main, 'saveToDownloads(');
 
 // --- the share sheet --------------------------------------------------------
 $checks['CloudHub appears in the share sheet'] =

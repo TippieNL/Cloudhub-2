@@ -198,6 +198,37 @@ being broken rather than the file being wrong.
 Public share links have no subtitles. The token is a credential for one file,
 and serving the files beside it would quietly widen what was shared.
 
+**On a server without these routes** (Cloudhub-web, which has no
+`/api/files/subtitles` or `/api/files/subtitle`), the Android app does the
+work itself.
+- Asking only the routes used to find nothing there, ever. A subtitle that had
+  uploaded fine then got "The subtitles did not arrive on the server", and
+  existing tracks never showed.
+- When the server answers "API endpoint not found", the app instead reads the
+  folder listing and claims the same files by the same rules
+  (`SidecarSubtitles`, this service's discovery ported).
+- It then fetches each file as stored and converts it to UTF-8 WebVTT on the
+  phone (`SubtitleText`, the conversion ported). The player reads that copy
+  from the app's cache.
+- Labels, order, `Subs/` folders, Windows-1252 and UTF-16 all behave as they
+  do here. A live test compares the app's answer with this server's for the
+  same folder.
+- Replacing a track works the same way, so it is replaced rather than
+  duplicated.
+
+The Cloudhub-web *web* player still shows no subtitles until that server gets
+the routes.
+
+**An upload the server refuses for good is no longer retried for ever.** The
+app's queue used to treat only 403, 413 and 507 as final. Any other refusal
+(a 400 for a name, a 415, a 422) kept the file at the head of the queue,
+retried with backoff and said nothing. Every upload behind it waited too,
+subtitles included. Now:
+- 400, 403, 413, 415, 422 and 507 are final, and so are 404 and 409 when an
+  upload is starting. The file is dropped, and the upload tracker shows why.
+- Part-way through, 404 (session expired) and 409 (offset moved) still mean
+  "start again", which resumes from what the server holds.
+
 ## Tests
 
 Two suites, and both run on every push (`.github/workflows/ci.yml`):

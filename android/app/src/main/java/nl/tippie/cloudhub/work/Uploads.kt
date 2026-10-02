@@ -75,6 +75,39 @@ object StagingSpace {
 }
 
 /**
+ * Whether the server's refusal of an upload is final.
+ *
+ * A final one is recorded and the upload dropped. Anything else is tried again
+ * later -- which, for a refusal that will never change, used to mean for ever:
+ * a file the server turned away with a 400 sat at the head of the queue,
+ * retried with backoff, said nothing, and held up every upload behind it,
+ * subtitles included. Only 403, 413 and 507 were taken as final.
+ *
+ * Pure, so the decision can be tested without a server.
+ */
+object UploadRefusal {
+    /**
+     * [starting] is true for the request that opens the upload. A 404 or 409
+     * there is final -- the folder is gone, the id belongs to another file --
+     * but later on both mean "start again": the session expired, or the
+     * offset moved, and opening it again resumes from what the server holds.
+     */
+    fun isFinal(status: Int, starting: Boolean): Boolean = when (status) {
+        // Signed out, or the token went stale: signing in again fixes it.
+        401, 419 -> false
+        // Slow or busy: later.
+        408, 429 -> false
+        404, 409 -> starting
+        // A refused name, type or size, forbidden, or no space left.
+        400, 403, 413, 415, 422, 507 -> true
+        // Anything else in 4xx is a refusal of the request itself.
+        in 400..499 -> true
+        // The server's own trouble.
+        else -> false
+    }
+}
+
+/**
  * The queue itself, persisted as one small file.
  *
  * A database would be more than a list of a few dozen records needs, and would
@@ -184,8 +217,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 queue.remove(item.id)
                 continue
             }
+            var starting = true
             try {
                 var status = api.uploadInit(item.id, item.targetPath, item.name, item.size)
+                starting = false
                 var offset = status.received.coerceAtMost(item.size)
 
                 while (offset < item.size) {
@@ -216,12 +251,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 doneBytes += item.size
             } catch (e: ApiError) {
                 clearNotification()
-                // Over quota, too large or forbidden: retrying changes nothing,
-                // so the item is dropped rather than left cycling forever --
-                // but recorded on the way out. Dropping it silently meant a
-                // file you were told was queued never arrived, with nothing
-                // anywhere to explain it.
-                if (e.isOutOfSpace || e.status == 413 || e.isForbidden) {
+                // Over quota, too large, forbidden, or a name or type refused:
+                // retrying changes nothing, so the item is dropped rather than
+                // left cycling forever -- but recorded on the way out. Dropping
+                // it silently meant a file you were told was queued never
+                // arrived, with nothing anywhere to explain it.
+                if (UploadRefusal.isFinal(e.status, starting)) {
                     queue.recordFailure(
                         UploadFailure(item.name, e.message ?: "The server refused this file"),
                     )

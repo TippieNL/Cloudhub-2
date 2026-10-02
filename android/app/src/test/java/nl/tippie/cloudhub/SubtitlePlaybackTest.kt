@@ -9,6 +9,7 @@ import androidx.media3.test.utils.robolectric.TestPlayerRunHelper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
+import nl.tippie.cloudhub.data.SubtitleLoader
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
@@ -37,6 +38,11 @@ import kotlin.test.assertTrue
  * formatting tags. The player loads the video first and adds the tracks when
  * they arrive, so that path is exercised too. Skipped without
  * CLOUDHUB_TEST_URL, like the other live tests.
+ *
+ * The tracks come from SubtitleLoader, as on the screen: against Cloudhub-2
+ * the server's converted copy, against Cloudhub-web -- which has no subtitle
+ * route -- the file converted on the phone and read from disk. Run against
+ * both; the second is the case that used to find nothing at all.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
@@ -81,10 +87,11 @@ class SubtitlePlaybackTest {
         upload("$stem.mp4", VIDEO)
         upload(subtitleName, subtitle)
         val entry: FileEntry = runBlocking { api.list(folder).first { it.name == "$stem.mp4" } }
-        val tracks = runBlocking { api.subtitles(entry.path) }
-        assertTrue(tracks.isNotEmpty(), "the server lists $subtitleName")
-
         val context = ApplicationProvider.getApplicationContext<Context>()
+        val loader = SubtitleLoader(api, java.io.File(context.cacheDir, SubtitleLoader.CACHE_DIR))
+        val tracks = runBlocking { loader.tracksFor(entry) }
+        assertTrue(tracks.isNotEmpty(), "the app finds $subtitleName")
+
         val player = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(playerDataSource(context, client, entry)))
             .build()

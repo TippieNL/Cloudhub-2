@@ -16,6 +16,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
+import nl.tippie.cloudhub.data.SubtitleLoader
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 
@@ -43,6 +44,7 @@ fun rememberSubtitleAdder(
 ): (FileEntry) -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val loader = remember(api) { SubtitleLoader(api, java.io.File(context.cacheDir, SubtitleLoader.CACHE_DIR)) }
     var video by remember { mutableStateOf<FileEntry?>(null) }
     var picked by remember { mutableStateOf<Picked?>(null) }
     var replacing by remember { mutableStateOf<Pending?>(null) }
@@ -66,7 +68,9 @@ fun rememberSubtitleAdder(
     /** Upload, or ask first when a track of that name is already there. */
     fun proceed(pending: Pending) {
         scope.launch {
-            val existing = runCatching { api.subtitles(pending.video.path) }.getOrDefault(emptyList())
+            // Found the way the player finds them, so a track is replaced on a
+            // server without a subtitle route too, not duplicated beside it.
+            val existing = runCatching { loader.find(pending.video) }.getOrDefault(emptyList())
                 .firstOrNull { it.path.substringAfterLast('/') == pending.name }
             if (existing == null) {
                 onAdd(pending.video, pending.file, pending.name, pending.language)
