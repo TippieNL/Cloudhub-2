@@ -502,8 +502,11 @@ $checks['the entrance stagger stops after the first screenful'] =
 $checks['breadcrumb segments are targets, and scroll'] =
     str_contains($files, 'private fun Crumb(') && str_contains($files, 'horizontalScroll(scroll)')
     && str_contains($files, 'scroll.animateScrollTo(scroll.maxValue)');
+// Adaptive columns of at least the chosen card size (ThumbnailSizes).
+$grid = (string)@file_get_contents($root.'/android/app/src/main/java/nl/tippie/cloudhub/ui/ThumbnailGrid.kt');
 $checks['the grid adapts to the screen it is on'] =
-    str_contains($files, 'GridCells.Adaptive(minSize = GRID_MIN_CELL)');
+    str_contains($grid, 'content(GridCells.Adaptive(minSize = cell))')
+    && str_contains($files, 'SizedGrid(state.thumbnailSize, onThumbnailSize)');
 
 
 $bad = false;

@@ -82,6 +82,17 @@ object BackRules {
     fun <T> pushed(stack: List<T>, screen: T): List<T> =
         if (stack.lastOrNull() == screen) stack else stack + screen
 
+    /**
+     * The stack after choosing a destination on the navigation rail.
+     *
+     * The rail (unfolded, or any wide window) is a set of places side by side,
+     * not a trail: going Files, Trash, Storage, Settings by rail and pressing
+     * Back should return to the files, not walk back through every stop. So a
+     * rail choice replaces whatever was above the root rather than stacking.
+     */
+    fun <T> switchedTo(stack: List<T>, root: T, screen: T): List<T> =
+        if (screen == root) listOf(root) else listOf(root, screen)
+
     /** The stack after Back. The root is never popped; leaving is Android's job. */
     fun <T> popped(stack: List<T>): List<T> =
         if (stack.size <= 1) stack else stack.dropLast(1)

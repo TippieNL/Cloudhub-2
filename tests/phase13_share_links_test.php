@@ -34,9 +34,10 @@ $checks['share routes are outside the authenticated guard'] =
 $checks['viewer, raw, download and named variants are routed'] =
     str_contains($index, "const SHARE_ROUTE = '#^/share/([A-Za-z0-9_-]{20,128})(?:/(raw|download))?(?:/([^/]+))?\$#';")
     && substr_count($index, 'preg_match(SHARE_ROUTE') === 2;
+// A WebDAV request carrying its own credentials runs session-less as well.
 $checks['anonymous viewers get no session'] =
     str_contains($index, '$isPublicShare = (bool)preg_match(SHARE_ROUTE, $path);')
-    && str_contains($index, 'if (!$isPublicShare) Auth::startSession($config);');
+    && str_contains($index, 'if (!$isPublicShare && $davCredentials === null) Auth::startSession($config);');
 
 // --- token, expiry, revocation ------------------------------------------
 $checks['tokens are 256 bits of randomness'] = str_contains($index, 'random_bytes(32)');

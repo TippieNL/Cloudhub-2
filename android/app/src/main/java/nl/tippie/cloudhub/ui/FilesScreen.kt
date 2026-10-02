@@ -2,7 +2,6 @@ package nl.tippie.cloudhub.ui
 
 import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -72,6 +71,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -92,6 +93,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 
@@ -141,20 +143,13 @@ fun FilesScreen(
     var propertiesFor by remember { mutableStateOf<FileEntry?>(null) }
     var overflow by remember { mutableStateOf(false) }
 
-    /* ---- adding subtitles ------------------------------------------------
-     *
-     * Pick the file first, then ask what language it is: the file's own name
-     * usually answers that, and a prompt that already holds the right answer
-     * is one tap rather than typing. Nothing is uploaded until both are known.
-     */
-    val context = LocalContext.current
-    var subtitlesFor by remember { mutableStateOf<FileEntry?>(null) }
-    var subtitleUri by remember { mutableStateOf<Uri?>(null) }
-    val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        // A .srt has no agreed MIME type, so the picker cannot be narrowed to
-        // one and the check is on the name instead.
-        if (uri == null) subtitlesFor = null else subtitleUri = uri
-    }
+    /* ---- adding subtitles: the same flow the player uses (SubtitleAdder) ---- */
+    val scope = rememberCoroutineScope()
+    val addSubtitles = rememberSubtitleAdder(
+        api = api,
+        onAdd = { video, uri, name, _ -> onAddSubtitle(video, uri, name) },
+        onMessage = { scope.launch { snackbar.showSnackbar(it) } },
+    )
 
     // Only action feedback goes through the snackbar now. A failed *listing*
     // is a state of the screen, not a message that scrolls away.
@@ -175,6 +170,8 @@ fun FilesScreen(
                 folder = state.path.substringAfterLast('/').ifEmpty { "CloudHub" },
                 atRoot = state.path == "/",
                 grid = state.grid,
+                thumbnailSize = state.thumbnailSize,
+                onThumbnailSize = model::setThumbnailSize,
                 sort = state.sort,
                 scrollBehavior = scrollBehavior,
                 overflowOpen = overflow,
@@ -283,6 +280,7 @@ fun FilesScreen(
                 onNewFolder = { showNewFolder = true },
                 revealPath = revealPath,
                 onRevealed = onRevealed,
+                onThumbnailSize = model::setThumbnailSize,
             )
         }
     }
@@ -299,7 +297,7 @@ fun FilesScreen(
             onMove = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = true) },
             onCopy = { menuFor = null; picking = PickerRequest(listOf(entry.path), moving = false) },
             onDelete = { menuFor = null; model.delete(listOf(entry.path)) },
-            onAddSubtitles = { menuFor = null; subtitlesFor = entry; subtitlePicker.launch("*/*") },
+            onAddSubtitles = { menuFor = null; addSubtitles(entry) },
             onProperties = { menuFor = null; propertiesFor = entry },
             favorite = entry.path in state.favorites,
             onFavorite = { menuFor = null; model.toggleFavorite(entry) },
@@ -308,35 +306,6 @@ fun FilesScreen(
 
     propertiesFor?.let { entry ->
         PropertiesSheet(entry = entry, onDismiss = { propertiesFor = null })
-    }
-
-    val video = subtitlesFor
-    val chosen = subtitleUri
-    if (video != null && chosen != null) {
-        val pickedName = remember(chosen) { displayNameOf(context, chosen) }
-        val close = { subtitlesFor = null; subtitleUri = null }
-        if (!SubtitleRules.isSubtitleFile(pickedName)) {
-            LaunchedEffect(chosen) {
-                close()
-                snackbar.showSnackbar("Subtitles have to be a .srt or .vtt file")
-            }
-        } else {
-            TextPrompt(
-                "Add subtitles",
-                // Empty is how an untagged track is asked for, which is the
-                // right answer when the film has only one.
-                "Language code — en, nl, de… (blank for none)",
-                SubtitleRules.guessLanguage(pickedName),
-                onDismiss = close,
-                onConfirm = { language ->
-                    val name = SubtitleRules.fileNameFor(
-                        video.name, language, pickedName.substringAfterLast('.', ""),
-                    )
-                    onAddSubtitle(video, chosen, name)
-                    close()
-                },
-            )
-        }
     }
 
     if (showNewFolder) {
@@ -388,6 +357,7 @@ private fun BrowserContent(
     onNewFolder: () -> Unit,
     revealPath: String?,
     onRevealed: () -> Unit,
+    onThumbnailSize: (Int) -> Unit,
 ) {
     val shown = state.shown
     // Held briefly past the answer so a fast folder does not flash a skeleton
@@ -405,11 +375,11 @@ private fun BrowserContent(
         modifier = Modifier.fillMaxSize(),
     ) { target ->
         when (target) {
-            Shown.SKELETON -> SkeletonList(grid = state.grid)
+            Shown.SKELETON -> SkeletonList(grid = state.grid, level = state.thumbnailSize, onLevel = onThumbnailSize)
             Shown.ERROR -> LoadFailed(state.loadError, onRetry)
             Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
             Shown.NO_MATCHES -> NoMatches(state.query, searchedEverywhere = state.searchMode, stillSearching = state.searching)
-            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, revealPath, onRevealed)
+            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, onThumbnailSize, revealPath, onRevealed)
         }
     }
 }
@@ -443,7 +413,7 @@ private fun rememberSettledSkeleton(target: Shown): Shown {
 }
 
 @Composable
-private fun SkeletonList(grid: Boolean) {
+private fun SkeletonList(grid: Boolean, level: Int, onLevel: (Int) -> Unit) {
     // One transition for the whole screen, its progress handed to every card.
     val progress = rememberShimmer()
     val height = LocalConfiguration.current.screenHeightDp
@@ -455,11 +425,15 @@ private fun SkeletonList(grid: Boolean) {
             .semantics { contentDescription = "Loading this folder" },
     ) {
         if (grid) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val columns = (maxWidth / GRID_MIN_CELL).toInt().coerceAtLeast(1)
+            // The same steps as the real grid, so the placeholders are the
+            // size the cards will be.
+            SizedGrid(level, onLevel) { cells ->
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                val cell = ThumbnailSizes.cellWidth(level)
+                val columns = ((maxWidth - GRID_PADDING * 2 + GRID_GAP) / (cell + GRID_GAP)).toInt().coerceAtLeast(1)
                 val cardHeight = cardHeightDp((maxWidth.value / columns).toInt())
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+                    columns = cells,
                     contentPadding = PaddingValues(GRID_PADDING),
                     horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
                     verticalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -467,6 +441,7 @@ private fun SkeletonList(grid: Boolean) {
                 ) {
                     items(skeletonCount(columns, height, cardHeight)) { SkeletonTile(progress) }
                 }
+              }
             }
         } else {
             LazyColumn(
@@ -486,6 +461,7 @@ private fun EntryList(
     onOpen: (FileEntry) -> Unit,
     onLongPress: (String) -> Unit,
     onMenu: (FileEntry) -> Unit,
+    onThumbnailSize: (Int) -> Unit,
     revealPath: String? = null,
     onRevealed: () -> Unit = {},
 ) {
@@ -568,9 +544,9 @@ private fun EntryList(
         else entrance.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
     }
 
-    if (state.grid) {
+    if (state.grid) SizedGrid(state.thumbnailSize, onThumbnailSize) { cells ->
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
+            columns = cells,
             state = grid,
             contentPadding = PaddingValues(GRID_PADDING),
             horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
@@ -631,8 +607,8 @@ private val ScrollMemorySaver = listSaver<ScrollMemory, Any>(
     },
 )
 
-// Internal so the Favorites grid is laid out exactly like a folder's.
-internal val GRID_MIN_CELL = 158.dp
+// Internal so the Favorites grid is laid out exactly like a folder's. The
+// card width itself is a step of ThumbnailSizes.
 internal val GRID_PADDING = 14.dp
 internal val GRID_GAP = 12.dp
 
@@ -761,6 +737,8 @@ private fun BrowserTopBar(
     folder: String,
     atRoot: Boolean,
     grid: Boolean,
+    thumbnailSize: Int,
+    onThumbnailSize: (Int) -> Unit,
     sort: FilesState.Sort,
     scrollBehavior: TopAppBarScrollBehavior,
     overflowOpen: Boolean,
@@ -843,6 +821,13 @@ private fun BrowserTopBar(
                     onOverflow(false); onSort(FilesState.Sort.LARGEST)
                 }
 
+                // Only in the grid, the one view with thumbnails to size. The
+                // menu stays open, so several steps are several taps.
+                if (grid) {
+                    MenuHeading("Thumbnail size")
+                    ThumbnailSizeStepper(thumbnailSize, onThumbnailSize)
+                }
+
                 HorizontalDivider(Modifier.padding(vertical = 6.dp))
                 MenuItem(Icons.Default.Delete, "Trash") { onOverflow(false); onTrash() }
                 MenuItem(Icons.Default.PieChart, "Storage") { onOverflow(false); onStorage() }
@@ -889,26 +874,6 @@ private fun MenuItem(
 }
 
 /**
- * What a picked document is called.
- *
- * The URI from the system picker says nothing useful -- it is a content://
- * address with a number on the end -- so the name has to be asked for. It
- * decides both the extension, which says whether this is a subtitle at all,
- * and the language guess.
- */
-private fun displayNameOf(context: Context, uri: Uri): String {
-    runCatching {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index >= 0 && cursor.moveToFirst()) {
-                cursor.getString(index)?.takeIf { it.isNotBlank() }?.let { return it }
-            }
-        }
-    }
-    return uri.lastPathSegment.orEmpty()
-}
-
-/**
  * A sort option, with a tick when it is the one in force.
  *
  * The trailing slot rather than the leading one: the icons stay in a column so
@@ -944,6 +909,31 @@ private fun SortItem(
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 14.dp),
     )
+}
+
+/**
+ * Smaller, the size it is, larger. The same steps a pinch moves through; this
+ * is the way to reach them without two fingers, or with TalkBack.
+ */
+@Composable
+internal fun ThumbnailSizeStepper(level: Int, onLevel: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { onLevel(level - 1) }, enabled = level > ThumbnailSizes.MIN) {
+            Icon(Icons.Default.ZoomOut, "Smaller thumbnails")
+        }
+        Text(
+            ThumbnailSizes.label(level),
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = { onLevel(level + 1) }, enabled = level < ThumbnailSizes.MAX) {
+            Icon(Icons.Default.ZoomIn, "Larger thumbnails")
+        }
+    }
 }
 
 /** A quiet label over a group, so "Name" is obviously a sort and not a screen. */

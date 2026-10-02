@@ -41,4 +41,15 @@ class SubtitleRulesTest {
         assertEquals("", SubtitleRules.guessLanguage("The.Film.2024.1080p.WEB-DL.srt"))
         assertEquals("", SubtitleRules.guessLanguage("subtitles.srt"))
     }
+
+    @Test fun `a subtitle added in the player is followed until it lands or fails`() {
+        assertEquals(SubtitleRules.Upload.Landed, SubtitleRules.uploadState(listed = true, queued = true, failure = null, elapsedMs = 0))
+        assertEquals(SubtitleRules.Upload.Waiting, SubtitleRules.uploadState(false, queued = true, failure = null, elapsedMs = 600_000))
+        assertEquals(SubtitleRules.Upload.Failed("too large"), SubtitleRules.uploadState(false, queued = false, failure = "too large", elapsedMs = 5_000))
+    }
+
+    @Test fun `one that never reaches the queue is reported, after a grace period`() {
+        assertEquals(SubtitleRules.Upload.Waiting, SubtitleRules.uploadState(false, false, null, elapsedMs = 3_000))
+        assertEquals(SubtitleRules.Upload.Lost, SubtitleRules.uploadState(false, false, null, elapsedMs = SubtitleRules.LOST_AFTER_MS))
+    }
 }

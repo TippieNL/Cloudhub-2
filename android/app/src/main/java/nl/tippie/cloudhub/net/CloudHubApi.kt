@@ -56,8 +56,13 @@ class CloudHubApi(
         return builder.build()
     }
 
-    fun thumbnailUrl(entry: FileEntry): HttpUrl =
-        url("/api/thumbnail", "path" to entry.path, "v" to entry.modified)
+    /**
+     * The thumbnail for a listing row. [large] asks for the 640px one, which
+     * the biggest grid sizes need to stay sharp; a server that predates it
+     * ignores the parameter and sends the 300px one, which still works.
+     */
+    fun thumbnailUrl(entry: FileEntry, large: Boolean = false): HttpUrl =
+        url("/api/thumbnail", "path" to entry.path, "v" to entry.modified, "size" to if (large) "large" else null)
 
     /**
      * A thumbnail for a path with no listing row behind it -- the duplicates

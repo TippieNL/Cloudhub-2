@@ -38,6 +38,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import nl.tippie.cloudhub.data.Settings
+import kotlin.math.roundToInt
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.User
 
@@ -60,6 +63,11 @@ fun SettingsScreen(
     videoCacheBytes: Long,
     theme: ThemeChoice,
     onTheme: (ThemeChoice) -> Unit,
+    /** Grid or list, and the grid's card size: the browser's own state, changed here. */
+    grid: Boolean,
+    onGrid: (Boolean) -> Unit,
+    thumbnailSize: Int,
+    onThumbnailSize: (Int) -> Unit,
     onClearCache: () -> Unit,
     onClearVideoCache: () -> Unit,
     onChangeServer: () -> Unit,
@@ -72,7 +80,6 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
-    var grid by remember { mutableStateOf(settings.gridView) }
     var remembered by remember { mutableStateOf(settings.rememberedUsername) }
     var positions by remember { mutableStateOf(settings.rememberedPositionCount()) }
     var changingPassword by remember { mutableStateOf(false) }
@@ -100,7 +107,8 @@ fun SettingsScreen(
             Modifier
                 .padding(padding)
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .readableWidth(),
         ) {
             AccountHeader(
                 username = user?.username ?: "Not signed in",
@@ -170,7 +178,28 @@ fun SettingsScreen(
                     title = "Open folders in the grid",
                     supporting = if (grid) "Pictures first, in a grid" else "Names first, in a list",
                     checked = grid,
-                    onChange = { grid = it; settings.gridView = it },
+                    onChange = onGrid,
+                )
+                SettingsDivider()
+                Text(
+                    "Thumbnail size",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(start = 16.dp, top = 14.dp),
+                )
+                Text(
+                    "${ThumbnailSizes.label(thumbnailSize)} — or pinch the grid with two fingers",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp),
+                )
+                Slider(
+                    value = thumbnailSize.toFloat(),
+                    onValueChange = { onThumbnailSize(it.roundToInt()) },
+                    valueRange = ThumbnailSizes.MIN.toFloat()..ThumbnailSizes.MAX.toFloat(),
+                    steps = ThumbnailSizes.MAX - ThumbnailSizes.MIN - 1,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .semantics { stateDescription = ThumbnailSizes.label(thumbnailSize) },
                 )
             }
 

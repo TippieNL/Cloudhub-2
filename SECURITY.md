@@ -30,6 +30,13 @@ For an internet deployment, use HTTPS and set `REQUIRE_HTTPS=true`.
 `X-Forwarded-Proto` is ignored unless `TRUST_PROXY=true`. Only enable
 `TRUST_PROXY` when clients cannot bypass the trusted reverse proxy.
 
+With `TRUST_PROXY=true` the login throttle's per-IP limit counts the **last**
+`X-Forwarded-For` entry — the one the proxy appended — never the first, which
+the client writes itself and could change on every attempt. This assumes one
+proxy in front of PHP. Behind a chain (a CDN in front of nginx, say), have the
+proxy nearest PHP set the real client address, e.g. with nginx's `real_ip`
+module, or every client behind one CDN node shares a single per-IP limit.
+
 ### Remaining risks
 Per-resource authorization, shared-root isolation, deeper filesystem/symlink
 hardening, WebDAV authorization, upload content isolation, rate limiting,
@@ -128,3 +135,27 @@ application internals plus common secret, backup, SQL, log and INI artefacts.
 
 For an internet-facing NAS, keep `storage/files` outside the web document root
 where practical and terminate traffic with HTTPS.
+
+## WebDAV sign-in, credentials at rest and the store limit
+
+**WebDAV app passwords.** WebDAV clients authenticate with HTTP Basic on
+`/webdav` using per-client app passwords: 20 characters from a 31-character
+alphabet (about 99 bits), stored as SHA-256 hashes, shown once. The account
+password is not accepted there, Basic credentials are not accepted on any
+other route, and issuing an app password requires the account password, so a
+stolen session cannot mint a credential that outlives it. Role and enabled
+state are read on every request. Changing or resetting the password, and
+deleting the account, revoke them all. App-password requests run without a
+session and without the CSRF token — they carry no ambient cookie, and browsers
+cannot send WebDAV write verbs cross-site without CORS — but requests marked
+`Sec-Fetch-Site: cross-site` are still refused.
+
+**Storage server credentials** are sealed with libsodium secretbox under
+`APP_KEY` from `.env` before they are written, so the database alone does not
+reveal them; without a key, a server with credentials cannot be saved. API
+responses mask every credential-like field, at any depth.
+
+**Store limit.** `STORAGE_LIMIT_GB` is checked against a cached measurement
+that is kept current with every change CloudHub makes, so sequential uploads
+can no longer run past it inside the cache window. Concurrent uploads are each
+checked before any of them lands, as with the per-account quota.

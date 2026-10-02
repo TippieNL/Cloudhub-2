@@ -80,6 +80,7 @@ async function login(u, p) {
     if (!r.ok) throw Error(d.error?.message || 'Sign in failed');
     S.csrf = d.csrfToken || '';
     S.role = d.user?.role || 'viewer';
+    S.username = d.user?.username || '';
     $('#nav-users').hidden = S.role !== 'admin';
     $('#nav-storage').hidden = S.role !== 'admin';
     $('#login').style.display = 'none';
@@ -2406,6 +2407,114 @@ $('#password-dialog').addEventListener('submit', async e => {
     }
 });
 
+/*
+ * WebDAV: the address to give a client, and the app passwords it signs in with.
+ *
+ * An app password is shown once, in the answer that creates it, and only its
+ * name and dates are listed afterwards. Creating one asks for the account
+ * password, so a session left open somewhere cannot mint a lasting credential.
+ */
+const webdavUI = {
+    overlay: $('#webdav-overlay'),
+    list: $('#webdav-list'),
+    form: $('#webdav-form'),
+    message: $('#webdav-message'),
+    created: $('#webdav-created'),
+};
+
+function webdavStatus(kind, text) {
+    webdavUI.message.className = `status-message ${kind}`;
+    webdavUI.message.textContent = text;
+    webdavUI.message.hidden = !text;
+}
+
+async function webdavLoad() {
+    try {
+        const d = await (await api('/api/users/me/app-passwords')).json();
+        const rows = d.passwords || [];
+        const when = iso => new Date(iso).toLocaleString();
+        webdavUI.list.innerHTML = rows.length ? rows.map(p => `<div class="webdav-row">
+            <div><strong>${esc(p.name)}</strong><span class="muted">Created ${esc(when(p.createdAt))} · ${p.lastUsedAt ? 'last used ' + esc(when(p.lastUsedAt)) : 'never used'}</span></div>
+            <button type="button" class="danger-button" data-revoke="${Number(p.id)}" data-name="${esc(p.name)}">Revoke</button>
+        </div>`).join('') : '<p class="muted">None yet. Create one for each app you connect.</p>';
+    } catch (e) {
+        webdavUI.list.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    }
+}
+
+function openWebdavDialog() {
+    // Encoded per segment: an install in a folder with a space in its name
+    // would otherwise hand out an address a client cuts short.
+    const base = BASE.split('/').map(encodeURIComponent).join('/');
+    $('#webdav-url').value = `${location.origin}${base}/webdav/`;
+    $('#webdav-username').value = S.username || '';
+    webdavUI.form.reset();
+    webdavUI.created.hidden = true;
+    webdavStatus('', '');
+    webdavUI.overlay.hidden = false;
+    webdavLoad();
+    $('#webdav-name').focus();
+}
+function closeWebdavDialog() {
+    webdavUI.overlay.hidden = true;
+    // The password is on screen only while the dialog is open.
+    $('#webdav-created-password').value = '';
+}
+
+$('#webdav-open').addEventListener('click', openWebdavDialog);
+$('#webdav-close').addEventListener('click', closeWebdavDialog);
+$('#webdav-cancel').addEventListener('click', closeWebdavDialog);
+webdavUI.overlay.addEventListener('click', e => {
+    if (e.target === webdavUI.overlay) closeWebdavDialog();
+});
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !webdavUI.overlay.hidden) closeWebdavDialog();
+});
+
+webdavUI.form.addEventListener('submit', async e => {
+    e.preventDefault();
+    try {
+        const r = await api('/api/users/me/app-passwords', {
+            method: 'POST',
+            body: { name: $('#webdav-name').value.trim(), currentPassword: $('#webdav-current').value }
+        });
+        const d = await r.json();
+        $('#webdav-created-label').textContent = `App password for "${d.name}":`;
+        $('#webdav-created-password').value = d.password || '';
+        webdavUI.created.hidden = false;
+        webdavUI.form.reset();
+        webdavStatus('', '');
+        await webdavLoad();
+    } catch (err) {
+        webdavStatus('error', err.message);
+    }
+});
+
+$('#webdav-copy').addEventListener('click', async () => {
+    const field = $('#webdav-created-password');
+    try {
+        await navigator.clipboard.writeText(field.value);
+        toast('App password copied');
+    } catch {
+        // Clipboard access needs a secure context; over plain http the
+        // selection lets it be copied by hand.
+        field.select();
+        toast('Press Ctrl/Cmd+C to copy');
+    }
+});
+
+webdavUI.list.addEventListener('click', async e => {
+    const button = e.target.closest('button[data-revoke]');
+    if (!button) return;
+    if (!await askConfirm('Revoke app password', `Apps signed in with "${button.dataset.name}" lose access at once.`, 'Revoke')) return;
+    try {
+        await api('/api/users/me/app-passwords', { method: 'DELETE', body: { id: Number(button.dataset.revoke) } });
+        await webdavLoad();
+    } catch (err) {
+        webdavStatus('error', err.message);
+    }
+});
+
 $('#add-server').addEventListener('click', () => $('#server-form').hidden = false);
 $('#cancel-server').addEventListener('click', () => $('#server-form').hidden = true);
 $('#server-form').addEventListener('submit', async e => {
@@ -2756,6 +2865,7 @@ window.cfhToast = toast;
         if (d.authenticated) {
             S.csrf = d.csrfToken || '';
             S.role = d.user?.role || 'viewer';
+            S.username = d.user?.username || '';
             // Convenience only: /api/users is administrator-gated server-side.
             $('#nav-users').hidden = S.role !== 'admin';
             $('#nav-storage').hidden = S.role !== 'admin';

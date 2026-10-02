@@ -90,6 +90,7 @@ fun StorageScreen(api: CloudHubApi, onBack: () -> Unit) {
                 .padding(padding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
+                .readableWidth()
                 .padding(horizontal = 20.dp),
         ) {
             when {

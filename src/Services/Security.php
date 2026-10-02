@@ -36,6 +36,21 @@ final class Security {
         }
     }
 
+    /**
+     * Refuse a request a browser says another site started.
+     *
+     * The first half of the CSRF check, and on its own the whole of it for a
+     * request that carries its own credentials (WebDAV with an app password):
+     * there is no cookie for another site to borrow, and a browser cannot send
+     * WebDAV's write verbs across sites at all. Clients that are not browsers
+     * do not send Sec-Fetch-Site.
+     */
+    public static function rejectCrossSite(): void {
+        if(strtolower((string)($_SERVER['HTTP_SEC_FETCH_SITE']??''))==='cross-site'){
+            Http::error(403,'CROSS_SITE_REQUEST','Cross-site state-changing requests are not allowed');
+        }
+    }
+
     public static function assertProductionConfig(array $config): void {
         if(($config['app_env']??'production')!=='production')return;
         if(($config['require_https']??false)&&!self::isHttps($config)){
@@ -49,9 +64,7 @@ final class Security {
     public static function verifyCsrfRequest(): void {
         $method=strtoupper((string)($_SERVER['REQUEST_METHOD']??'GET'));
         if(in_array($method,['GET','HEAD','OPTIONS'],true))return;
-        if(strtolower((string)($_SERVER['HTTP_SEC_FETCH_SITE']??''))==='cross-site'){
-            Http::error(403,'CROSS_SITE_REQUEST','Cross-site state-changing requests are not allowed');
-        }
+        self::rejectCrossSite();
         $token=$_SERVER['HTTP_X_CSRF_TOKEN']??'';
         if(!is_string($token)||!isset($_SESSION['csrf'])||!hash_equals((string)$_SESSION['csrf'],$token)){
             Http::error(419,'CSRF_FAILED','Invalid or expired CSRF token');

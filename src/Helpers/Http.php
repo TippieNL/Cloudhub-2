@@ -73,6 +73,24 @@ final class Http {
   return '/'.ltrim($path,'/');
  }
  public static function requestId():string{return self::$requestId??=bin2hex(random_bytes(8));}
+ /**
+  * The username and password of an HTTP Basic Authorization header, or null.
+  *
+  * PHP fills PHP_AUTH_USER itself under mod_php and the built-in server; under
+  * FastCGI the header arrives as HTTP_AUTHORIZATION, or REDIRECT_ after an
+  * Apache rewrite (the bundled .htaccess files pass it through).
+  *
+  * @return array{0:string,1:string}|null
+  */
+ public static function basicCredentials():?array{
+  if(isset($_SERVER['PHP_AUTH_USER'])&&is_string($_SERVER['PHP_AUTH_USER']))return [$_SERVER['PHP_AUTH_USER'],(string)($_SERVER['PHP_AUTH_PW']??'')];
+  $header=(string)($_SERVER['HTTP_AUTHORIZATION']??$_SERVER['REDIRECT_HTTP_AUTHORIZATION']??'');
+  if(!preg_match('/^Basic\s+([A-Za-z0-9+\/]+=*)\s*$/i',$header,$m))return null;
+  $decoded=base64_decode($m[1],true);
+  if($decoded===false||!str_contains($decoded,':'))return null;
+  [$user,$password]=explode(':',$decoded,2);
+  return [$user,$password];
+ }
  public static function body(int $max=1048576):array{
   $type=strtolower(trim(explode(';',(string)($_SERVER['CONTENT_TYPE']??''))[0]));
   if($type!==''&&$type!=='application/json')self::error(415,'UNSUPPORTED_MEDIA_TYPE','Expected application/json');

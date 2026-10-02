@@ -18,7 +18,16 @@ import java.io.File
  * from OkHttp's synchronous cookie jar -- a needless piece of bridging for a
  * few strings.
  */
-class Settings(context: Context) {
+/**
+ * How the file browser was last set up: grid or list, and how big the cards
+ * are. An interface so the view model can be handed one without a Context.
+ */
+interface ViewPrefs {
+    var gridView: Boolean
+    var thumbnailSize: Int
+}
+
+class Settings(context: Context) : ViewPrefs {
     private val prefs = context.getSharedPreferences("cloudhub", Context.MODE_PRIVATE)
 
     var serverUrl: String?
@@ -65,9 +74,14 @@ class Settings(context: Context) {
         set(value) = prefs.edit().putBoolean("notifications_asked", value).apply()
 
     /** Grid or list, remembered per install like the web app does. */
-    var gridView: Boolean
+    override var gridView: Boolean
         get() = prefs.getBoolean("grid_view", true)
         set(value) = prefs.edit().putBoolean("grid_view", value).apply()
+
+    /** A step of [nl.tippie.cloudhub.ui.ThumbnailSizes], the grid's card size. */
+    override var thumbnailSize: Int
+        get() = prefs.getInt("thumbnail_size", nl.tippie.cloudhub.ui.ThumbnailSizes.DEFAULT)
+        set(value) = prefs.edit().putInt("thumbnail_size", nl.tippie.cloudhub.ui.ThumbnailSizes.clamp(value)).apply()
 
     /**
      * The subtitle language last chosen, or null for none.

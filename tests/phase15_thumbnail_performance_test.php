@@ -47,7 +47,10 @@ $checks['mutating routes keep their session lock'] =
     !preg_match('/api\/files\/(?:delete|rename|mkdir)[^;]{0,200}release_session_lock/s', $index);
 
 // --- 2. cached video thumbnails ------------------------------------------
-$checks['thumbnails share one cache-path helper'] = str_contains($index, 'function thumbnail_cache_path(string $file): ?string');
+// One helper for every size; the default size keeps the key it always had.
+$checks['thumbnails share one cache-path helper'] =
+    str_contains($index, 'function thumbnail_cache_path(string $file, int $edge = THUMBNAIL_EDGE): ?string')
+    && str_contains($index, "(\$edge === THUMBNAIL_EDGE ? '' : ':'.\$edge)");
 $checks['a cached entry is served whatever produced it'] =
     (bool)preg_match('/if \(is_file\(\$cache\)\)send_thumbnail\(\$cache\);/', $index);
 $checks['browsers can contribute a video frame'] = str_contains($index, "\$path === '/api/thumbnail/video' && \$method === 'POST'");

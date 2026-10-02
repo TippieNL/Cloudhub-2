@@ -11,10 +11,21 @@ use PDO;
 final class LoginRateLimiter {
  public function __construct(private PDO $pdo, private array $config) {}
 
+ /**
+  * The address the per-IP throttle counts against.
+  *
+  * REMOTE_ADDR is authoritative unless a trusted proxy is explicitly enabled.
+  * Behind one, X-Forwarded-For is read from the right: the last entry is the
+  * one the proxy appended -- the address that actually connected to it -- and
+  * everything to its left arrived with the request, written by the client.
+  * Reading the first entry let a client send a new address with every attempt
+  * and never meet the per-IP limit. An unusable last entry falls back to
+  * REMOTE_ADDR, never to an earlier entry, for the same reason.
+  */
  public function clientIp(): string {
-  // REMOTE_ADDR is authoritative unless a trusted proxy is explicitly enabled.
   if(($this->config['trust_proxy']??false)===true){
-   $forwarded=trim(explode(',',(string)($_SERVER['HTTP_X_FORWARDED_FOR']??''))[0]);
+   $chain=explode(',',(string)($_SERVER['HTTP_X_FORWARDED_FOR']??''));
+   $forwarded=trim((string)end($chain));
    if(filter_var($forwarded,FILTER_VALIDATE_IP))return $forwarded;
   }
   $remote=(string)($_SERVER['REMOTE_ADDR']??'unknown');

@@ -106,6 +106,7 @@ $assets = htmlspecialchars($assetBase, ENT_QUOTES, 'UTF-8');
          * "</script>" would otherwise end this block early.
          */
         ?>
+        window.CLOUDHUB_MEDIA_PATH = <?= json_encode($mediaFile['path'] ?? '', JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         window.CLOUDHUB_SUBTITLES = <?= json_encode($mediaFile['subtitles'] ?? [], JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
     </script>
 </body>
