@@ -231,10 +231,13 @@ $checks['the menu is built from the tracks on the page'] =
     str_contains($playerUi, 'window.CLOUDHUB_SUBTITLES')
     && str_contains($playerUi, "list.appendChild(this.menuItem('Off', { track: '' }")
     && str_contains($playerUi, 'this.subtitleManager.setTracks(tracks)');
-// An empty menu reads as a broken player; no button reads as "no subtitles".
+// An empty menu reads as a broken player; no button reads as "no subtitles" --
+// for a viewer. An account that may upload keeps the button for a film with no
+// tracks, whose menu then holds just "Add subtitles…".
 $checks['a video with no tracks still hides the button'] =
     str_contains($playerUi, "['quality', 'audio', 'subtitles'].forEach")
-    && str_contains($playerUi, 'if (!tracks.length) return;');
+    && str_contains($playerUi, 'if (this.subtitleAction) list.appendChild(this.subtitleAction);')
+    && str_contains($playerUi, 'if (!(await uploader.allowed())) return;');
 $checks['the choice is remembered as a language, not a file'] =
     str_contains($manager, "this.settings.set('subtitleLang', track ? (track.language || 'first') : 'off')")
     && str_contains($manager, "preference === 'off'");
@@ -270,7 +273,8 @@ $checks['tracks are handed to Media3 as WebVTT, whatever the file is'] =
 // A second media item with a different cache key would re-download the film.
 $checks['adding subtitles does not change the cache key'] =
     substr_count($player, 'setCustomCacheKey(PlaybackTuning.cacheKey(entry.path, entry.modified))') === 1
-    && substr_count($player, 'mediaItemFor(') === 3;
+    // Defined once; built for the first item, the tracks found, and a track added while watching.
+    && substr_count($player, 'mediaItemFor(') === 4;
 $checks['playback never waits on the subtitle lookup'] =
     str_contains($player, 'setMediaItem(mediaItemFor(api, entry, emptyList()))')
     && str_contains($player, 'runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())')
@@ -317,7 +321,8 @@ $checks['the language is guessed from the file name'] =
 $checks['only a subtitle file may be attached'] =
     str_contains($appJs, 'SUBTITLE_EXTENSIONS.has(extension)')
     && str_contains($rules, 'fun isSubtitleFile(fileName: String): Boolean')
-    && str_contains($files, 'SubtitleRules.isSubtitleFile(pickedName)');
+    && str_contains((string)file_get_contents($root.'/android/app/src/main/java/nl/tippie/cloudhub/ui/SubtitleAdder.kt'), '!SubtitleRules.isSubtitleFile(name) ->')
+    && str_contains((string)file_get_contents($root.'/public/assets/js/player/SubtitleUpload.js'), 'if (!EXTENSIONS.has(extension))');
 // Over the server's limit it would upload and then never appear in a menu,
 // which looks like the feature not working rather than the file being wrong.
 $checks['a file too large to be read is refused before it is sent'] =

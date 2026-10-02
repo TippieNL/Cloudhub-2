@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -46,6 +47,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.data.ResumePolicy
 import nl.tippie.cloudhub.data.Settings
@@ -54,6 +56,9 @@ import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.net.SubtitleTrack
 import nl.tippie.cloudhub.work.ForegroundMedia
+
+/** About three minutes of asking for a just-added subtitle before giving up quietly. */
+private const val SUBTITLE_WAIT_TRIES = 90
 
 /** How far a double-tap jumps, matching the player's own seek increments. */
 private const val SEEK_STEP_MS = 10_000L
@@ -115,10 +120,15 @@ fun PlayerScreen(
     onBack: () -> Unit,
     favorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
+    /** Editors and administrators may put a subtitle file beside the video. */
+    canWrite: Boolean = false,
+    /** Queue the chosen file for upload beside the video, under the given name. */
+    onAddSubtitle: ((FileEntry, Uri, String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     var fullscreen by remember { mutableStateOf(false) }
     // The controller starts hidden -- PlayerView has not been told to show it.
@@ -229,6 +239,46 @@ fun PlayerScreen(
 
         player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
         player.prepare()
+    }
+
+    /* ---- adding a track while watching ----------------------------------
+     *
+     * The upload goes through the app's queue and lands a moment later, so the
+     * new file is waited for: the track list is asked for again every couple
+     * of seconds until it appears, then swapped in where the film is, and its
+     * language turned on -- adding Dutch subtitles and then having to find
+     * them in a menu would be one step too many.
+     */
+    var awaiting by remember { mutableStateOf<Pair<String, String>?>(null) }   // file name, language
+    val addSubtitles = rememberSubtitleAdder(
+        api = api,
+        onAdd = { video, uri, name, language ->
+            onAddSubtitle?.invoke(video, uri, name)
+            awaiting = name to language
+        },
+        onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
+    )
+    LaunchedEffect(awaiting) {
+        val (name, language) = awaiting ?: return@LaunchedEffect
+        repeat(SUBTITLE_WAIT_TRIES) {
+            delay(2_000)
+            val tracks = runCatching { api.subtitles(entry.path) }.getOrDefault(emptyList())
+            if (tracks.any { it.path.substringAfterLast('/') == name }) {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setPreferredTextLanguage(language.ifEmpty { null })
+                    .build()
+                if (language.isNotEmpty()) settings.subtitleLanguage = language
+                val playing = player.playWhenReady
+                player.setMediaItem(mediaItemFor(api, entry, tracks), player.currentPosition)
+                player.prepare()
+                player.playWhenReady = playing
+                snackbar.showSnackbar("Subtitles added")
+                awaiting = null
+                return@LaunchedEffect
+            }
+        }
+        snackbar.showSnackbar("The subtitles are still uploading; they will be there next time")
+        awaiting = null
     }
 
     /* ---- resume ---------------------------------------------------------
@@ -350,6 +400,11 @@ fun PlayerScreen(
                         IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
                     },
                     actions = {
+                        if (canWrite && onAddSubtitle != null) {
+                            IconButton(onClick = { addSubtitles(entry) }) {
+                                Icon(Icons.Default.ClosedCaption, "Add subtitles")
+                            }
+                        }
                         onToggleFavorite?.let { FavoriteToggle(starred = favorite, onClick = it) }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(

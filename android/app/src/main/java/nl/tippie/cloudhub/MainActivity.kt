@@ -456,6 +456,8 @@ class MainActivity : ComponentActivity() {
                         onBack = { reveal = current.entry.path; back() },
                         favorite = current.entry.path in state.favorites,
                         onToggleFavorite = { model.toggleFavorite(current.entry) },
+                        canWrite = state.canWrite,
+                        onAddSubtitle = { video, uri, name -> attachSubtitle(video, uri, name) },
                     )
                 }
                 }

@@ -180,8 +180,17 @@ name above. There is no upload endpoint for subtitles and nothing to keep in
 step afterwards: the naming *is* the wiring, which is why it is worked out for
 you rather than left as something to get right by hand.
 
+It is also in **both players**, where a missing subtitle is usually noticed:
+the Android player has a subtitles button in its top bar, and the web player's
+subtitles menu ends with **Add subtitles…** — its button now stays visible for
+editors and administrators even when a film has no tracks yet (viewers still see
+no button until there is something to pick). Once the file has landed, the track
+list is read again and the new track switched on where the film is, with no
+reload.
+
 Replacing a track that is already there asks first and goes through the trash,
-like any other delete. A file that is not a `.srt` or `.vtt`, or one over the
+like any other delete — on Android too, which used to keep both and name the
+new one `Holiday.nl (2).srt`, a name no player reads as Dutch. A file that is not a `.srt` or `.vtt`, or one over the
 4 MB the server will read, is refused before it is sent — it would otherwise
 upload happily and then never appear in a menu, which looks like the feature
 being broken rather than the file being wrong.

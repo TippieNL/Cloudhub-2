@@ -14,6 +14,9 @@ object SubtitleRules {
     /** What may be attached. Anything else is not a subtitle, whatever it says. */
     val EXTENSIONS = setOf("srt", "vtt")
 
+    /** The most the server reads of one track (MAX_BYTES in SubtitleService.php). */
+    const val MAX_BYTES = 4_194_304L
+
     fun isSubtitleFile(fileName: String): Boolean =
         fileName.substringAfterLast('.', "").lowercase() in EXTENSIONS
 
