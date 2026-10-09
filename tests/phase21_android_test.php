@@ -40,6 +40,7 @@ $pure = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/PlayerAndStag
 $signIn = $read($kotlin.'/ui/SignInScreen.kt');
 $signInVm = $read($kotlin.'/ui/SignInViewModel.kt');
 $theme = $read($kotlin.'/ui/Theme.kt');
+$twoFactor = $read($kotlin.'/ui/TwoFactorScreen.kt');
 $signInTests = $read($root.'/android/app/src/test/java/nl/tippie/cloudhub/SignInStateTest.kt');
 $themes = $read($android.'/res/values/themes.xml');
 $cards = $read($kotlin.'/ui/FileCards.kt');
@@ -410,6 +411,19 @@ $checks['a password is never trimmed'] =
 $checks['only the username is ever remembered'] =
     str_contains($stores, 'var rememberedUsername')
     && !preg_match('/put(String|Boolean)\("(remembered_)?password/', $stores);
+// The view model outlives the screen. Without a reset on the way out, signing
+// out landed on a sign-in screen still at Success, which went straight back to
+// the files -- or, during two-step verification, back to a stale code step.
+$checks['signing out starts the sign-in screen afresh'] =
+    substr_count($main, "app.settings.signOut()\n                                signIn.reset()") === 2
+    && str_contains($signInVm, 'fun reset()');
+// SMS two-step verification: the code step only ever finishes a sign-in the
+// server has checked, and recovery codes are kept out of clipboard previews.
+$checks['a right password alone does not sign a two-step account in'] =
+    str_contains($signInVm, 'second != null && secondStep != null -> codeStep(second)')
+    && str_contains($api, 'status == 401 && it.twoFactor != null');
+$checks['copied recovery codes are marked sensitive'] =
+    str_contains($twoFactor, 'ClipDescription.EXTRA_IS_SENSITIVE');
 
 // --- the launch path ----------------------------------------------------------------
 // Rendering sign-in before the session check answers meant an already signed-in

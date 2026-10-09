@@ -1,5 +1,6 @@
 package nl.tippie.cloudhub.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -52,10 +53,14 @@ import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -104,6 +109,8 @@ fun SignInScreen(
     var password by remember { mutableStateOf("") }
     var remember by remember { mutableStateOf(rememberedUsername != null) }
     var revealed by remember { mutableStateOf(false) }
+    /* What is typed on the code step, kept here so a refusal can clear it. */
+    var code by remember { mutableStateOf("") }
 
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -118,6 +125,25 @@ fun SignInScreen(
     fun submit() {
         keyboard?.hide()
         model.submit(username, password)
+    }
+
+    val codeStep = (state as? SignInUiState.Code)?.step
+
+    /*
+     * Back on the code step returns to the password, as "Back to sign in"
+     * does, rather than closing the app with a sign-in half done. The code
+     * already sent stops working.
+     */
+    fun leaveCodeStep() {
+        code = ""
+        password = ""
+        model.cancelCode()
+    }
+    BackHandler(enabled = codeStep != null, onBack = ::leaveCodeStep)
+
+    fun verify() {
+        keyboard?.hide()
+        model.verify(code)
     }
 
     /* ---- entrance ------------------------------------------------------
@@ -157,6 +183,23 @@ fun SignInScreen(
             else -> Unit
         }
     }
+    LaunchedEffect(codeStep?.rejected) {
+        if ((codeStep?.rejected ?: 0) > 0) {
+            code = ""
+            if (!reduceMotion) {
+                shake.animateTo(
+                    0f,
+                    keyframes {
+                        durationMillis = SHAKE_MS
+                        0f at 0; -14f at 60; 12f at 130
+                        -8f at 200; 5f at 270; -2f at 340; 0f at SHAKE_MS
+                    },
+                )
+            }
+        }
+    }
+    // A texted code and a recovery code look nothing alike: switching starts afresh.
+    LaunchedEffect(codeStep?.recovery) { code = "" }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AuroraBackground(Modifier.fillMaxSize())
@@ -183,11 +226,15 @@ fun SignInScreen(
                 Spacer(Modifier.height(26.dp))
 
                 Staggered(entrance, step = 1) {
+                    // Coloured explicitly: nothing above this screen provides a
+                    // content colour, so it fell back to black -- invisible on
+                    // the dark theme's background.
                     Text(
                         "CloudHub",
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.SemiBold,
                         letterSpacing = (-1).sp,
+                        color = MaterialTheme.colorScheme.onBackground,
                     )
                 }
                 Spacer(Modifier.height(10.dp))
@@ -220,75 +267,108 @@ fun SignInScreen(
                             .fillMaxWidth()
                             .graphicsLayer { translationX = shake.value }
                     ) {
-                        Column(Modifier.padding(horizontal = 24.dp, vertical = 28.dp)) {
-                            AnimatedField(
-                                value = username,
-                                onValueChange = { username = it; model.editing() },
-                                label = "Username",
-                                enabled = !busy,
-                                isError = error?.field == SignInError.Field.USERNAME,
-                                keyboardOptions = KeyboardOptions(
-                                    // Usernames, not email addresses: an email
-                                    // keyboard and autocapitalisation both make
-                                    // this field harder to type into correctly.
-                                    keyboardType = KeyboardType.Text,
-                                    capitalization = KeyboardCapitalization.None,
-                                    autoCorrect = false,
-                                    imeAction = ImeAction.Next,
-                                ),
-                                keyboardActions = KeyboardActions(
-                                    onNext = { focus.moveFocus(FocusDirection.Down) },
-                                ),
-                            )
-                            Spacer(Modifier.height(16.dp))
+                        AnimatedContent(
+                            targetState = codeStep,
+                            // Only arriving at the code step and leaving it
+                            // are transitions; a step that changes -- a code
+                            // sent, a countdown, an error -- updates in place.
+                            contentKey = { it != null },
+                            transitionSpec = {
+                                (fadeIn(tween(220, delayMillis = 60)) + scaleIn(tween(220, delayMillis = 60), initialScale = 0.97f))
+                                    .togetherWith(fadeOut(tween(120)))
+                            },
+                            label = "step",
+                        ) { step ->
+                            if (step != null) {
+                                CodeForm(
+                                    step = step,
+                                    clock = model.clock,
+                                    code = code,
+                                    onCode = { typed ->
+                                        val cleaned = CodeInput.clean(typed, step.recovery, step.codeLength)
+                                        val wasComplete = CodeInput.complete(code, step.recovery, step.codeLength)
+                                        code = cleaned
+                                        // The last digit is as good as pressing
+                                        // Verify; the view model ignores a second.
+                                        if (!wasComplete && CodeInput.complete(cleaned, step.recovery, step.codeLength)) verify()
+                                    },
+                                    onVerify = ::verify,
+                                    onResend = model::sendCode,
+                                    onSwitch = model::switchMethod,
+                                    onBack = ::leaveCodeStep,
+                                )
+                            } else {
+                                Column(Modifier.padding(horizontal = 24.dp, vertical = 28.dp)) {
+                                    AnimatedField(
+                                        value = username,
+                                        onValueChange = { username = it; model.editing() },
+                                        label = "Username",
+                                        enabled = !busy,
+                                        isError = error?.field == SignInError.Field.USERNAME,
+                                        keyboardOptions = KeyboardOptions(
+                                            // Usernames, not email addresses: an email
+                                            // keyboard and autocapitalisation both make
+                                            // this field harder to type into correctly.
+                                            keyboardType = KeyboardType.Text,
+                                            capitalization = KeyboardCapitalization.None,
+                                            autoCorrect = false,
+                                            imeAction = ImeAction.Next,
+                                        ),
+                                        keyboardActions = KeyboardActions(
+                                            onNext = { focus.moveFocus(FocusDirection.Down) },
+                                        ),
+                                    )
+                                    Spacer(Modifier.height(16.dp))
 
-                            AnimatedField(
-                                value = password,
-                                onValueChange = { password = it; model.editing() },
-                                label = "Password",
-                                enabled = !busy,
-                                isError = error?.field == SignInError.Field.PASSWORD,
-                                visualTransformation =
-                                    if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Password,
-                                    imeAction = ImeAction.Go,
-                                ),
-                                keyboardActions = KeyboardActions(onGo = { submit() }),
-                                trailing = {
-                                    IconButton(onClick = { revealed = !revealed }, enabled = !busy) {
-                                        Icon(
-                                            if (revealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                            if (revealed) "Hide password" else "Show password",
+                                    AnimatedField(
+                                        value = password,
+                                        onValueChange = { password = it; model.editing() },
+                                        label = "Password",
+                                        enabled = !busy,
+                                        isError = error?.field == SignInError.Field.PASSWORD,
+                                        visualTransformation =
+                                            if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+                                        keyboardOptions = KeyboardOptions(
+                                            keyboardType = KeyboardType.Password,
+                                            imeAction = ImeAction.Go,
+                                        ),
+                                        keyboardActions = KeyboardActions(onGo = { submit() }),
+                                        trailing = {
+                                            IconButton(onClick = { revealed = !revealed }, enabled = !busy) {
+                                                Icon(
+                                                    if (revealed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                                    if (revealed) "Hide password" else "Show password",
+                                                )
+                                            }
+                                        },
+                                    )
+
+                                    // Errors grow into place rather than shoving the
+                                    // button down a frame after the tap.
+                                    AnimatedVisibility(
+                                        visible = error != null,
+                                        enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+                                        exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
+                                    ) {
+                                        Text(
+                                            error?.message.orEmpty(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.padding(top = 12.dp),
                                         )
                                     }
-                                },
-                            )
 
-                            // Errors grow into place rather than shoving the
-                            // button down a frame after the tap.
-                            AnimatedVisibility(
-                                visible = error != null,
-                                enter = fadeIn(tween(180)) + expandVertically(tween(180)),
-                                exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
-                            ) {
-                                Text(
-                                    error?.message.orEmpty(),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(top = 12.dp),
-                                )
+                                    Spacer(Modifier.height(10.dp))
+                                    RememberRow(
+                                        checked = remember,
+                                        enabled = !busy,
+                                        onChange = { remember = it },
+                                    )
+                                    Spacer(Modifier.height(22.dp))
+
+                                    SubmitButton(state = state, onClick = ::submit)
+                                }
                             }
-
-                            Spacer(Modifier.height(10.dp))
-                            RememberRow(
-                                checked = remember,
-                                enabled = !busy,
-                                onChange = { remember = it },
-                            )
-                            Spacer(Modifier.height(22.dp))
-
-                            SubmitButton(state = state, onClick = ::submit)
                         }
                     }
                 }
@@ -298,7 +378,7 @@ fun SignInScreen(
                     // Not an account affordance: the only way back to the
                     // server address, without which a moved server means
                     // clearing app data to get in again.
-                    TextButton(onClick = onChangeServer, enabled = !busy) {
+                    TextButton(onClick = { if (codeStep != null) leaveCodeStep(); onChangeServer() }, enabled = !busy) {
                         Text(
                             "Use a different server",
                             style = MaterialTheme.typography.bodySmall,
@@ -455,6 +535,8 @@ private fun AnimatedField(
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     trailing: (@Composable () -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    textStyle: TextStyle = LocalTextStyle.current,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -492,6 +574,7 @@ private fun AnimatedField(
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
         trailingIcon = trailing,
+        textStyle = textStyle,
         shape = RoundedCornerShape(18.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = border,
@@ -501,8 +584,168 @@ private fun AnimatedField(
             unfocusedContainerColor = fill,
             errorContainerColor = fill,
         ),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     )
+}
+
+/**
+ * The second step, for an account with SMS two-step verification: the code
+ * texted to its phone, or one of its recovery codes.
+ *
+ * The code goes out when the step opens (see SignInViewModel.codeStep), so
+ * by the time this is on screen it is usually on its way. Typing the last
+ * digit checks it; Verify is there for a recovery code, and for anyone who
+ * expects a button.
+ */
+@Composable
+private fun CodeForm(
+    step: CodeStep,
+    clock: () -> Long,
+    code: String,
+    onCode: (String) -> Unit,
+    onVerify: () -> Unit,
+    onResend: () -> Unit,
+    onSwitch: () -> Unit,
+    onBack: () -> Unit,
+) {
+    // The countdown on "Send a new code", ticking only while there is one.
+    var now by remember { mutableLongStateOf(clock()) }
+    LaunchedEffect(step.resendAt) {
+        while (true) {
+            now = clock()
+            if (now >= step.resendAt) break
+            delay(250)
+        }
+    }
+    val field = remember { FocusRequester() }
+    LaunchedEffect(step.recovery) { runCatching { field.requestFocus() } }
+
+    Column(Modifier.padding(horizontal = 24.dp, vertical = 28.dp)) {
+        Text(
+            "Two-step verification",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            step.prompt,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(20.dp))
+
+        AnimatedField(
+            value = code,
+            onValueChange = onCode,
+            label = if (step.recovery) "Recovery code" else "Verification code",
+            enabled = !step.verifying,
+            isError = step.error != null,
+            keyboardOptions = if (step.recovery) {
+                KeyboardOptions(
+                    keyboardType = KeyboardType.Text,
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false,
+                    imeAction = ImeAction.Done,
+                )
+            } else {
+                // The number pad, and with it the keyboard's offer of the
+                // code from the newest text message.
+                KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
+            },
+            keyboardActions = KeyboardActions(onDone = { onVerify() }),
+            modifier = Modifier.focusRequester(field),
+            // A code is read off another screen digit by digit: room, and
+            // fixed-width figures.
+            textStyle = if (step.recovery) LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
+            else LocalTextStyle.current.copy(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 22.sp,
+                letterSpacing = 6.sp,
+                textAlign = TextAlign.Center,
+                fontWeight = FontWeight.SemiBold,
+            ),
+        )
+
+        // About the texted code, so not shown over a recovery code -- unless it
+        // is the reason a recovery code is all there is.
+        AnimatedVisibility(
+            visible = step.notice != null && step.error == null && (!step.recovery || !step.smsAvailable),
+            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+            exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
+        ) {
+            Text(
+                step.notice.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
+        AnimatedVisibility(
+            visible = step.error != null,
+            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+            exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
+        ) {
+            Text(
+                step.error.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
+
+        Spacer(Modifier.height(22.dp))
+        Button(
+            onClick = onVerify,
+            enabled = true,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+        ) {
+            if (step.verifying) {
+                CircularProgressIndicator(
+                    Modifier.size(22.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            } else {
+                Text("Verify", style = MaterialTheme.typography.titleSmall)
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        if (step.smsAvailable && !step.recovery) {
+            val wait = step.resendWait(now)
+            CodeLink(
+                text = when {
+                    step.sending -> "Sending…"
+                    wait > 0 -> "Send a new code ($wait s)"
+                    else -> "Send a new code"
+                },
+                enabled = step.canResend(now),
+                onClick = onResend,
+            )
+        }
+        if (step.smsAvailable) {
+            CodeLink(
+                text = if (step.recovery) "Use a texted code instead" else "Use a recovery code instead",
+                enabled = !step.verifying,
+                onClick = onSwitch,
+            )
+        }
+        CodeLink(text = "Back to sign in", enabled = true, onClick = onBack)
+    }
+}
+
+/** The quieter actions under the code: a full-width row each, so each is easy to hit. */
+@Composable
+private fun CodeLink(text: String, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.bodyMedium)
+    }
 }
 
 /**

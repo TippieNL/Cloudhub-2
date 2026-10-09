@@ -91,12 +91,107 @@ class CloudHubApi(
         decode<AuthStatus>(it).also { s -> client.csrfToken = s.csrfToken }
     }
 
-    suspend fun login(username: String, password: String): LoginResult =
-        post("/api/auth/login", mapOf("username" to username, "password" to password)) {
+    /**
+     * Sign in with a password.
+     *
+     * For an account with SMS two-step verification a right password is only
+     * half of it: the server answers 401 TWO_FACTOR_REQUIRED, with a fresh
+     * session and CSRF token that are not signed in yet. That comes back as a
+     * [LoginResult] carrying [LoginResult.twoFactor] rather than as an error,
+     * because it is the next step and not a failure -- a wrong password is
+     * still thrown as an [ApiError].
+     */
+    suspend fun login(username: String, password: String): LoginResult = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(MapSerializer(String.serializer(), String.serializer()),
+            mapOf("username" to username, "password" to password))
+        val request = Request.Builder()
+            .url(url("/api/auth/login"))
+            .post(body.toRequestBody(jsonType))
+            .header("X-CSRF-Token", client.csrfToken)
+            .build()
+        execute(
+            request,
+            onRefused = { status, text ->
+                runCatching { json.decodeFromString<LoginResult>(text) }.getOrNull()
+                    ?.takeIf { status == 401 && it.twoFactor != null && it.csrfToken.isNotEmpty() }
+                    ?.also { r -> client.csrfToken = r.csrfToken }
+            },
+        ) { decode<LoginResult>(it).also { r -> client.csrfToken = r.csrfToken } }
+    }
+
+    suspend fun logout(): SimpleResult = post("/api/auth/logout", emptyMap()) { decode(it) }
+
+    /* ---- the second step of signing in ------------------------------------
+     *
+     * For a session whose password was right and whose account wants a texted
+     * code as well. Each acts on that session's waiting sign-in; once it has
+     * lapsed (15 minutes) or been cancelled they answer 401
+     * TWO_FACTOR_EXPIRED, which means "enter the password again".
+     */
+
+    /** Text a code to the account's phone. Refused for a while after the last one. */
+    suspend fun sendSignInCode(): CodeSent = post("/api/auth/two-factor/send", emptyMap()) { decode(it) }
+
+    /** Check the texted code; on success the session is signed in, with a new ID and CSRF token. */
+    suspend fun verifySignIn(code: String): LoginResult =
+        post("/api/auth/two-factor/verify", mapOf("code" to code)) {
             decode<LoginResult>(it).also { r -> client.csrfToken = r.csrfToken }
         }
 
-    suspend fun logout(): SimpleResult = post("/api/auth/logout", emptyMap()) { decode(it) }
+    /** Sign in with one of the account's recovery codes instead. Each works once. */
+    suspend fun verifySignInWithRecoveryCode(recoveryCode: String): LoginResult =
+        post("/api/auth/two-factor/verify", mapOf("recoveryCode" to recoveryCode)) {
+            decode<LoginResult>(it).also { r -> client.csrfToken = r.csrfToken }
+        }
+
+    /** Give the waiting sign-in up; a code already sent stops working. */
+    suspend fun cancelSignIn(): SimpleResult = post("/api/auth/two-factor/cancel", emptyMap()) { decode(it) }
+
+    /* ---- managing two-step verification -----------------------------------
+     *
+     * The signed-in account's own. Like the password, open to every role, and
+     * every change asks for the current password and a texted code; see
+     * TwoFactorStage for the shape of a change.
+     */
+
+    suspend fun twoFactor(): TwoFactorOverview = get("/api/users/me/two-factor") { decode(it) }
+
+    /**
+     * Begin a change: "phone" turns it on or moves it to [phone], "disable"
+     * turns it off, "recovery" replaces the recovery codes. With
+     * [useRecoveryCode] the current phone is answered with a recovery code, so
+     * nothing is texted to it -- for a phone that is lost.
+     */
+    suspend fun startTwoFactorChange(
+        action: String,
+        currentPassword: String,
+        phone: String? = null,
+        useRecoveryCode: Boolean = false,
+    ): TwoFactorStage {
+        val body = buildMap {
+            put("action", action)
+            put("currentPassword", currentPassword)
+            if (phone != null) put("phone", phone)
+            put("method", if (useRecoveryCode) "recovery" else "sms")
+        }
+        return post("/api/users/me/two-factor/start", body) { decode(it) }
+    }
+
+    /** Text the code for the change under way again. */
+    suspend fun resendTwoFactorCode(): TwoFactorStage =
+        post("/api/users/me/two-factor/resend", emptyMap()) { decode(it) }
+
+    /** Answer the step the change is at with a texted code. */
+    suspend fun confirmTwoFactorChange(code: String): TwoFactorStage =
+        post("/api/users/me/two-factor/confirm", mapOf("code" to code)) { decode(it) }
+
+    /** Answer the current phone's step with a recovery code instead. */
+    suspend fun confirmTwoFactorChangeWithRecoveryCode(recoveryCode: String): TwoFactorStage =
+        post("/api/users/me/two-factor/confirm", mapOf("recoveryCode" to recoveryCode)) { decode(it) }
+
+    /** Abandon the change under way; its code stops working. */
+    suspend fun cancelTwoFactorChange(): SimpleResult =
+        post("/api/users/me/two-factor/cancel", emptyMap()) { decode(it) }
 
     suspend fun config(): ServerConfigInfo = get("/api/files/config") { decode(it) }
 
@@ -321,7 +416,14 @@ class CloudHubApi(
         execute(request, parse)
     }
 
-    private fun <T> execute(request: Request, parse: (String) -> T): T {
+    private fun <T> execute(request: Request, parse: (String) -> T): T = execute(request, { _, _ -> null }, parse)
+
+    /**
+     * [onRefused] may turn a refusal into an answer -- sign-in's
+     * TWO_FACTOR_REQUIRED is a 401 that is really the next step -- by
+     * returning non-null; anything it declines is thrown as an [ApiError].
+     */
+    private fun <T> execute(request: Request, onRefused: (Int, String) -> T?, parse: (String) -> T): T {
         client.okHttp.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
@@ -339,6 +441,7 @@ class CloudHubApi(
                         requestId = response.header("X-Request-ID"),
                     )
                 }
+                onRefused(response.code, body)?.let { return it }
                 throw ApiError.from(response, body)
             }
             return parse(body)

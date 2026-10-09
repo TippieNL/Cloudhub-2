@@ -50,6 +50,12 @@ data class AuthStatus(
     val authenticated: Boolean = false,
     val user: User? = null,
     val csrfToken: String = "",
+    /**
+     * Set while this session's password was right and its texted code is
+     * still awaited -- after the app was closed on the code step, say -- so
+     * it can carry on there rather than ask for the password again.
+     */
+    val twoFactor: SecondStep? = null,
 )
 
 @Serializable
@@ -57,7 +63,94 @@ data class LoginResult(
     val success: Boolean = false,
     val user: User? = null,
     val csrfToken: String = "",
+    /**
+     * Set, with success false, when the password was right but the account
+     * uses SMS two-step verification: the session is not signed in until the
+     * code is checked (CloudHubApi.verifySignIn).
+     */
+    val twoFactor: SecondStep? = null,
+    /** After signing in with a recovery code: how many are left. */
+    val recoveryCodesLeft: Int? = null,
 )
+
+/**
+ * What the second step of signing in needs, as TwoFactor::signInInfo() on the
+ * server describes it. Nothing has been texted yet unless [codeSent] says so:
+ * the code is sent when the app asks for it.
+ */
+@Serializable
+data class SecondStep(
+    val method: String = "sms",
+    /** The last two digits of the number the code goes to, e.g. "78". */
+    val phoneEnding: String? = null,
+    val codeLength: Int = 6,
+    /** False when the server cannot text this account: a recovery code is the only way in. */
+    val smsAvailable: Boolean = true,
+    val codeSent: Boolean = false,
+    /** Seconds before another code may be asked for. */
+    val resendIn: Int = 0,
+    /** Seconds the code that was sent keeps working, when one was. */
+    val expiresIn: Int? = null,
+)
+
+/** A code was texted: where to, for how long it works, and when another may be asked for. */
+@Serializable
+data class CodeSent(
+    val sent: Boolean = false,
+    val phoneEnding: String? = null,
+    val expiresIn: Int? = null,
+    val resendIn: Int = 0,
+    val codeLength: Int = 6,
+)
+
+/** GET /api/users/me/two-factor: this account's two-step verification, and what the server can do. */
+@Serializable
+data class TwoFactorOverview(
+    /** The server can text codes and its database is ready, so it can be turned on. */
+    val available: Boolean = false,
+    val schemaReady: Boolean = true,
+    val smsAvailable: Boolean = false,
+    val enabled: Boolean = false,
+    val phoneEnding: String? = null,
+    val enabledAt: String? = null,
+    val recoveryCodesLeft: Int = 0,
+    val codeLength: Int = 6,
+)
+
+/**
+ * One step of a change to two-step verification: the code the server is
+ * waiting for, and -- once [done] -- what changed.
+ *
+ * Turning it on, moving it to a new number, turning it off and new recovery
+ * codes are each start -> confirm. Moving to a new number can take two codes,
+ * the current phone's first ([stage] "current") and then the new one's
+ * ("new"); a confirm that is not [done] is the next of them.
+ */
+@Serializable
+data class TwoFactorStage(
+    val done: Boolean = false,
+    /** phone, disable or recovery. */
+    val action: String = "",
+    /** current: the phone codes go to now; new: the number being moved to. */
+    val stage: String = "",
+    val phoneEnding: String? = null,
+    val codeLength: Int = 6,
+    /** The current phone may be answered with a recovery code instead. Never a new number. */
+    val recoveryAllowed: Boolean = false,
+    val sent: Boolean = false,
+    val resendIn: Int = 0,
+    val expiresIn: Int? = null,
+    /** The change is under way but its text could not be sent; ask again, or use a recovery code. */
+    val error: StageProblem? = null,
+    /** Once done: whether it is now on. */
+    val enabled: Boolean? = null,
+    /** Once done, when it was turned on or new ones were asked for. Shown once, never again. */
+    val recoveryCodes: List<String>? = null,
+    val recoveryCodesLeft: Int? = null,
+)
+
+@Serializable
+data class StageProblem(val code: String = "", val message: String = "", val retryAfter: Int = 0)
 
 @Serializable
 data class SearchResult(
