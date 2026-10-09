@@ -131,6 +131,11 @@ final class Client
         return $this->send('DELETE', $route, [], $body);
     }
 
+    public function patch(string $route, array $body = []): Response
+    {
+        return $this->send('PATCH', $route, [], $body);
+    }
+
     /** Sign in and keep the session for everything that follows. */
     public function signIn(string $username, string $password): Response
     {

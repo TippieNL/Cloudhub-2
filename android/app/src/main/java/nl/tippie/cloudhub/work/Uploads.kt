@@ -32,7 +32,6 @@ data class QueuedUpload(
     val cachePath: String,
     val targetPath: String,
     val size: Long,
-    val queuedAt: Long = System.currentTimeMillis(),
 )
 
 /**

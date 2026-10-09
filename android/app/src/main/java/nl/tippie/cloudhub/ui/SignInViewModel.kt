@@ -36,34 +36,34 @@ sealed interface SignInUiState {
     data class Failed(val error: SignInError) : SignInUiState
 
     /**
-     * The password was right, and the account also wants the code texted to
-     * its phone. The server has not signed this session in, and will not
+     * The password was right, and the account also wants the code emailed to
+     * its address. The server has not signed this session in, and will not
      * until the code is checked.
      */
     data class Code(val step: CodeStep) : SignInUiState
 }
 
 /**
- * The code step of signing in, for an account with SMS two-step verification.
+ * The code step of signing in, for an account with two-step verification.
  *
  * Times are on the view model's clock, so the resend countdown can be checked
  * without waiting a minute for it.
  */
 data class CodeStep(
-    /** The last two digits of the number the code goes to. */
-    val phoneEnding: String? = null,
+    /** The address the code goes to, masked: "k•••@example.com". */
+    val emailHint: String? = null,
     val codeLength: Int = 6,
-    /** False when the server cannot text this account: a recovery code is the only way in. */
-    val smsAvailable: Boolean = true,
-    /** Entering one of the account's recovery codes rather than a texted code. */
+    /** False when no code can be emailed to this account: a recovery code is the only way in. */
+    val emailAvailable: Boolean = true,
+    /** Entering one of the account's recovery codes rather than an emailed code. */
     val recovery: Boolean = false,
-    /** A text is being asked for. */
+    /** An email is being asked for. */
     val sending: Boolean = false,
     /** A code is being checked. */
     val verifying: Boolean = false,
     /** When another code may be asked for. */
     val resendAt: Long = 0,
-    /** How the text is coming along: sending, sent, sent earlier. */
+    /** How the email is coming along: sending, sent, sent earlier. */
     val notice: String? = null,
     val error: String? = null,
     /** Counts refused codes, so the screen shakes and clears the field once for each. */
@@ -73,20 +73,20 @@ data class CodeStep(
     fun resendWait(now: Long): Int = if (resendAt <= now) 0 else ((resendAt - now + 999) / 1000).toInt()
 
     fun canResend(now: Long): Boolean =
-        smsAvailable && !recovery && !sending && !verifying && resendWait(now) == 0
+        emailAvailable && !recovery && !sending && !verifying && resendWait(now) == 0
 
     /** What the step asks for, in a sentence. */
     val prompt: String get() = when {
         recovery -> "Enter one of the recovery codes you saved when you turned on two-step verification. Each one works once."
-        phoneEnding != null -> "Enter the $codeLength-digit code we sent to your phone number ending in $phoneEnding."
-        else -> "Enter the $codeLength-digit code we sent to your phone."
+        emailHint != null -> "Enter the $codeLength-digit code we sent to $emailHint."
+        else -> "Enter the $codeLength-digit code we sent to your email."
     }
 }
 
 /**
  * What a typed code is cleaned to before it is sent.
  *
- * A texted code is digits only -- pasted from a message it can arrive with
+ * An emailed code is digits only -- pasted from the email it can arrive with
  * spaces or a trailing full stop -- and never longer than the code. A
  * recovery code is left to the server, which ignores case, spaces and dashes,
  * so only its length is bounded here.
@@ -220,7 +220,7 @@ class SignInViewModel(
 
     fun takeRecoveryNotice(): String? = recoveryCodesLeft?.let { left ->
         recoveryCodesLeft = null
-        "Signed in with a recovery code; $left left. If your phone is gone, change the number in " +
+        "Signed in with a recovery code; $left left. If you cannot get into your email, change the address in " +
             "Settings under Two-step verification."
     }
 
@@ -279,20 +279,24 @@ class SignInViewModel(
     }
 
     /**
-     * The step, as it opens. Texting the code is asked for here rather than
+     * The step, as it opens. Emailing the code is asked for here rather than
      * by the login answer, so the code is sent only to an app that can take
      * it -- and only once, unless the app comes back to a code still valid.
      */
     private fun codeStep(info: SecondStep): SignInUiState.Code {
         val step = CodeStep(
-            phoneEnding = info.phoneEnding,
+            emailHint = info.emailHint,
             codeLength = info.codeLength,
-            smsAvailable = info.smsAvailable,
-            recovery = !info.smsAvailable,
+            emailAvailable = info.emailAvailable,
+            recovery = !info.emailAvailable,
         )
         return when {
-            !info.smsAvailable -> SignInUiState.Code(step.copy(
-                notice = "This server cannot send text messages right now. Use one of your recovery codes, or ask your administrator."))
+            // No address: turned on when codes went by text message.
+            !info.emailAvailable && info.emailHint == null -> SignInUiState.Code(step.copy(
+                notice = "Sign-in codes now come by email, and this account has no address for them yet. Use one of " +
+                    "your recovery codes, then add an address in Settings under Two-step verification."))
+            !info.emailAvailable -> SignInUiState.Code(step.copy(
+                notice = "This server cannot send email right now. Use one of your recovery codes, or ask your administrator."))
             info.codeSent -> SignInUiState.Code(step.copy(
                 notice = "A code was already sent, and still works.",
                 resendAt = clock() + info.resendIn * 1000L))
@@ -322,8 +326,8 @@ class SignInViewModel(
                 val minutes = maxOf(1, ((sent.expiresIn ?: 300) + 30) / 60)
                 _state.value = SignInUiState.Code(step.copy(
                     sending = false,
-                    phoneEnding = sent.phoneEnding ?: step.phoneEnding,
-                    notice = "Code sent. It works for $minutes minute${if (minutes == 1) "" else "s"}.",
+                    emailHint = sent.emailHint ?: step.emailHint,
+                    notice = "Code sent. It works for $minutes minute${if (minutes == 1) "" else "s"}. Not there? Check your spam folder.",
                     error = null,
                     resendAt = now + sent.resendIn * 1000L,
                 ))
@@ -340,7 +344,7 @@ class SignInViewModel(
         )
     }
 
-    /** Check what was typed: the texted code, or a recovery code. */
+    /** Check what was typed: the emailed code, or a recovery code. */
     fun verify(typed: String) {
         val step = (_state.value as? SignInUiState.Code)?.step ?: return
         // The same guard as submit(): a sixth digit landing as the Verify
@@ -350,7 +354,7 @@ class SignInViewModel(
         val code = CodeInput.clean(typed.trim(), step.recovery, step.codeLength)
         if (code.isBlank()) {
             _state.value = SignInUiState.Code(step.copy(
-                error = if (step.recovery) "Enter a recovery code." else "Enter the code from the text message."))
+                error = if (step.recovery) "Enter a recovery code." else "Enter the code from the email."))
             return
         }
         _state.value = SignInUiState.Code(step.copy(verifying = true, error = null))
@@ -381,10 +385,10 @@ class SignInViewModel(
         }
     }
 
-    /** Between a texted code and a recovery code. Without SMS, recovery is all there is. */
+    /** Between an emailed code and a recovery code. Without email, recovery is all there is. */
     fun switchMethod() {
         val step = (_state.value as? SignInUiState.Code)?.step ?: return
-        if (step.verifying || !step.smsAvailable) return
+        if (step.verifying || !step.emailAvailable) return
         _state.value = SignInUiState.Code(step.copy(recovery = !step.recovery, error = null))
     }
 

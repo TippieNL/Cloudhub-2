@@ -44,12 +44,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusDirection
@@ -198,7 +194,7 @@ fun SignInScreen(
             }
         }
     }
-    // A texted code and a recovery code look nothing alike: switching starts afresh.
+    // An emailed code and a recovery code look nothing alike: switching starts afresh.
     LaunchedEffect(codeStep?.recovery) { code = "" }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -589,8 +585,8 @@ private fun AnimatedField(
 }
 
 /**
- * The second step, for an account with SMS two-step verification: the code
- * texted to its phone, or one of its recovery codes.
+ * The second step, for an account with two-step verification: the code
+ * emailed to its address, or one of its recovery codes.
  *
  * The code goes out when the step opens (see SignInViewModel.codeStep), so
  * by the time this is on screen it is usually on its way. Typing the last
@@ -649,8 +645,8 @@ private fun CodeForm(
                     imeAction = ImeAction.Done,
                 )
             } else {
-                // The number pad, and with it the keyboard's offer of the
-                // code from the newest text message.
+                // The number pad: the code is six digits, and one pasted from
+                // the email is cleaned down to them (CodeInput).
                 KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
             },
             keyboardActions = KeyboardActions(onDone = { onVerify() }),
@@ -667,10 +663,10 @@ private fun CodeForm(
             ),
         )
 
-        // About the texted code, so not shown over a recovery code -- unless it
+        // About the emailed code, so not shown over a recovery code -- unless it
         // is the reason a recovery code is all there is.
         AnimatedVisibility(
-            visible = step.notice != null && step.error == null && (!step.recovery || !step.smsAvailable),
+            visible = step.notice != null && step.error == null && (!step.recovery || !step.emailAvailable),
             enter = fadeIn(tween(180)) + expandVertically(tween(180)),
             exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
         ) {
@@ -713,7 +709,7 @@ private fun CodeForm(
         }
 
         Spacer(Modifier.height(10.dp))
-        if (step.smsAvailable && !step.recovery) {
+        if (step.emailAvailable && !step.recovery) {
             val wait = step.resendWait(now)
             CodeLink(
                 text = when {
@@ -725,9 +721,9 @@ private fun CodeForm(
                 onClick = onResend,
             )
         }
-        if (step.smsAvailable) {
+        if (step.emailAvailable) {
             CodeLink(
-                text = if (step.recovery) "Use a texted code instead" else "Use a recovery code instead",
+                text = if (step.recovery) "Use an emailed code instead" else "Use a recovery code instead",
                 enabled = !step.verifying,
                 onClick = onSwitch,
             )

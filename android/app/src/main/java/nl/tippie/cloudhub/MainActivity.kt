@@ -69,8 +69,6 @@ class MainActivity : ComponentActivity() {
     private val app by lazy { CloudHubApp.from(this) }
     private lateinit var queue: UploadQueue
 
-    /** Set when the file picker returns; consumed by the composition. */
-    private val pendingUploads = mutableStateListOf<Uri>()
     private var uploadTarget = "/"
 
     /**

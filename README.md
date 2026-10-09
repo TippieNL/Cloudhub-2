@@ -194,7 +194,7 @@ Two suites, and both run on every push (`.github/workflows/ci.yml`):
 ```bash
 php tests/run.php                 # scripts pinning decisions in the source
 php tests/http/run.php            # the API, over real HTTP against a real database
-php tests/http/two_factor_run.php # SMS two-step verification, the same way
+php tests/http/two_factor_run.php # two-step verification by email, the same way
 ```
 
 The first is plain PHP check scripts — no framework or Composer install is
@@ -211,9 +211,10 @@ restored, trash and restore, and a viewer being refused a write. This one does
 need a migrated database and an admin account, which the workflow sets up.
 
 The third does the same for two-step verification (see **Two-step verification
-(SMS)**): it starts its own CloudHub servers and a stand-in SMS gateway, reads
-the codes the gateway is handed, creates its own accounts and removes them when
-it is done.
+by email**): it starts its own CloudHub servers and two stand-in SMTP servers
+(one speaking STARTTLS with a certificate from a CA it makes for the run),
+reads the codes from the mail they are handed, creates its own accounts and
+removes them when it is done.
 
 CI brings a MariaDB service container rather than a lighter stand-in: the
 schema is MySQL-specific throughout — `information_schema` probes,
@@ -298,41 +299,40 @@ same username to reset that password. A role can be passed as a second
 argument — `php tools/create-admin.php alice editor` — which is how non-admin
 accounts were created before the Users screen existed.
 
-## Two-step verification (SMS)
+## Two-step verification by email
 
 Any account can add a second step to signing in: after the password, a
-six-digit code texted to the owner's phone. It is off for every account until
-its owner turns it on, and nothing about signing in changes for accounts that
-leave it off. SECURITY.md has the threat model and what SMS does not protect
-against.
+six-digit code emailed to an address its owner has proven. It is off for every
+account until its owner turns it on, and nothing about signing in changes for
+accounts that leave it off. SECURITY.md has the threat model and what email
+does not protect against.
 
 **For a person.** **Security** → **Two-step verification** → **Turn on**: enter
-a mobile number in international format (`+31 6 12345678`; `0031…` and the
-`(0)` printed on business cards are understood, a local `06…` is not, because
-guessing a country sends a code to a stranger) and the current password; type
-the code that arrives. Ten recovery codes are then shown once — copy or
-download them. From then on signing in asks for the code; **Use a recovery
-code instead** is the way in without the phone. The same panel changes the
-number, turns it off and makes new recovery codes.
+the email address for codes and the current password; type the code that
+arrives (it is valid for 5 minutes; **Send a new code** works after a minute).
+Ten recovery codes are then shown once — copy or download them. From then on
+signing in asks for the emailed code; **Use a recovery code instead** is the
+way in without the mailbox. The same panel changes the address, turns it off
+and makes new recovery codes.
 
 | Change | Asks for |
 |---|---|
-| Turn on | password + code texted to the new number |
-| Change number | password + code texted to the new number, and first a code from the current phone (or a recovery code) unless this session proved it in the last 10 minutes — signing in counts |
-| Turn off | password + code from the current phone, or a recovery code |
-| New recovery codes | password + code from the current phone, or a recovery code |
+| Turn on | password + code emailed to the new address |
+| Change email | password + code emailed to the new address, and first a code from the current one (or a recovery code) unless this session proved it in the last 10 minutes — signing in counts |
+| Turn off | password + code from the current address, or a recovery code |
+| New recovery codes | password + code from the current address, or a recovery code |
 
-The old number is texted when the number changes or two-step verification is
-turned off, so a change nobody asked for does not go unnoticed.
+The old address is emailed when the address changes or two-step verification
+is turned off, so a change nobody asked for does not go unnoticed.
 
-**Lost phone.** Sign in with a recovery code, then **Change number**: having
-just signed in, only the new number's code is asked for. Without recovery codes
-either, an administrator resets it from the **Users** screen (**Reset
-two-step**, which asks for the administrator's own password, is audited, and
-texts the owner's phone); the account then signs in with its password until its
-owner turns it on again. An administrator cannot reset their own this way — it
-would bypass the phone — so for the only administrator, the server's operator
-runs:
+**Lost access to the mailbox.** Sign in with a recovery code, then **Change
+email**: having just signed in, only the new address's code is asked for.
+Without recovery codes either, an administrator resets it from the **Users**
+screen (**Reset two-step**, which asks for the administrator's own password, is
+audited, and emails the owner); the account then signs in with its password
+until its owner turns it on again. An administrator cannot reset their own
+this way — it would bypass the mailbox — so for the only administrator, the
+server's operator runs:
 
 ```bash
 php tools/reset-two-factor.php <username>
@@ -340,14 +340,15 @@ php tools/reset-two-factor.php <username>
 
 **Codes and limits.** Codes are six digits from `random_int()`, stored only as
 an HMAC under `TWO_FACTOR_SECRET`, single-use, and valid for
-`TWO_FACTOR_CODE_TTL_SECONDS`. Each survives `TWO_FACTOR_MAX_ATTEMPTS` wrong
-guesses; asking for another replaces it and waits `TWO_FACTOR_RESEND_SECONDS`.
-Per hour, at most `TWO_FACTOR_SMS_PER_HOUR` texts go to one account and to one
-number, `TWO_FACTOR_SMS_IP_PER_HOUR` from one address, and after
+`TWO_FACTOR_CODE_TTL_SECONDS` (300). Each survives `TWO_FACTOR_MAX_ATTEMPTS`
+wrong guesses; asking for another replaces it and waits
+`TWO_FACTOR_RESEND_SECONDS` (60). Per hour, at most `TWO_FACTOR_EMAIL_PER_HOUR`
+code emails go to one account and to one address,
+`TWO_FACTOR_EMAIL_IP_PER_HOUR` from one client address, and after
 `TWO_FACTOR_FAILURES_PER_HOUR` wrong codes (or recovery codes) for one account
-— `TWO_FACTOR_IP_FAILURES_PER_HOUR` from one address — verification is refused
-until the hour has passed. Recovery codes are 16 characters (79 random bits),
-stored as SHA-256, and each works once.
+— `TWO_FACTOR_IP_FAILURES_PER_HOUR` from one client address — verification is
+refused until the hour has passed. Recovery codes are 16 characters (79 random
+bits), stored as SHA-256, and each works once.
 
 **Sessions.** A correct password for such an account gives the session a new
 ID and CSRF token and remembers which account is waiting — but no signed-in
@@ -356,100 +357,119 @@ someone signed out. Only the code signs it in, with another new ID. The wait
 lasts 15 minutes. When an account turns two-step verification on, its other
 sessions that only ever proved the password — another browser, or the Android
 app — are signed out within a minute; the session that turned it on carries on.
+CloudHub has no remember-me or self-service password reset that could go
+round the code.
 
 **What the server needs.**
 
-1. `php database/migrate.php` — adds two nullable columns to `users`, the
-   tables `two_factor_challenges` and `two_factor_recovery_codes`, and new
-   values to `login_attempts.scope`. Nothing is dropped or rewritten, and every
+1. `php database/migrate.php` — adds two nullable columns to `users`
+   (`two_factor_email`, `two_factor_enabled_at`), the tables
+   `two_factor_challenges` and `two_factor_recovery_codes`, and the `email_*`
+   values of `login_attempts.scope`. No account data is deleted, and every
    account starts with it off. Until it has run, sign-in works exactly as
    before and the settings panel says the database needs updating. Without a
    PHP command line (phpMyAdmin or Adminer only), run
-   `database/migrations/20261009_two_factor.sql` against the CloudHub database
-   instead: the same changes as plain SQL, and safe to run again.
-2. An SMS gateway in `.env` (examples in `.env.example`):
+   `database/migrations/20261009_two_factor_email.sql` against the CloudHub
+   database instead: the same changes as plain SQL, and safe to run again.
+   Both work on a database that never had two-step verification and on one set
+   up for the earlier text-message codes (see **Coming from text-message
+   codes** below).
+2. An SMTP server in `.env` (examples in `.env.example`). No `SMTP_HOST`: nobody
+   can turn two-step verification on.
 
    | Setting | |
    |---|---|
-   | `SMS_DRIVER` | `twilio`, `webhook`, or `log` (development only); empty: nobody can turn two-step verification on |
-   | `SMS_FROM` | sender number (E.164) or alphanumeric sender ID |
-   | `SMS_APP_NAME` | the name in each message (default `CloudHub`) |
-   | `SMS_TIMEOUT_SECONDS` | how long to wait for the gateway (default 10) |
-   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | for `twilio`; `TWILIO_MESSAGING_SERVICE_SID` may replace `SMS_FROM` |
-   | `SMS_WEBHOOK_URL`, `SMS_WEBHOOK_TOKEN` | for `webhook` |
+   | `SMTP_HOST` | the provider's SMTP server, a host name only (no `smtp://`, no port) |
+   | `SMTP_PORT`, `SMTP_ENCRYPTION` | `587` + `tls` (STARTTLS, the usual), or `465` + `ssl`; `none` only for a relay on this machine or the local network |
+   | `SMTP_USERNAME`, `SMTP_PASSWORD` | the mailbox's login — for Gmail an **app password**, not the account password |
+   | `MAIL_FROM_ADDRESS` | the sender; the provider must allow sending as it |
+   | `MAIL_FROM_NAME` | the sender's name, also used in each message (default `CloudHub`) |
+   | `SMTP_TIMEOUT_SECONDS` | how long to wait for the server (default 10) |
+   | `SMTP_CA_FILE` | a CA bundle, for a PHP without one (Android/KSWEB) |
    | `TWO_FACTOR_SECRET` | 32+ random bytes, hex: `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` |
 
-   **Twilio**: create an account, get a sending number (or a messaging
-   service), allow the destination countries in Twilio's SMS geographic
-   permissions, then set `SMS_DRIVER=twilio`, the account SID, the auth token
-   and `SMS_FROM`. Messages go out with one HTTPS POST; no SDK is needed.
+   For example, Gmail (needs 2-Step Verification on the Google account, then
+   an app password from *Google Account → Security → App passwords*):
 
-   **Webhook**: anything that takes `POST {"to", "from", "message"}` as JSON
-   with an optional `Authorization: Bearer <SMS_WEBHOOK_TOKEN>`, and answers
-   2xx when it accepted the message (400/422: the number was refused; anything
-   else: unavailable). That fronts a provider there is no driver for. Plain
-   `http://` is accepted only for this machine or a private network address.
+   ```ini
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=587
+   SMTP_ENCRYPTION=tls
+   SMTP_USERNAME=you@gmail.com
+   SMTP_PASSWORD=abcdefghijklmnop
+   MAIL_FROM_ADDRESS=you@gmail.com
+   ```
 
-   **An Android phone with a SIM** sends the texts for free with an SMS
-   gateway app — on the phone CloudHub runs on, if it has a SIM, or any phone
-   on the same network. `SMS_WEBHOOK_FORMAT` speaks the two common apps'
-   own APIs:
+   Other providers take the same settings with their own host, from their
+   SMTP settings page; a transactional service (Brevo, Mailgun, Postmark,
+   Amazon SES…) works with the SMTP credentials it issues. CloudHub signs in
+   with a username and password (AUTH PLAIN or LOGIN), so a provider that only
+   allows OAuth for SMTP cannot be used. A domain of your own needs SPF and
+   DKIM set up for the sender, or codes land in spam. Values are read as
+   written: don't wrap a password in quotes unless the quotes are part of it.
 
-   | App | In the app | `.env` |
-   |---|---|---|
-   | Traccar SMS Gateway | enable the HTTP API; note the address (port 8082) and the API key | `SMS_DRIVER=webhook`<br>`SMS_WEBHOOK_FORMAT=traccar`<br>`SMS_WEBHOOK_URL=http://<phone-ip>:8082/`<br>`SMS_WEBHOOK_TOKEN=<API key>` |
-   | SMS Gateway for Android ([sms-gate.app](https://sms-gate.app)) | start the Local Server; note the address (port 8080) and the username and password | `SMS_DRIVER=webhook`<br>`SMS_WEBHOOK_FORMAT=smsgate`<br>`SMS_WEBHOOK_URL=http://<phone-ip>:8080/message`<br>`SMS_WEBHOOK_TOKEN=<username>:<password>` |
+   Certificates are always verified against `SMTP_HOST`. On Android/KSWEB,
+   whose PHP often has no CA bundle, download one (for example curl's
+   `cacert.pem`) and point `SMTP_CA_FILE` at it; otherwise every email fails
+   with *"TLS with … failed"* in the log.
 
-   Use `127.0.0.1` as `<phone-ip>` when the app runs on the same phone as
-   CloudHub; otherwise give that phone a fixed address on the network. Let the
-   app run in the background (exempt it from battery optimisation), and mind
-   that the texts are paid for by that SIM's plan. Both formats are built to
-   the apps' published APIs and tested against stand-ins as strict as the
-   apps (Traccar's refuses a `Bearer` prefix and any extra field).
+   **Trying it locally**: run a mail catcher such as Mailpit and point CloudHub
+   at it — `SMTP_HOST=127.0.0.1`, `SMTP_PORT=1025`, `SMTP_ENCRYPTION=none`, no
+   username — then read the codes in its web page. There is deliberately no
+   mode that writes codes to a log file.
 
-   **Development**: `SMS_DRIVER=log` with `APP_ENV=development` writes each
-   message, code included, to `logs/sms-outbox.log` instead of sending it. With
-   any other `APP_ENV` it is refused and texts are off.
+   Settings that are given but cannot work — no sender address, a URL in
+   `SMTP_HOST`, port 465 with `tls`, unencrypted SMTP to the internet, a CA file
+   that cannot be read — are logged once to PHP's error log, as `[mail] …`
+   naming the setting at fault (never its value), and treated as no mail
+   server: the app and the web page then say *"no mail server is set up on
+   this server"*. That never opens a way round the code: accounts that have it on
+   can then only finish signing in with a recovery code. The same holds when
+   the server is down, slow or refuses the message; the person is told the
+   email could not be sent and can try again or use a recovery code, and the
+   log says which step failed (`two-step code not sent: smtp: …`).
 
-   A driver that is named but cannot work — missing credentials, the outbox in
-   production, a plain-HTTP webhook to the internet, a gateway app's format
-   without its key — is logged once to PHP's error log, as `[sms] …` naming
-   the setting at fault, and treated as no gateway: the app and the web page
-   then say *"no text-message service is set up on this server"*. That never opens a way round
-   the code: accounts that have it on can then only finish signing in with a
-   recovery code. The same holds when the gateway is down or slow; the person
-   is told the text could not be sent and can try again or use a recovery code.
+**Coming from text-message codes.** The update removes the SMS gateway
+settings (`SMS_*`, `TWILIO_*` — delete them from `.env`) and code. An account
+that had text-message codes on keeps two-step verification on, but has no
+address yet: it signs in with a recovery code, then adds one under **Security**
+(**Add email**), asking only for that address's code. Without recovery codes,
+reset it as above. `migrate.php` says how many such accounts there are.
+`users.two_factor_phone` is kept, unused, so nothing is deleted; SECURITY.md
+has the statement to drop it once you are done.
 
 **API.** The web app uses these; another client can too.
 
 | Route | |
 |---|---|
-| `POST /api/auth/login` | unchanged for accounts without it. For one with it: `401` `TWO_FACTOR_REQUIRED`, with `twoFactor` (`phoneEnding`, `codeLength`, `smsAvailable`, `codeSent`, `resendIn`, `expiresIn`) and a fresh `csrfToken`. No text is sent yet |
-| `POST /api/auth/two-factor/send` | text a code; `429` with `Retry-After` while waiting, `503` when no text can be sent |
+| `POST /api/auth/login` | unchanged for accounts without it. For one with it: `401` `TWO_FACTOR_REQUIRED`, with `twoFactor` (`method: "email"`, `emailHint`, `codeLength`, `emailAvailable`, `codeSent`, `resendIn`, `expiresIn`) and a fresh `csrfToken`. No email is sent yet |
+| `POST /api/auth/two-factor/send` | email a code; `429` with `Retry-After` while waiting, `503` when no email can be sent, `409` `TWO_FACTOR_NO_EMAIL` for an account with no address |
 | `POST /api/auth/two-factor/verify` | `{"code"}` or `{"recoveryCode"}`; the usual sign-in answer on success |
 | `POST /api/auth/two-factor/cancel` | give up the sign-in |
 | `GET /api/auth/status` | also carries `twoFactor` while a sign-in waits for its code |
-| `GET /api/users/me/two-factor` | the caller's settings: `enabled`, `phoneEnding`, `recoveryCodesLeft`, `available`, … |
-| `POST /api/users/me/two-factor/start` | `{"action": "phone" \| "disable" \| "recovery", "currentPassword", "phone"?, "method"?: "recovery"}` |
-| `POST /api/users/me/two-factor/confirm` | `{"code"}`, or `{"recoveryCode"}` for the current phone; a change of number may answer `"done": false` and ask for the new number's code next |
+| `GET /api/users/me/two-factor` | the caller's settings: `enabled`, `emailHint`, `recoveryCodesLeft`, `available`, `emailAvailable`, … |
+| `POST /api/users/me/two-factor/start` | `{"action": "email" \| "disable" \| "recovery", "currentPassword", "email"?, "method"?: "recovery"}` |
+| `POST /api/users/me/two-factor/confirm` | `{"code"}`, or `{"recoveryCode"}` for the current address; a change of address may answer `"done": false` and ask for the new address's code next |
 | `POST /api/users/me/two-factor/resend`, `…/cancel` | |
 | `DELETE /api/users/{id}/two-factor` | administrator reset, `{"currentPassword"}` |
 
 The `/api/auth/two-factor/*` routes check CSRF themselves; the others sit behind
 the same guard as every other route. Refusals carry stable codes —
 `TWO_FACTOR_CODE_INVALID` (with `attemptsLeft`), `TWO_FACTOR_CODE_EXPIRED`,
-`TWO_FACTOR_LOCKED`, `TWO_FACTOR_RESEND_COOLDOWN`, `SMS_UNAVAILABLE`, … — and
-answers name at most a number's last two digits. The Users list
-(`GET /api/users`) gains `twoFactorEnabled`, never a number.
+`TWO_FACTOR_LOCKED`, `TWO_FACTOR_RESEND_COOLDOWN`, `TWO_FACTOR_EMAIL_LIMIT`,
+`EMAIL_UNAVAILABLE`, `EMAIL_REJECTED`, `EMAIL_NOT_CONFIGURED`, … — and answers
+show at most a masked address (`k•••@example.com`). The Users list
+(`GET /api/users`) gains `twoFactorEnabled`, never an address.
 
-**The Android app** asks for the code too, from version 4.3: after a right
-password it texts the code, takes it (or a recovery code), and keeps the same
-limits and countdowns as the web app; **Settings** → **Two-step verification**
-turns it on and off, changes the number and makes new recovery codes. See
-*Android app* → *Two-step verification*. Version 4.2 and earlier show the
-server's message — *"This account uses two-step verification…"* — instead of
-signing in, and cost no text message: an account that turns this on needs the
-web app or 4.3.
+**The Android app** asks for the emailed code too, from version 4.4: after a
+right password it has the code sent, takes it (or a recovery code), and keeps
+the same limits and countdowns as the web app; **Settings** → **Two-step
+verification** turns it on and off, changes the address and makes new recovery
+codes. See *Android app* → *Two-step verification*. Version 4.3 was built for
+text-message codes: it can still finish a sign-in — it asks the server to send
+the code and checks it — but speaks of texts, and cannot turn it on or change
+the address. Version 4.2 and earlier show the server's message — *"This account
+uses two-step verification…"* — instead of signing in, and cost no email.
 
 ## Installing as an app
 
@@ -609,32 +629,34 @@ verification turned on from another device — returns to this screen with
 
 ### Two-step verification
 
-For an account with SMS two-step verification (see **Two-step verification
-(SMS)**) a right password turns the card into the code step: the code is texted
-as it opens, the number pad comes up, and the sixth digit checks it — **Verify**
-is there for anyone who expects a button. **Send a new code** counts down the
+For an account with two-step verification (see **Two-step verification by
+email**) a right password turns the card into the code step: the code is
+emailed as it opens, the number pad comes up, and the sixth digit checks it —
+**Verify** is there for anyone who expects a button. **Send a new code** counts down the
 server's wait; **Use a recovery code instead** takes one of the saved codes;
 Back, or **Back to sign in**, returns to the password and makes the code that
 was sent stop working. A wrong code shakes the card, empties the field and says
 how many tries are left; a sign-in that waited too long (15 minutes) goes back
 to the password. If the app is closed while the code is fetched from the
-messages app, it reopens on the code step, with the code already sent still
-good. Nothing is signed in until the server has checked the code.
+mail app, it reopens on the code step, with the code already sent still good.
+Nothing is signed in until the server has checked the code. An account that
+had text-message codes on has no address yet: the step says so and asks for a
+recovery code.
 
 **Settings** → **Two-step verification** shows whether it is on, and turns it
-on, changes the number, makes new recovery codes and turns it off — each with
-the current password and a texted code, the same as the web app's **Security**
-panel. New recovery codes are shown once, numbered, with **Copy** (marked
+on, changes the address (**Add email** for an account that has none yet),
+makes new recovery codes and turns it off — each with the current password and
+an emailed code, the same as the web app's **Security** panel. The code step
+for a new address shows it in full, as typed, where a typo is easiest to
+spot. New recovery codes are shown once, numbered, with **Copy** (marked
 sensitive, so Android 13 and later keep them out of clipboard previews) and
 **Share** (to a password manager or a note); leaving without saving them asks
-first. **No access to your phone?** answers the current phone with a recovery
-code.
+first. **No access to your email?** answers the current address with a
+recovery code.
 
-The app does not read the text message itself. Where the phone offers it, the
-keyboard's suggestion of the newest code or the messages app's **Copy code**
-fills the field; otherwise it is typed. Reading the message directly would need
-Google Play services (the SMS Retriever API), which a self-hosted app should
-not depend on.
+The app does not read the email itself: the code is copied from the mail app or
+typed, and a code pasted with spaces or a trailing full stop is cleaned to its
+six digits.
 
 ### Settings and Storage
 
@@ -1117,16 +1139,19 @@ one and resuming it from the server's offset — plus download, rename, move,
 copy, search, trash and restore, and share create and revoke. Without
 `CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
 
-Two-step verification has live tests of its own, against a server that writes
-its text messages to the development outbox rather than sending them:
+Two-step verification has live tests of its own, against a server that sends
+its email to the stand-in SMTP server in `tests/http/smtp_sink.php`, which
+records each message where the tests read the codes:
 
-    APP_ENV=development SMS_DRIVER=log php -S 127.0.0.1:8901 -t public router.php &
+    php tests/http/smtp_sink.php 8902 /tmp/cloudhub-mail &
+    SMTP_HOST=127.0.0.1 SMTP_PORT=8902 SMTP_ENCRYPTION=none MAIL_FROM_ADDRESS=codes@cloudhub.test \
+        php -S 127.0.0.1:8901 -t public router.php &
     cd android && CLOUDHUB_TEST_2FA_URL=http://127.0.0.1:8901 \
-        CLOUDHUB_TEST_SMS_OUTBOX=$PWD/../logs/sms-outbox.log gradle test
+        CLOUDHUB_TEST_MAIL_DIR=/tmp/cloudhub-mail gradle test
 
 They create an account of their own (as `CLOUDHUB_TEST_USER`, an
-administrator), turn it on with the code from the outbox, sign in with a texted
-code and with a recovery code, refuse a wrong code and a spent one, give up a
+administrator), turn it on with the code from the email, sign in with an
+emailed code and with a recovery code, refuse a wrong code and a spent one, give up a
 waiting sign-in, turn it off, and delete the account. The code step and the
 settings screen are also state machines tested without a server: the countdown,
 the double-submission guard, the refusals and where each one leads.

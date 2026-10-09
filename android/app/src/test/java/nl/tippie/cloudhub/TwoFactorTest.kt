@@ -39,7 +39,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /*
- * SMS two-step verification in the app: the code step of signing in, and the
+ * Two-step verification in the app: the code step of signing in, and the
  * settings screen's changes. Both are driven here through fakes of the calls
  * they make, with a clock the test moves, so the countdowns and the guards
  * against double submission can be pinned without a phone or a minute's wait.
@@ -50,7 +50,7 @@ import kotlin.test.assertTrue
 class CodeInputTest {
 
     @Test
-    fun `a texted code keeps its digits only, and no more of them than the code has`() {
+    fun `an emailed code keeps its digits only, and no more of them than the code has`() {
         assertEquals("123456", CodeInput.clean("123 456", recovery = false, length = 6))
         assertEquals("123456", CodeInput.clean(" 123456.", recovery = false, length = 6))
         assertEquals("123456", CodeInput.clean("1234567", recovery = false, length = 6))
@@ -66,7 +66,7 @@ class CodeInputTest {
     }
 
     @Test
-    fun `only a full texted code is complete enough to send by itself`() {
+    fun `only a full emailed code is complete enough to send by itself`() {
         assertTrue(CodeInput.complete("123456", recovery = false, length = 6))
         assertFalse(CodeInput.complete("12345", recovery = false, length = 6))
         // A recovery code has no length to recognise it by: it waits for Verify.
@@ -92,13 +92,13 @@ class CodeStepTest {
         assertFalse(CodeStep(sending = true).canResend(0))
         assertFalse(CodeStep(verifying = true).canResend(0))
         assertFalse(CodeStep(recovery = true).canResend(0))
-        assertFalse(CodeStep(smsAvailable = false).canResend(0))
+        assertFalse(CodeStep(emailAvailable = false).canResend(0))
     }
 
     @Test
-    fun `the prompt names the number's last digits, or asks for a recovery code`() {
-        assertTrue(CodeStep(phoneEnding = "78").prompt.contains("ending in 78"))
-        assertTrue(CodeStep(phoneEnding = "78", codeLength = 6).prompt.contains("6-digit"))
+    fun `the prompt names the masked address, or asks for a recovery code`() {
+        assertEquals("Enter the 6-digit code we sent to k•••@example.com.", CodeStep(emailHint = "k•••@example.com").prompt)
+        assertEquals("Enter the 6-digit code we sent to your email.", CodeStep().prompt)
         assertTrue(CodeStep(recovery = true).prompt.contains("recovery codes"))
     }
 }
@@ -109,7 +109,7 @@ private class FakeSecondStep : SecondStepCalls {
     var verified = mutableListOf<String>()
     var recoveryVerified = mutableListOf<String>()
     var cancels = 0
-    var send: suspend () -> CodeSent = { CodeSent(sent = true, phoneEnding = "78", expiresIn = 300, resendIn = 60) }
+    var send: suspend () -> CodeSent = { CodeSent(emailHint = "a•••@example.com", expiresIn = 300, resendIn = 60) }
     var verify: suspend (String) -> LoginResult = { LoginResult(success = true, user = User(1, "alice", "editor")) }
     var verifyRecovery: suspend (String) -> LoginResult = { LoginResult(success = true, recoveryCodesLeft = 9) }
 
@@ -127,7 +127,7 @@ class SignInCodeStepTest {
     @Before fun setUp() = Dispatchers.setMain(dispatcher)
     @After fun tearDown() = Dispatchers.resetMain()
 
-    private val needsCode = LoginResult(success = false, csrfToken = "t", twoFactor = SecondStep(phoneEnding = "78"))
+    private val needsCode = LoginResult(success = false, csrfToken = "t", twoFactor = SecondStep(emailHint = "a•••@example.com"))
 
     private fun model(fake: FakeSecondStep, login: suspend (String, String) -> LoginResult = { _, _ -> needsCode }) =
         SignInViewModel(login, io = dispatcher, secondStep = fake, clock = { now })
@@ -142,39 +142,53 @@ class SignInCodeStepTest {
     private fun SignInViewModel.step(): CodeStep = assertIs<SignInUiState.Code>(state.value).step
 
     @Test
-    fun `a right password for an account with two-step verification moves to the code, and texts it`() = runTest(dispatcher) {
+    fun `a right password for an account with two-step verification moves to the code, and emails it`() = runTest(dispatcher) {
         val fake = FakeSecondStep()
         val model = signedInToCode(fake)
 
         val step = model.step()
         assertEquals(1, fake.sends, "the code is asked for once, when the step opens")
-        assertEquals("78", step.phoneEnding)
+        assertEquals("a•••@example.com", step.emailHint)
         assertFalse(step.sending)
-        assertEquals("Code sent. It works for 5 minutes.", step.notice)
+        assertEquals("Code sent. It works for 5 minutes. Not there? Check your spam folder.", step.notice)
         assertEquals(60, step.resendWait(now), "the countdown starts from the server's resendIn")
     }
 
     @Test
-    fun `with no way to text, the step asks for a recovery code and sends nothing`() = runTest(dispatcher) {
+    fun `with no way to email, the step asks for a recovery code and sends nothing`() = runTest(dispatcher) {
         val fake = FakeSecondStep()
-        val model = model(fake) { _, _ -> needsCode.copy(twoFactor = SecondStep(smsAvailable = false)) }
+        val model = model(fake) { _, _ -> needsCode.copy(twoFactor = SecondStep(emailHint = "a•••@example.com", emailAvailable = false)) }
         model.submit("alice", "right-password")
         dispatcher.scheduler.advanceUntilIdle()
 
         val step = model.step()
         assertTrue(step.recovery)
         assertEquals(0, fake.sends)
-        assertTrue(step.notice!!.contains("cannot send text messages"))
+        assertTrue(step.notice!!.contains("cannot send email"))
         // And there is nothing to switch to.
         model.switchMethod()
         assertTrue(model.step().recovery)
     }
 
     @Test
+    fun `an account with no address yet, from text-message days, is asked for a recovery code`() = runTest(dispatcher) {
+        val fake = FakeSecondStep()
+        val model = model(fake) { _, _ -> needsCode.copy(twoFactor = SecondStep(emailHint = null, emailAvailable = false)) }
+        model.submit("alice", "right-password")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val step = model.step()
+        assertTrue(step.recovery)
+        assertEquals(0, fake.sends)
+        assertTrue(step.notice!!.contains("no address for them yet"), step.notice)
+        assertTrue(step.notice!!.contains("add an address in Settings"), step.notice)
+    }
+
+    @Test
     fun `coming back to a code still valid does not send another`() = runTest(dispatcher) {
         val fake = FakeSecondStep()
         val model = model(fake)
-        model.resume(SecondStep(phoneEnding = "78", codeSent = true, resendIn = 42))
+        model.resume(SecondStep(emailHint = "a•••@example.com", codeSent = true, resendIn = 42))
         dispatcher.scheduler.advanceUntilIdle()
 
         val step = model.step()
@@ -188,7 +202,7 @@ class SignInCodeStepTest {
         val fake = FakeSecondStep()
         val model = signedInToCode(fake)
         val before = model.state.value
-        model.resume(SecondStep(phoneEnding = "11", codeSent = true))
+        model.resume(SecondStep(emailHint = "b•••@example.com", codeSent = true))
         assertEquals(before, model.state.value)
     }
 
@@ -203,7 +217,7 @@ class SignInCodeStepTest {
 
         assertEquals(listOf("123456"), fake.verified)
         assertEquals(SignInUiState.Success, model.state.value)
-        assertNull(model.takeRecoveryNotice(), "a texted code leaves nothing to say")
+        assertNull(model.takeRecoveryNotice(), "an emailed code leaves nothing to say")
     }
 
     @Test
@@ -261,11 +275,11 @@ class SignInCodeStepTest {
     @Test
     fun `a refused send says why and waits as long as the server asks`() = runTest(dispatcher) {
         val fake = FakeSecondStep()
-        fake.send = { throw ApiError(429, "TWO_FACTOR_SMS_LIMIT", "Too many text messages were sent.", retryAfter = 600) }
+        fake.send = { throw ApiError(429, "TWO_FACTOR_EMAIL_LIMIT", "Too many codes were emailed.", retryAfter = 600) }
         val model = signedInToCode(fake)
 
         val step = model.step()
-        assertEquals("Too many text messages were sent.", step.error)
+        assertEquals("Too many codes were emailed.", step.error)
         assertEquals(600, step.resendWait(now))
         assertFalse(step.sending)
     }
@@ -309,7 +323,7 @@ class SignInCodeStepTest {
         dispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(emptyList(), fake.verified)
-        assertEquals("Enter the code from the text message.", model.step().error)
+        assertEquals("Enter the code from the email.", model.step().error)
     }
 
     @Test
@@ -327,6 +341,7 @@ class SignInCodeStepTest {
         assertEquals(SignInUiState.Success, model.state.value)
         val notice = model.takeRecoveryNotice()
         assertTrue(notice!!.contains("9 left"))
+        assertTrue(notice.contains("change the address"))
         assertNull(model.takeRecoveryNotice())
     }
 
@@ -379,22 +394,22 @@ class SignInCodeStepTest {
 
 /** The account's settings, scripted per test. */
 private class FakeTwoFactor : TwoFactorCalls {
-    var overview = TwoFactorOverview(available = true, schemaReady = true, smsAvailable = true)
+    var overview = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true)
     var started = mutableListOf<List<Any?>>()
     var confirmed = mutableListOf<String>()
     var recoveryConfirmed = mutableListOf<String>()
     var resends = 0
     var cancels = 0
     var overviews = 0
-    var start: suspend () -> TwoFactorStage = { TwoFactorStage(action = "phone", stage = "new", phoneEnding = "12", sent = true, resendIn = 60) }
+    var start: suspend () -> TwoFactorStage = { TwoFactorStage(stage = "new", emailHint = "n•••@example.org", sent = true, resendIn = 60) }
     var confirm: suspend (String) -> TwoFactorStage = {
-        TwoFactorStage(done = true, enabled = true, phoneEnding = "12", recoveryCodes = List(10) { i -> "code-$i" }, recoveryCodesLeft = 10)
+        TwoFactorStage(done = true, enabled = true, emailHint = "n•••@example.org", recoveryCodes = List(10) { i -> "code-$i" })
     }
-    var resend: suspend () -> TwoFactorStage = { TwoFactorStage(action = "phone", stage = "new", phoneEnding = "12", sent = true, resendIn = 60) }
+    var resend: suspend () -> TwoFactorStage = { TwoFactorStage(stage = "new", emailHint = "n•••@example.org", sent = true, resendIn = 60) }
 
     override suspend fun overview(): TwoFactorOverview { overviews++; return overview }
-    override suspend fun start(action: String, password: String, phone: String?, useRecoveryCode: Boolean): TwoFactorStage {
-        started += listOf(action, password, phone, useRecoveryCode); return start.invoke()
+    override suspend fun start(action: String, password: String, email: String?, useRecoveryCode: Boolean): TwoFactorStage {
+        started += listOf(action, password, email, useRecoveryCode); return start.invoke()
     }
     override suspend fun resend(): TwoFactorStage { resends++; return resend.invoke() }
     override suspend fun confirm(code: String): TwoFactorStage { confirmed += code; return confirm.invoke(code) }
@@ -427,25 +442,26 @@ class TwoFactorSettingsTest {
     }
 
     @Test
-    fun `turning it on takes a number, the password and the code, and shows the recovery codes`() = runTest(dispatcher) {
+    fun `turning it on takes an address, the password and the code, and shows the recovery codes`() = runTest(dispatcher) {
         val fake = FakeTwoFactor()
         val model = opened(fake)
 
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", " +31 6 12345612 ")
+        model.submitStart("pw-123456789012", " New@Example.org ")
         dispatcher.scheduler.advanceUntilIdle()
-        assertEquals(listOf<Any?>("phone", "pw-123456789012", "+31 6 12345612", false), fake.started.single())
+        assertEquals(listOf<Any?>("email", "pw-123456789012", "New@Example.org", false), fake.started.single())
         val code = assertIs<TwoFactorStep.Code>(model.state.value.step)
         assertEquals(60, code.resendWait(now))
-        assertTrue(code.prompt.contains("ending in 12"))
+        // The address in full, as typed: the place a typo is easiest to spot.
+        assertTrue(code.prompt.startsWith("Enter the code we sent to New@Example.org."), code.prompt)
 
-        fake.overview = fake.overview.copy(enabled = true, phoneEnding = "12", recoveryCodesLeft = 10)
+        fake.overview = fake.overview.copy(enabled = true, emailHint = "n•••@example.org", recoveryCodesLeft = 10)
         model.confirm("123456")
         dispatcher.scheduler.advanceUntilIdle()
 
         val codes = assertIs<TwoFactorStep.Codes>(model.state.value.step)
         assertEquals(10, codes.codes.size)
-        assertTrue(model.state.value.message!!.text.startsWith("Two-step verification is on"))
+        assertEquals("Two-step verification is on. Signing in will now ask for a code sent to your email.", model.state.value.message!!.text)
         assertTrue(model.state.value.overview!!.enabled, "the settings are read again afterwards")
 
         model.codesSaved()
@@ -453,53 +469,56 @@ class TwoFactorSettingsTest {
     }
 
     @Test
-    fun `a number and a password are asked for before anything is sent`() = runTest(dispatcher) {
+    fun `an address and a password are asked for before anything is sent`() = runTest(dispatcher) {
         val fake = FakeTwoFactor()
         val model = opened(fake)
         model.begin(TwoFactorAction.TURN_ON)
 
         model.submitStart("pw-123456789012", "  ")
         assertTrue(model.state.value.message!!.isError)
-        model.submitStart("", "+31612345612")
+        model.submitStart("pw-123456789012", "not an address")
+        assertEquals("Enter the email address to send codes to.", model.state.value.message!!.text)
+        model.submitStart("", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
         assertTrue(model.state.value.message!!.text.contains("password"))
         assertEquals(0, fake.started.size)
     }
 
     @Test
-    fun `moving to a new number proves the current phone, then the new one`() = runTest(dispatcher) {
+    fun `moving to a new address proves the current one, then the new one`() = runTest(dispatcher) {
         val fake = FakeTwoFactor()
-        fake.overview = fake.overview.copy(enabled = true, phoneEnding = "78", recoveryCodesLeft = 10)
-        fake.start = { TwoFactorStage(action = "phone", stage = "current", phoneEnding = "78", recoveryAllowed = true, sent = true, resendIn = 60) }
-        fake.confirm = { TwoFactorStage(done = false, action = "phone", stage = "new", phoneEnding = "12", sent = true, resendIn = 60) }
+        fake.overview = fake.overview.copy(enabled = true, emailHint = "a•••@example.com", recoveryCodesLeft = 10)
+        fake.start = { TwoFactorStage(stage = "current", emailHint = "a•••@example.com", recoveryAllowed = true, sent = true, resendIn = 60) }
+        fake.confirm = { TwoFactorStage(done = false, stage = "new", emailHint = "n•••@example.org", sent = true, resendIn = 60) }
         val model = opened(fake)
 
-        model.begin(TwoFactorAction.CHANGE_PHONE)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.begin(TwoFactorAction.CHANGE_EMAIL)
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
         val current = assertIs<TwoFactorStep.Code>(model.state.value.step)
-        assertTrue(current.prompt.contains("current phone number, ending in 78"))
+        assertEquals("Enter the code we sent to your current address, a•••@example.com.", current.prompt)
 
         model.confirm("111111")
         dispatcher.scheduler.advanceUntilIdle()
         val next = assertIs<TwoFactorStep.Code>(model.state.value.step)
         assertEquals("new", next.stage.stage)
-        assertFalse(next.stage.recoveryAllowed, "a new number is only ever proven by its own code")
-        assertTrue(model.state.value.message!!.text.contains("new number ending in 12"))
+        assertFalse(next.stage.recoveryAllowed, "a new address is only ever proven by its own code")
+        assertEquals("Thanks. Now enter the code we sent to your new address.", model.state.value.message!!.text)
+        assertTrue(next.prompt.contains("new@example.org"), "the new step still shows the address as typed")
 
-        fake.confirm = { TwoFactorStage(done = true, enabled = true, phoneEnding = "12", recoveryCodesLeft = 10) }
+        fake.confirm = { TwoFactorStage(done = true, enabled = true, emailHint = "n•••@example.org") }
         model.confirm("222222")
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(TwoFactorStep.Summary, model.state.value.step)
-        assertEquals("Done. Codes now go to your phone number ending in 12.", model.state.value.message!!.text)
+        assertEquals("Done. Codes now go to n•••@example.org.", model.state.value.message!!.text)
         assertEquals(listOf("111111", "222222"), fake.confirmed)
     }
 
     @Test
-    fun `turning it off with a lost phone takes a recovery code and texts nothing`() = runTest(dispatcher) {
+    fun `turning it off with the mailbox out of reach takes a recovery code and emails nothing`() = runTest(dispatcher) {
         val fake = FakeTwoFactor()
-        fake.overview = fake.overview.copy(enabled = true, phoneEnding = "78", recoveryCodesLeft = 3)
-        fake.start = { TwoFactorStage(action = "disable", stage = "current", phoneEnding = "78", recoveryAllowed = true, sent = false) }
+        fake.overview = fake.overview.copy(enabled = true, emailHint = "a•••@example.com", recoveryCodesLeft = 3)
+        fake.start = { TwoFactorStage(stage = "current", emailHint = "a•••@example.com", recoveryAllowed = true, sent = false) }
         fake.confirm = { TwoFactorStage(done = true, enabled = false) }
         val model = opened(fake)
 
@@ -521,7 +540,7 @@ class TwoFactorSettingsTest {
         fake.confirm = { throw ApiError(422, "TWO_FACTOR_CODE_INVALID", "That code is not right. 4 attempts left.") }
         val model = opened(fake)
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
 
         model.confirm("000000")
@@ -537,7 +556,7 @@ class TwoFactorSettingsTest {
         fake.confirm = { throw ApiError(409, "TWO_FACTOR_NO_PENDING_CHANGE", "That change has timed out or was replaced. Start again.") }
         val model = opened(fake)
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
 
         model.confirm("123456")
@@ -547,20 +566,40 @@ class TwoFactorSettingsTest {
     }
 
     @Test
-    fun `a text that could not be sent still opens the code step, with the reason and a wait`() = runTest(dispatcher) {
+    fun `an email that could not be sent still opens the code step, with the reason and a wait`() = runTest(dispatcher) {
         val fake = FakeTwoFactor()
         fake.start = {
-            TwoFactorStage(action = "phone", stage = "new", phoneEnding = "12", sent = false,
-                error = StageProblem("SMS_UNAVAILABLE", "The text message could not be sent just now.", 60))
+            TwoFactorStage(stage = "new", emailHint = "n•••@example.org", sent = false,
+                error = StageProblem("The email could not be sent just now.", 60))
         }
         val model = opened(fake)
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
 
         val step = assertIs<TwoFactorStep.Code>(model.state.value.step)
         assertEquals(60, step.resendWait(now))
-        assertEquals("The text message could not be sent just now.", model.state.value.message!!.text)
+        assertEquals("The email could not be sent just now.", model.state.value.message!!.text)
+    }
+
+    @Test
+    fun `an account with no address yet adds one with the new address's code`() = runTest(dispatcher) {
+        // On from text-message days: signing in took a recovery code, which
+        // counts as just proven, so only the new address is asked for.
+        val fake = FakeTwoFactor()
+        fake.overview = fake.overview.copy(enabled = true, emailHint = null, recoveryCodesLeft = 9)
+        val model = opened(fake)
+        assertTrue(TwoFactorText.startIntro(TwoFactorAction.TURN_OFF, fake.overview).contains("use a recovery code below"))
+
+        model.begin(TwoFactorAction.CHANGE_EMAIL)
+        model.submitStart("pw-123456789012", "new@example.org")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf<Any?>("email", "pw-123456789012", "new@example.org", false), fake.started.single())
+
+        fake.confirm = { TwoFactorStage(done = true, enabled = true, emailHint = "n•••@example.org") }
+        model.confirm("123456")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("Done. Codes now go to n•••@example.org.", model.state.value.message!!.text)
     }
 
     @Test
@@ -568,7 +607,7 @@ class TwoFactorSettingsTest {
         val fake = FakeTwoFactor()
         val model = opened(fake)
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
 
         model.resend()
@@ -579,7 +618,7 @@ class TwoFactorSettingsTest {
         model.resend()
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(1, fake.resends)
-        assertTrue(model.state.value.message!!.text.contains("ending in 12"))
+        assertEquals("A new code is on its way to n•••@example.org.", model.state.value.message!!.text)
         assertEquals(60, assertIs<TwoFactorStep.Code>(model.state.value.step).resendWait(now))
     }
 
@@ -594,7 +633,7 @@ class TwoFactorSettingsTest {
         assertEquals(0, fake.cancels, "nothing was started on the server yet")
 
         model.begin(TwoFactorAction.TURN_ON)
-        model.submitStart("pw-123456789012", "+31612345612")
+        model.submitStart("pw-123456789012", "new@example.org")
         dispatcher.scheduler.advanceUntilIdle()
         model.cancel()
         dispatcher.scheduler.advanceUntilIdle()
@@ -607,17 +646,18 @@ class TwoFactorTextTest {
 
     @Test
     fun `the summary says what signing in will ask for`() {
-        val on = TwoFactorOverview(available = true, smsAvailable = true, enabled = true, phoneEnding = "78", recoveryCodesLeft = 10)
-        assertEquals("Signing in asks for a code texted to your phone number ending in 78. 10 recovery codes left.", TwoFactorText.summary(on))
+        val on = TwoFactorOverview(available = true, emailAvailable = true, enabled = true, emailHint = "a•••@example.com", recoveryCodesLeft = 10)
+        assertEquals("Signing in asks for a code sent to a•••@example.com. 10 recovery codes left.", TwoFactorText.summary(on))
         assertTrue(TwoFactorText.summary(on.copy(recoveryCodesLeft = 1)).contains("1 recovery code left. Create new ones soon."))
-        assertTrue(TwoFactorText.summary(on.copy(smsAvailable = false)).contains("sign in with a recovery code"))
+        assertTrue(TwoFactorText.summary(on.copy(emailAvailable = false)).contains("sign in with a recovery code"))
+        assertTrue(TwoFactorText.summary(on.copy(emailHint = null)).contains("no email address to send it to yet"))
     }
 
     @Test
     fun `when it cannot be turned on, the summary says why`() {
         assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = false)).contains("migrate.php"))
-        assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = true, smsAvailable = false)).contains("no text-message service"))
-        assertTrue(TwoFactorText.summary(TwoFactorOverview(available = true, schemaReady = true, smsAvailable = true)).startsWith("Off."))
+        assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = true, emailAvailable = false)).contains("no mail server"))
+        assertTrue(TwoFactorText.summary(TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true)).startsWith("Off."))
     }
 
     @Test
@@ -625,6 +665,7 @@ class TwoFactorTextTest {
         val note = TwoFactorText.codesNote(listOf("aaaa-bbbb", "cccc-dddd"), "alice", "files.example.com")
         assertTrue(note.contains("alice (files.example.com)"))
         assertTrue(note.contains("aaaa-bbbb\ncccc-dddd\n"))
+        assertTrue(note.contains("in place of an emailed code"))
     }
 }
 
@@ -654,7 +695,7 @@ class ApiErrorDetailsTest {
 
     @Test
     fun `a Retry-After header alone is enough`() {
-        val e = ApiError.from(response(503, retryAfter = "60"), """{"error":{"code":"SMS_UNAVAILABLE","message":"Down."}}""")
+        val e = ApiError.from(response(503, retryAfter = "60"), """{"error":{"code":"EMAIL_UNAVAILABLE","message":"Down."}}""")
         assertEquals(60, e.retryAfter)
     }
 

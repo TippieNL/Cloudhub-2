@@ -7,9 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.PersistableBundle
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,11 +16,11 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Sms
-import androidx.compose.material.icons.filled.SmsFailed
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -44,11 +41,11 @@ import kotlinx.coroutines.delay
 import nl.tippie.cloudhub.net.TwoFactorOverview
 
 /**
- * Settings > Two-step verification: on or off, the number codes go to, and
+ * Settings > Two-step verification: on or off, the address codes go to, and
  * the recovery codes -- the same choices as the web app's Security dialog,
  * over the same calls.
  *
- * Each change asks for the current password here and for a texted code from
+ * Each change asks for the current password here and for an emailed code from
  * the server, so a phone left unlocked is not enough to turn it off.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -112,8 +109,8 @@ fun TwoFactorScreen(
             }
 
             Text(
-                "Codes come by text message. That protects your account from a stolen password, but not from " +
-                    "someone who takes over your phone number, so keep your recovery codes somewhere safe.",
+                "Codes come by email. That protects your account from a stolen password, but not from someone " +
+                    "who can read your email, so secure your mailbox too and keep your recovery codes somewhere safe.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 28.dp, vertical = 16.dp),
@@ -144,7 +141,7 @@ private fun StatusCard(ui: TwoFactorUi) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Code by text message", style = MaterialTheme.typography.bodyLarge)
+                Text("Code by email", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(2.dp))
                 Text(
                     when {
@@ -198,9 +195,9 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
     if (!o.enabled) {
         SettingsGroup("Change") {
             SettingsRow(
-                icon = Icons.Default.Sms,
+                icon = Icons.Default.MarkEmailRead,
                 title = "Turn on",
-                supporting = "We text a code to your phone to check the number",
+                supporting = "We email a code to your address to check it",
                 enabled = !busy,
                 onClick = { onBegin(TwoFactorAction.TURN_ON) },
                 trailing = { Chevron() },
@@ -209,12 +206,17 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
         return
     }
     SettingsGroup("Change") {
+        // "Add": on from text-message days, with no address for codes yet.
         SettingsRow(
-            icon = Icons.Default.PhoneAndroid,
-            title = "Change number",
-            supporting = if (o.smsAvailable) "Codes go to a different phone" else "Needs text messages, which this server cannot send now",
-            enabled = !busy && o.smsAvailable,
-            onClick = { onBegin(TwoFactorAction.CHANGE_PHONE) },
+            icon = Icons.Default.AlternateEmail,
+            title = if (o.emailHint != null) "Change email" else "Add email",
+            supporting = when {
+                !o.emailAvailable -> "Needs email, which this server cannot send now"
+                o.emailHint == null -> "Choose the address codes go to"
+                else -> "Codes go to a different address"
+            },
+            enabled = !busy && o.emailAvailable,
+            onClick = { onBegin(TwoFactorAction.CHANGE_EMAIL) },
             trailing = { Chevron() },
         )
         SettingsDivider()
@@ -228,7 +230,7 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
         )
         SettingsDivider()
         SettingsRow(
-            icon = Icons.Default.SmsFailed,
+            icon = Icons.Default.LockOpen,
             title = "Turn off",
             supporting = "Signing in takes your password only",
             tone = RowTone.DANGER,
@@ -238,27 +240,33 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
     }
 }
 
-/** The password, and for a number the number. */
+/** The password, and for an address the address. */
 @Composable
 private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFactorModel) {
-    var phone by remember(step) { mutableStateOf("") }
+    var email by remember(step) { mutableStateOf("") }
     var password by remember(step) { mutableStateOf("") }
-    val wantsPhone = step.action.wire == "phone"
+    val wantsEmail = step.action.wire == "email"
     val first = remember { FocusRequester() }
     LaunchedEffect(step) { runCatching { first.requestFocus() } }
 
     StepCard {
         Text(TwoFactorText.startIntro(step.action, ui.overview), style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(14.dp))
-        if (wantsPhone) {
+        if (wantsEmail) {
             OutlinedTextField(
-                value = phone,
-                onValueChange = { phone = it.take(40) },
-                label = { Text("Mobile number, with country code") },
-                placeholder = { Text("+31 6 12345678") },
+                value = email,
+                // 254: the longest address SMTP allows.
+                onValueChange = { email = it.take(254) },
+                label = { Text("Email address for your codes") },
+                placeholder = { Text("name@example.com") },
                 singleLine = true,
                 enabled = !ui.busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Next),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Email,
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false,
+                    imeAction = ImeAction.Next,
+                ),
                 modifier = Modifier.fillMaxWidth().focusRequester(first),
             )
             Spacer(Modifier.height(10.dp))
@@ -271,8 +279,8 @@ private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFact
             enabled = !ui.busy,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { model.submitStart(password, phone) }),
-            modifier = Modifier.fillMaxWidth().then(if (wantsPhone) Modifier else Modifier.focusRequester(first)),
+            keyboardActions = KeyboardActions(onSend = { model.submitStart(password, email) }),
+            modifier = Modifier.fillMaxWidth().then(if (wantsEmail) Modifier else Modifier.focusRequester(first)),
         )
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -280,7 +288,7 @@ private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFact
                 Text("Cancel")
             }
             Button(
-                onClick = { model.submitStart(password, phone) },
+                onClick = { model.submitStart(password, email) },
                 enabled = !ui.busy,
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             ) {
@@ -288,20 +296,20 @@ private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFact
                 else Text("Send code")
             }
         }
-        // Phone gone: the current phone is answered with a recovery code, and
-        // nothing is texted to it. Not for turning it on -- there is no
-        // current phone yet.
+        // Mailbox out of reach: the current address is answered with a
+        // recovery code, and nothing is sent to it. Not for turning it on --
+        // there is no current address yet.
         if (ui.overview?.enabled == true) {
             TextButton(
-                onClick = { model.submitStart(password, phone, useRecoveryCode = true) },
+                onClick = { model.submitStart(password, email, useRecoveryCode = true) },
                 enabled = !ui.busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-            ) { Text("No access to your phone? Use a recovery code") }
+            ) { Text("No access to your email? Use a recovery code") }
         }
     }
 }
 
-/** The texted code -- or, for the current phone, a recovery code. */
+/** The emailed code -- or, for the current address, a recovery code. */
 @Composable
 private fun CodeStepForm(step: TwoFactorStep.Code, busy: Boolean, model: TwoFactorModel) {
     var code by remember(step.stage.stage, step.recovery) { mutableStateOf("") }
@@ -329,7 +337,7 @@ private fun CodeStepForm(step: TwoFactorStep.Code, busy: Boolean, model: TwoFact
                 code = cleaned
                 if (!wasComplete && CodeInput.complete(cleaned, step.recovery, length)) model.confirm(cleaned)
             },
-            label = { Text(if (step.recovery) "Recovery code" else "Code from the text message") },
+            label = { Text(if (step.recovery) "Recovery code" else "Code from the email") },
             singleLine = true,
             enabled = !busy,
             textStyle = if (step.recovery) LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
@@ -372,7 +380,7 @@ private fun CodeStepForm(step: TwoFactorStep.Code, busy: Boolean, model: TwoFact
                 onClick = model::switchMethod,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-            ) { Text(if (step.recovery) "Use a texted code instead" else "Use a recovery code instead") }
+            ) { Text(if (step.recovery) "Use an emailed code instead" else "Use a recovery code instead") }
         }
     }
 }
@@ -384,7 +392,7 @@ private fun RecoveryCodes(codes: List<String>, onCopy: () -> Unit, onShare: () -
         Text("Save your recovery codes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
         Text(
-            "If you lose your phone, each one signs you in once in place of a texted code. They are not shown again.",
+            "If you lose access to your email, each one signs you in once in place of an emailed code. They are not shown again.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(14.dp))

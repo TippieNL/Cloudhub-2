@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -22,12 +23,10 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
@@ -124,9 +123,9 @@ fun SettingsScreen(
                 // Open to every role for the same reason: securing your own
                 // account is not a write to anyone's files.
                 SettingsRow(
-                    icon = Icons.Default.Sms,
+                    icon = Icons.Default.Email,
                     title = "Two-step verification",
-                    supporting = "A code by text message when you sign in",
+                    supporting = "A code by email when you sign in",
                     onClick = onOpenTwoFactor,
                     trailing = { Chevron() },
                 )

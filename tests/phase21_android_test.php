@@ -417,7 +417,7 @@ $checks['only the username is ever remembered'] =
 $checks['signing out starts the sign-in screen afresh'] =
     substr_count($main, "app.settings.signOut()\n                                signIn.reset()") === 2
     && str_contains($signInVm, 'fun reset()');
-// SMS two-step verification: the code step only ever finishes a sign-in the
+// Two-step verification: the code step only ever finishes a sign-in the
 // server has checked, and recovery codes are kept out of clipboard previews.
 $checks['a right password alone does not sign a two-step account in'] =
     str_contains($signInVm, 'second != null && secondStep != null -> codeStep(second)')

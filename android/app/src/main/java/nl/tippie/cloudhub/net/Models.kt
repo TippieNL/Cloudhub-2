@@ -1,6 +1,5 @@
 package nl.tippie.cloudhub.net
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** One row of a folder listing, matching FileService::entry() exactly. */
@@ -51,7 +50,7 @@ data class AuthStatus(
     val user: User? = null,
     val csrfToken: String = "",
     /**
-     * Set while this session's password was right and its texted code is
+     * Set while this session's password was right and its emailed code is
      * still awaited -- after the app was closed on the code step, say -- so
      * it can carry on there rather than ask for the password again.
      */
@@ -65,7 +64,7 @@ data class LoginResult(
     val csrfToken: String = "",
     /**
      * Set, with success false, when the password was right but the account
-     * uses SMS two-step verification: the session is not signed in until the
+     * uses two-step verification: the session is not signed in until the
      * code is checked (CloudHubApi.verifySignIn).
      */
     val twoFactor: SecondStep? = null,
@@ -75,82 +74,76 @@ data class LoginResult(
 
 /**
  * What the second step of signing in needs, as TwoFactor::signInInfo() on the
- * server describes it. Nothing has been texted yet unless [codeSent] says so:
+ * server describes it. Nothing has been emailed yet unless [codeSent] says so:
  * the code is sent when the app asks for it.
  */
 @Serializable
 data class SecondStep(
-    val method: String = "sms",
-    /** The last two digits of the number the code goes to, e.g. "78". */
-    val phoneEnding: String? = null,
+    /**
+     * The address the code goes to, masked: "k•••@example.com". Null for an
+     * account turned on when codes went by text message, which has none yet.
+     */
+    val emailHint: String? = null,
     val codeLength: Int = 6,
-    /** False when the server cannot text this account: a recovery code is the only way in. */
-    val smsAvailable: Boolean = true,
+    /** False when no code can be emailed to this account: a recovery code is the only way in. */
+    val emailAvailable: Boolean = true,
     val codeSent: Boolean = false,
     /** Seconds before another code may be asked for. */
     val resendIn: Int = 0,
-    /** Seconds the code that was sent keeps working, when one was. */
-    val expiresIn: Int? = null,
 )
 
-/** A code was texted: where to, for how long it works, and when another may be asked for. */
+/** A code was emailed: where to, for how long it works, and when another may be asked for. */
 @Serializable
 data class CodeSent(
-    val sent: Boolean = false,
-    val phoneEnding: String? = null,
+    val emailHint: String? = null,
     val expiresIn: Int? = null,
     val resendIn: Int = 0,
-    val codeLength: Int = 6,
 )
 
 /** GET /api/users/me/two-factor: this account's two-step verification, and what the server can do. */
 @Serializable
 data class TwoFactorOverview(
-    /** The server can text codes and its database is ready, so it can be turned on. */
+    /** The server can email codes and its database is ready, so it can be turned on. */
     val available: Boolean = false,
     val schemaReady: Boolean = true,
-    val smsAvailable: Boolean = false,
+    val emailAvailable: Boolean = false,
     val enabled: Boolean = false,
-    val phoneEnding: String? = null,
-    val enabledAt: String? = null,
+    /** The address codes go to, masked; null while it is off, or on with no address yet. */
+    val emailHint: String? = null,
     val recoveryCodesLeft: Int = 0,
-    val codeLength: Int = 6,
 )
 
 /**
  * One step of a change to two-step verification: the code the server is
  * waiting for, and -- once [done] -- what changed.
  *
- * Turning it on, moving it to a new number, turning it off and new recovery
- * codes are each start -> confirm. Moving to a new number can take two codes,
- * the current phone's first ([stage] "current") and then the new one's
- * ("new"); a confirm that is not [done] is the next of them.
+ * Turning it on, moving it to a new address, turning it off and new recovery
+ * codes are each start -> confirm. Moving to a new address can take two
+ * codes, the current address's first ([stage] "current") and then the new
+ * one's ("new"); a confirm that is not [done] is the next of them.
  */
 @Serializable
 data class TwoFactorStage(
     val done: Boolean = false,
-    /** phone, disable or recovery. */
-    val action: String = "",
-    /** current: the phone codes go to now; new: the number being moved to. */
+    /** current: the address codes go to now; new: the address being moved to. */
     val stage: String = "",
-    val phoneEnding: String? = null,
+    /** The address this step's code went to, masked. */
+    val emailHint: String? = null,
     val codeLength: Int = 6,
-    /** The current phone may be answered with a recovery code instead. Never a new number. */
+    /** The current address may be answered with a recovery code instead. Never a new one. */
     val recoveryAllowed: Boolean = false,
     val sent: Boolean = false,
     val resendIn: Int = 0,
-    val expiresIn: Int? = null,
-    /** The change is under way but its text could not be sent; ask again, or use a recovery code. */
+    /** The change is under way but its email could not be sent; ask again, or use a recovery code. */
     val error: StageProblem? = null,
     /** Once done: whether it is now on. */
     val enabled: Boolean? = null,
     /** Once done, when it was turned on or new ones were asked for. Shown once, never again. */
     val recoveryCodes: List<String>? = null,
-    val recoveryCodesLeft: Int? = null,
 )
 
 @Serializable
-data class StageProblem(val code: String = "", val message: String = "", val retryAfter: Int = 0)
+data class StageProblem(val message: String = "", val retryAfter: Int = 0)
 
 @Serializable
 data class SearchResult(
@@ -188,7 +181,6 @@ data class TrashEntry(
     val isDirectory: Boolean = false,
     val bytes: Long = 0,
     val files: Int = 0,
-    val deletedAt: String = "",
     val deletedBy: String? = null,
 )
 
@@ -274,12 +266,6 @@ data class RelocateResult(
 
 @Serializable
 data class ServerConfigInfo(
-    val readOnly: Boolean = false,
-    val allowDelete: Boolean = true,
-    val allowOverwrite: Boolean = true,
-    val maxUploadMb: Int = 2048,
-    val maxUploadFiles: Int = 20,
-    val chunkMb: Int = 8,
     /*
      * The duplicate finder's limits, and whether it is there at all.
      *
@@ -333,13 +319,10 @@ data class DuplicateScan(
      * scanned. A slice of a real scan omits it, which is why it defaults true.
      */
     val started: Boolean = true,
-    /** Media files walked, and how many shared a size with another. */
+    /** Media files walked. */
     val scanned: Int = 0,
-    val candidates: Int = 0,
-    /** Progress through the candidates, and how many were read rather than
-     *  answered from the server's digest cache. */
+    /** Progress hashing the files that share a size with another: done, of how many. */
     val hashed: Int = 0,
-    val computed: Int = 0,
     val toHash: Int = 0,
     /** True when the walk hit the server's file limit: the result is partial. */
     val truncated: Boolean = false,
@@ -347,8 +330,6 @@ data class DuplicateScan(
     /** Copies that could go: the sum over groups of (count - 1). */
     val duplicateFiles: Int = 0,
     val reclaimable: Long = 0,
-    val startedAt: String? = null,
-    val finishedAt: String? = null,
 )
 
 /** One set of files that are byte-for-byte the same. */

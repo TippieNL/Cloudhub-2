@@ -11,9 +11,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import okhttp3.ResponseBody
-import java.io.InputStream
 
 /**
  * One function per endpoint the app uses.
@@ -94,7 +92,7 @@ class CloudHubApi(
     /**
      * Sign in with a password.
      *
-     * For an account with SMS two-step verification a right password is only
+     * For an account with two-step verification a right password is only
      * half of it: the server answers 401 TWO_FACTOR_REQUIRED, with a fresh
      * session and CSRF token that are not signed in yet. That comes back as a
      * [LoginResult] carrying [LoginResult.twoFactor] rather than as an error,
@@ -123,16 +121,16 @@ class CloudHubApi(
 
     /* ---- the second step of signing in ------------------------------------
      *
-     * For a session whose password was right and whose account wants a texted
-     * code as well. Each acts on that session's waiting sign-in; once it has
+     * For a session whose password was right and whose account wants an
+     * emailed code as well. Each acts on that session's waiting sign-in; once it has
      * lapsed (15 minutes) or been cancelled they answer 401
      * TWO_FACTOR_EXPIRED, which means "enter the password again".
      */
 
-    /** Text a code to the account's phone. Refused for a while after the last one. */
+    /** Email a code to the account's address. Refused for a while after the last one. */
     suspend fun sendSignInCode(): CodeSent = post("/api/auth/two-factor/send", emptyMap()) { decode(it) }
 
-    /** Check the texted code; on success the session is signed in, with a new ID and CSRF token. */
+    /** Check the emailed code; on success the session is signed in, with a new ID and CSRF token. */
     suspend fun verifySignIn(code: String): LoginResult =
         post("/api/auth/two-factor/verify", mapOf("code" to code)) {
             decode<LoginResult>(it).also { r -> client.csrfToken = r.csrfToken }
@@ -150,42 +148,42 @@ class CloudHubApi(
     /* ---- managing two-step verification -----------------------------------
      *
      * The signed-in account's own. Like the password, open to every role, and
-     * every change asks for the current password and a texted code; see
+     * every change asks for the current password and an emailed code; see
      * TwoFactorStage for the shape of a change.
      */
 
     suspend fun twoFactor(): TwoFactorOverview = get("/api/users/me/two-factor") { decode(it) }
 
     /**
-     * Begin a change: "phone" turns it on or moves it to [phone], "disable"
+     * Begin a change: "email" turns it on or moves it to [email], "disable"
      * turns it off, "recovery" replaces the recovery codes. With
-     * [useRecoveryCode] the current phone is answered with a recovery code, so
-     * nothing is texted to it -- for a phone that is lost.
+     * [useRecoveryCode] the current address is answered with a recovery code,
+     * so nothing is sent to it -- for a mailbox that is out of reach.
      */
     suspend fun startTwoFactorChange(
         action: String,
         currentPassword: String,
-        phone: String? = null,
+        email: String? = null,
         useRecoveryCode: Boolean = false,
     ): TwoFactorStage {
         val body = buildMap {
             put("action", action)
             put("currentPassword", currentPassword)
-            if (phone != null) put("phone", phone)
-            put("method", if (useRecoveryCode) "recovery" else "sms")
+            if (email != null) put("email", email)
+            put("method", if (useRecoveryCode) "recovery" else "email")
         }
         return post("/api/users/me/two-factor/start", body) { decode(it) }
     }
 
-    /** Text the code for the change under way again. */
+    /** Email the code for the change under way again. */
     suspend fun resendTwoFactorCode(): TwoFactorStage =
         post("/api/users/me/two-factor/resend", emptyMap()) { decode(it) }
 
-    /** Answer the step the change is at with a texted code. */
+    /** Answer the step the change is at with an emailed code. */
     suspend fun confirmTwoFactorChange(code: String): TwoFactorStage =
         post("/api/users/me/two-factor/confirm", mapOf("code" to code)) { decode(it) }
 
-    /** Answer the current phone's step with a recovery code instead. */
+    /** Answer the current address's step with a recovery code instead. */
     suspend fun confirmTwoFactorChangeWithRecoveryCode(recoveryCode: String): TwoFactorStage =
         post("/api/users/me/two-factor/confirm", mapOf("recoveryCode" to recoveryCode)) { decode(it) }
 
@@ -329,9 +327,6 @@ class CloudHubApi(
              "name":${str(name)},"size":$size,"conflict":"rename"}
         """.trimIndent()) { decode(it) }
 
-    suspend fun uploadStatus(id: String): UploadStatus =
-        get("/api/uploads/status", "id" to id) { decode(it) }
-
     /**
      * Send one chunk from the given offset.
      *
@@ -351,9 +346,6 @@ class CloudHubApi(
 
     suspend fun uploadComplete(id: String): UploadComplete =
         post("/api/uploads/complete", mapOf("id" to id)) { decode(it) }
-
-    suspend fun uploadCancel(id: String): SimpleResult =
-        request("/api/uploads/cancel", "DELETE", """{"id":${str(id)}}""") { decode(it) }
 
     /* ---- raw bytes --------------------------------------------------------- */
 

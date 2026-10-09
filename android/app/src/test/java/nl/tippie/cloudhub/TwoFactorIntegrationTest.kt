@@ -3,6 +3,7 @@ package nl.tippie.cloudhub
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import nl.tippie.cloudhub.net.ApiError
@@ -28,21 +29,24 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 
 /**
- * SMS two-step verification against a real, running CloudHub: the app's
- * calls end to end, codes and all.
+ * Two-step verification against a real, running CloudHub: the app's calls
+ * end to end, codes and all.
  *
- * Needs a server that "texts" into its development outbox, and that file:
+ * Needs a server that sends its email to the stand-in SMTP server in
+ * tests/http/smtp_sink.php, and the folder that one records the mail in:
  *
- *     APP_ENV=development SMS_DRIVER=log php -S 127.0.0.1:8901 -t public router.php
+ *     php tests/http/smtp_sink.php 8902 /tmp/cloudhub-mail &
+ *     SMTP_HOST=127.0.0.1 SMTP_PORT=8902 SMTP_ENCRYPTION=none \
+ *       MAIL_FROM_ADDRESS=codes@cloudhub.test php -S 127.0.0.1:8901 -t public router.php
  *     CLOUDHUB_TEST_2FA_URL=http://127.0.0.1:8901 \
- *     CLOUDHUB_TEST_SMS_OUTBOX=$PWD/logs/sms-outbox.log gradle test
+ *     CLOUDHUB_TEST_MAIL_DIR=/tmp/cloudhub-mail gradle test
  *
  * Without both it skips, like ApiIntegrationTest without CLOUDHUB_TEST_URL.
  * It signs in as the administrator (CLOUDHUB_TEST_USER/PASS) only to create
  * an account of its own and to delete it afterwards: turning two-step
  * verification on for a shared account would lock the other tests out of it.
- * Each run uses a fresh number, so the server's per-number limit starts
- * empty; its per-address limit (TWO_FACTOR_SMS_IP_PER_HOUR, 20) is what
+ * Each run uses a fresh address, so the server's per-address limit starts
+ * empty; its per-client limit (TWO_FACTOR_EMAIL_IP_PER_HOUR, 20) is what
  * stops many runs in an hour.
  */
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
@@ -50,16 +54,17 @@ class TwoFactorIntegrationTest {
 
     companion object {
         private val baseUrl: String? = System.getenv("CLOUDHUB_TEST_2FA_URL")
-        private val outbox: File? = System.getenv("CLOUDHUB_TEST_SMS_OUTBOX")?.let(::File)
+        private val mailbox: File? = System.getenv("CLOUDHUB_TEST_MAIL_DIR")?.let { File(it, "received.jsonl") }
         private val adminUser = System.getenv("CLOUDHUB_TEST_USER") ?: "admin"
         private val adminPass = System.getenv("CLOUDHUB_TEST_PASS") ?: "smoke-test-pass-123"
 
         private val stamp = System.currentTimeMillis().toString().takeLast(8)
         private val username = "app2fa_$stamp"
         private const val PASSWORD = "app-2fa-pass-123456"
-        /** A number of our own each run: +3197 is a Dutch range for machine numbers, never a person's phone. */
-        private val phone = "+3197" + (10_000_000 + (System.nanoTime() % 89_999_999).let { if (it < 0) -it else it })
-        private val ending = phone.takeLast(2)
+        /** An address of our own each run, at a domain reserved for examples: nobody's mailbox. */
+        private val email = "app2fa.$stamp@example.org"
+        /** How the server shows it: the first letter and the domain. */
+        private val hint = "a•••@example.org"
 
         private lateinit var admin: Pair<CloudHubApi, CloudHubClient>
         private var userId = 0
@@ -94,7 +99,7 @@ class TwoFactorIntegrationTest {
         @BeforeClass
         @JvmStatic
         fun setUp() {
-            if (baseUrl == null || outbox == null) return
+            if (baseUrl == null || mailbox == null) return
             admin = newApi()
             runBlocking {
                 assertTrue(admin.first.login(adminUser, adminPass).success, "the administrator could not sign in")
@@ -111,17 +116,21 @@ class TwoFactorIntegrationTest {
             if (ready && userId > 0) runCatching { adminCall("DELETE", "/api/users/$userId", "{}") }
         }
 
-        /** The newest code the outbox holds for our number. */
+        /** The newest code the stand-in SMTP server took for our address. */
         private fun latestCode(): String {
-            val line = outbox!!.readLines().lastOrNull { it.contains("to ••$ending: ") }
-                ?: fail("nothing in ${outbox.path} for ••$ending")
-            return Regex("""to ••\d\d: (\d{6}) """).find(line)?.groupValues?.get(1)
-                ?: fail("no code in: $line")
+            val mail = mailbox!!.readLines()
+                .map { Json.parseToJsonElement(it).jsonObject }
+                .lastOrNull { m -> m["to"]?.jsonArray?.any { it.jsonPrimitive.content == email } == true }
+                ?: fail("nothing in ${mailbox.path} for $email")
+            // Quoted-printable: undo the soft line breaks; the code line is plain digits.
+            val data = mail["data"]!!.jsonPrimitive.content.replace("=\r\n", "")
+            return Regex("""\r\n {4}(\d{6})\r\n""").find(data)?.groupValues?.get(1)
+                ?: fail("no code in the email")
         }
     }
 
     private fun requireServer() {
-        assumeTrue("set CLOUDHUB_TEST_2FA_URL and CLOUDHUB_TEST_SMS_OUTBOX to run the two-step tests", baseUrl != null && outbox != null)
+        assumeTrue("set CLOUDHUB_TEST_2FA_URL and CLOUDHUB_TEST_MAIL_DIR to run the two-step tests", baseUrl != null && mailbox != null)
         assertTrue(ready, "set-up failed")
     }
 
@@ -142,22 +151,23 @@ class TwoFactorIntegrationTest {
         assertTrue(result.success)
         assertNull(result.twoFactor)
         val overview = api.twoFactor()
-        assertTrue(overview.available, "the server must be able to text: SMS_DRIVER=log with APP_ENV=development")
+        assertTrue(overview.available, "the server must be able to email: SMTP_HOST pointing at the stand-in")
         assertFalse(overview.enabled)
     }
 
-    @Test fun `02 turning it on takes the password and the new number's code`() = runBlocking<Unit> {
+    @Test fun `02 turning it on takes the password and the new address's code`() = runBlocking<Unit> {
         requireServer()
         val (api, _) = newApi()
         api.login(username, PASSWORD)
 
-        expectRefusal("FORBIDDEN") { api.startTwoFactorChange("phone", "not-the-password-1", phone) }
+        expectRefusal("FORBIDDEN") { api.startTwoFactorChange("email", "not-the-password-1", email) }
+        expectRefusal("VALIDATION_FAILED") { api.startTwoFactorChange("email", PASSWORD, "not an address") }
 
-        val stage = api.startTwoFactorChange("phone", PASSWORD, phone)
+        val stage = api.startTwoFactorChange("email", PASSWORD, email)
         assertEquals("new", stage.stage)
         assertTrue(stage.sent)
-        assertEquals(ending, stage.phoneEnding)
-        assertFalse(stage.recoveryAllowed, "a new number is proven by its own code only")
+        assertEquals(hint, stage.emailHint)
+        assertFalse(stage.recoveryAllowed, "a new address is proven by its own code only")
 
         val wrong = expectRefusal("TWO_FACTOR_CODE_INVALID") { api.confirmTwoFactorChange(if (latestCode() == "000000") "111111" else "000000") }
         assertNotNull(wrong.attemptsLeft)
@@ -170,7 +180,7 @@ class TwoFactorIntegrationTest {
 
         val overview = api.twoFactor()
         assertTrue(overview.enabled)
-        assertEquals(ending, overview.phoneEnding)
+        assertEquals(hint, overview.emailHint)
         assertEquals(10, overview.recoveryCodesLeft)
     }
 
@@ -181,10 +191,10 @@ class TwoFactorIntegrationTest {
 
         assertFalse(result.success)
         val second = assertNotNull(result.twoFactor)
-        assertEquals(ending, second.phoneEnding)
+        assertEquals(hint, second.emailHint)
         assertEquals(6, second.codeLength)
-        assertTrue(second.smsAvailable)
-        assertFalse(second.codeSent, "nothing is texted until the app asks")
+        assertTrue(second.emailAvailable)
+        assertFalse(second.codeSent, "nothing is emailed until the app asks")
         assertTrue(client.csrfToken.isNotEmpty(), "the code step needs the new session's token")
 
         // Not signed in: files are refused, and the status says a code is awaited.
@@ -197,14 +207,14 @@ class TwoFactorIntegrationTest {
         expectRefusal("UNAUTHORIZED") { newApi().first.login(username, "not-the-password-1") }
     }
 
-    @Test fun `04 the texted code signs in`() = runBlocking<Unit> {
+    @Test fun `04 the emailed code signs in`() = runBlocking<Unit> {
         requireServer()
         val (api, _) = newApi()
         api.login(username, PASSWORD)
 
         val sent = api.sendSignInCode()
-        assertTrue(sent.sent)
-        assertEquals(ending, sent.phoneEnding)
+        assertEquals(hint, sent.emailHint)
+        assertEquals(300, sent.expiresIn)
         assertTrue(sent.resendIn > 0)
         // Asking again at once is refused, with how long to wait.
         val wait = expectRefusal("TWO_FACTOR_RESEND_COOLDOWN") { api.sendSignInCode() }
@@ -249,7 +259,7 @@ class TwoFactorIntegrationTest {
         assertNull(api.status().twoFactor)
     }
 
-    @Test fun `07 turning it off takes the current phone's code`() = runBlocking<Unit> {
+    @Test fun `07 turning it off takes the current address's code`() = runBlocking<Unit> {
         requireServer()
         val api = signedIn ?: fail("test 04 did not sign in")
         val stage = api.startTwoFactorChange("disable", PASSWORD)

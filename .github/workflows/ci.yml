@@ -66,8 +66,10 @@ jobs:
       - name: API over HTTP
         run: php tests/http/run.php
 
-      # SMS two-step verification, end to end: it starts its own servers and a
-      # stand-in SMS gateway, and creates and removes its own accounts.
+      # Two-step verification by email, end to end: it starts its own servers
+      # and stand-in SMTP servers (one speaking STARTTLS with a certificate
+      # from a CA it makes for the run), and creates and removes its own
+      # accounts.
       - name: Two-step verification over HTTP
         run: php tests/http/two_factor_run.php
 
@@ -114,12 +116,15 @@ jobs:
       # Backgrounded so the JVM tests have something to talk to. Without
       # CLOUDHUB_TEST_URL the live API tests skip, and skipping them here
       # would defeat the point of running them at all. The second server is
-      # for the two-step verification tests: it "texts" into the development
-      # outbox, which they read the codes from.
+      # for the two-step verification tests: it emails its codes to the
+      # stand-in SMTP server, which records them where the tests read them.
       - name: Serve
         run: |
           php -S 127.0.0.1:8900 -t public router.php > /tmp/cloudhub-server.log 2>&1 &
-          APP_ENV=development SMS_DRIVER=log TWO_FACTOR_SECRET="$(openssl rand -hex 32)" \
+          mkdir -p /tmp/cloudhub-mail
+          php tests/http/smtp_sink.php 8902 /tmp/cloudhub-mail > /tmp/cloudhub-mail.log 2>&1 &
+          SMTP_HOST=127.0.0.1 SMTP_PORT=8902 SMTP_ENCRYPTION=none MAIL_FROM_ADDRESS=codes@cloudhub.test \
+          TWO_FACTOR_SECRET="$(openssl rand -hex 32)" \
             php -S 127.0.0.1:8901 -t public router.php > /tmp/cloudhub-2fa-server.log 2>&1 &
           for port in 8900 8901; do
             up=0
@@ -135,7 +140,7 @@ jobs:
         env:
           CLOUDHUB_TEST_URL: http://127.0.0.1:8900
           CLOUDHUB_TEST_2FA_URL: http://127.0.0.1:8901
-          CLOUDHUB_TEST_SMS_OUTBOX: ${{ github.workspace }}/logs/sms-outbox.log
+          CLOUDHUB_TEST_MAIL_DIR: /tmp/cloudhub-mail
         run: gradle :app:testReleaseUnitTest --no-daemon
 
       - name: Test report

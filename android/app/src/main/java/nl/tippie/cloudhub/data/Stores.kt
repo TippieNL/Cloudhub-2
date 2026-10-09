@@ -8,7 +8,6 @@ import nl.tippie.cloudhub.net.CookieStore
 import nl.tippie.cloudhub.net.PinnedCertificates
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import java.io.File
 
 /**
  * Small, boring persistence.
@@ -108,8 +107,6 @@ class Settings(context: Context) {
     }
 
     fun signOut() = prefs.edit().remove("cookies").apply()
-
-    fun forgetServer() = prefs.edit().clear().apply()
 
     internal fun readCookies(): String? = prefs.getString("cookies", null)
     internal fun writeCookies(value: String) = prefs.edit().putString("cookies", value).apply()
