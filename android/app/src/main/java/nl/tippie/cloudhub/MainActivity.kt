@@ -53,6 +53,7 @@ private sealed interface Screen {
     data object Duplicates : Screen { override val key = "duplicates" }
     data object Favorites : Screen { override val key = "favorites" }
     data object SettingsScreen : Screen { override val key = "settingsscreen" }
+    data object TwoFactor : Screen { override val key = "twofactor" }
     data class Images(val images: List<FileEntry>, val index: Int) : Screen {
         override val key get() = "images"
     }
@@ -155,6 +156,13 @@ class MainActivity : ComponentActivity() {
                         override fun <T : ViewModel> create(modelClass: Class<T>) = SignInViewModel(app.api) as T
                     },
                 )
+                val twoFactor: TwoFactorModel = viewModel(
+                    key = "two-factor",
+                    factory = object : ViewModelProvider.Factory {
+                        @Suppress("UNCHECKED_CAST")
+                        override fun <T : ViewModel> create(modelClass: Class<T>) = TwoFactorModel(app.api) as T
+                    },
+                )
 
                 /*
                  * Where the app is, and how it got there.
@@ -219,15 +227,33 @@ class MainActivity : ComponentActivity() {
                 // Resolved from Restoring rather than from SignIn: rendering
                 // the sign-in screen first meant a launch that was already
                 // signed in flashed a half-animated login form on its way past.
+                //
+                // A session whose password was right and whose texted code is
+                // still awaited -- the app was closed while the code was being
+                // fetched from the messages app -- carries on at the code.
                 LaunchedEffect(Unit) {
                     if (screen is Screen.Restoring) {
-                        val ok = runCatching { withContext(Dispatchers.IO) { app.api.status() }.authenticated }
-                            .getOrDefault(false)
-                        if (ok) { reset(Screen.Files); model.start() } else reset(Screen.SignIn)
+                        val status = runCatching { withContext(Dispatchers.IO) { app.api.status() } }.getOrNull()
+                        val waiting = status?.twoFactor
+                        if (status?.authenticated == true) { reset(Screen.Files); model.start() }
+                        else if (waiting != null) { signIn.resume(waiting); reset(Screen.SignIn) }
+                        else reset(Screen.SignIn)
                     }
                 }
 
                 LaunchedEffect(state.path) { uploadTarget = state.path }
+
+                // The session ended under the app (see FilesState.signedOut):
+                // back to sign-in, which asks for the code too if the account
+                // now wants one, instead of a file list that cannot load.
+                LaunchedEffect(state.signedOut) {
+                    if (state.signedOut && screen !is Screen.SignIn && screen !is Screen.Setup) {
+                        app.settings.signOut()
+                        signIn.reset()
+                        reset(Screen.SignIn)
+                        Toast.makeText(this@MainActivity, "Your session ended. Sign in again.", Toast.LENGTH_LONG).show()
+                    }
+                }
 
                 /*
                  * One handler for the whole app, consulted before Android's
@@ -298,7 +324,7 @@ class MainActivity : ComponentActivity() {
                         api = app.api,
                         initial = app.settings.serverUrl,
                         onTrust = { app.pins.trust(it) },
-                        onReady = { app.useServer(it); reset(Screen.SignIn) },
+                        onReady = { app.useServer(it); signIn.reset(); reset(Screen.SignIn) },
                     )
 
                     is Screen.Restoring -> RestoringScreen()
@@ -309,6 +335,9 @@ class MainActivity : ComponentActivity() {
                         rememberedUsername = app.settings.rememberedUsername,
                         onSignedIn = { username, remember ->
                             app.settings.rememberedUsername = if (remember) username else null
+                            signIn.takeRecoveryNotice()?.let {
+                                Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show()
+                            }
                             reset(Screen.Files)
                             model.start()
                             UploadWorker.enqueue(this@MainActivity)
@@ -329,6 +358,7 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
+                                signIn.reset()
                                 reset(Screen.SignIn)
                             }
                         },
@@ -391,13 +421,22 @@ class MainActivity : ComponentActivity() {
                         onChangeServer = { go(Screen.Setup) },
                         onOpenStorage = { go(Screen.Storage) },
                         onOpenDuplicates = { go(Screen.Duplicates) },
+                        onOpenTwoFactor = { go(Screen.TwoFactor) },
                         onSignOut = {
                             lifecycleScope.launch {
                                 runCatching { withContext(Dispatchers.IO) { app.api.logout() } }
                                 app.settings.signOut()
+                                signIn.reset()
                                 reset(Screen.SignIn)
                             }
                         },
+                        onBack = { back() },
+                    )
+
+                    is Screen.TwoFactor -> TwoFactorScreen(
+                        model = twoFactor,
+                        username = state.user?.username,
+                        server = displayServer(app.api.baseUrl),
                         onBack = { back() },
                     )
 

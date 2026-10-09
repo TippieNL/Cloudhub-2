@@ -192,8 +192,9 @@ and serving the files beside it would quietly widen what was shared.
 Two suites, and both run on every push (`.github/workflows/ci.yml`):
 
 ```bash
-php tests/run.php        # 36 scripts pinning decisions in the source
-php tests/http/run.php   # the API, over real HTTP against a real database
+php tests/run.php                 # scripts pinning decisions in the source
+php tests/http/run.php            # the API, over real HTTP against a real database
+php tests/http/two_factor_run.php # SMS two-step verification, the same way
 ```
 
 The first is plain PHP check scripts — no framework or Composer install is
@@ -209,11 +210,17 @@ byte-range fetch, share links created, reused and revoked, versions kept and
 restored, trash and restore, and a viewer being refused a write. This one does
 need a migrated database and an admin account, which the workflow sets up.
 
+The third does the same for two-step verification (see **Two-step verification
+(SMS)**): it starts its own CloudHub servers and a stand-in SMS gateway, reads
+the codes the gateway is handed, creates its own accounts and removes them when
+it is done.
+
 CI brings a MariaDB service container rather than a lighter stand-in: the
 schema is MySQL-specific throughout — `information_schema` probes,
 `ENGINE=InnoDB`, `ENUM`, prefix indexes — and testing a dialect nobody deploys
 would prove very little. The Android job runs the JVM tests against that same
-server, so the 13 live API tests run instead of skipping.
+database, so the live API tests run instead of skipping -- the two-step ones
+against a second server that "texts" into its development outbox.
 
 ## Required PHP extensions
 
@@ -290,6 +297,159 @@ where available, and gives the account the `admin` role. Run it again with the
 same username to reset that password. A role can be passed as a second
 argument — `php tools/create-admin.php alice editor` — which is how non-admin
 accounts were created before the Users screen existed.
+
+## Two-step verification (SMS)
+
+Any account can add a second step to signing in: after the password, a
+six-digit code texted to the owner's phone. It is off for every account until
+its owner turns it on, and nothing about signing in changes for accounts that
+leave it off. SECURITY.md has the threat model and what SMS does not protect
+against.
+
+**For a person.** **Security** → **Two-step verification** → **Turn on**: enter
+a mobile number in international format (`+31 6 12345678`; `0031…` and the
+`(0)` printed on business cards are understood, a local `06…` is not, because
+guessing a country sends a code to a stranger) and the current password; type
+the code that arrives. Ten recovery codes are then shown once — copy or
+download them. From then on signing in asks for the code; **Use a recovery
+code instead** is the way in without the phone. The same panel changes the
+number, turns it off and makes new recovery codes.
+
+| Change | Asks for |
+|---|---|
+| Turn on | password + code texted to the new number |
+| Change number | password + code texted to the new number, and first a code from the current phone (or a recovery code) unless this session proved it in the last 10 minutes — signing in counts |
+| Turn off | password + code from the current phone, or a recovery code |
+| New recovery codes | password + code from the current phone, or a recovery code |
+
+The old number is texted when the number changes or two-step verification is
+turned off, so a change nobody asked for does not go unnoticed.
+
+**Lost phone.** Sign in with a recovery code, then **Change number**: having
+just signed in, only the new number's code is asked for. Without recovery codes
+either, an administrator resets it from the **Users** screen (**Reset
+two-step**, which asks for the administrator's own password, is audited, and
+texts the owner's phone); the account then signs in with its password until its
+owner turns it on again. An administrator cannot reset their own this way — it
+would bypass the phone — so for the only administrator, the server's operator
+runs:
+
+```bash
+php tools/reset-two-factor.php <username>
+```
+
+**Codes and limits.** Codes are six digits from `random_int()`, stored only as
+an HMAC under `TWO_FACTOR_SECRET`, single-use, and valid for
+`TWO_FACTOR_CODE_TTL_SECONDS`. Each survives `TWO_FACTOR_MAX_ATTEMPTS` wrong
+guesses; asking for another replaces it and waits `TWO_FACTOR_RESEND_SECONDS`.
+Per hour, at most `TWO_FACTOR_SMS_PER_HOUR` texts go to one account and to one
+number, `TWO_FACTOR_SMS_IP_PER_HOUR` from one address, and after
+`TWO_FACTOR_FAILURES_PER_HOUR` wrong codes (or recovery codes) for one account
+— `TWO_FACTOR_IP_FAILURES_PER_HOUR` from one address — verification is refused
+until the hour has passed. Recovery codes are 16 characters (79 random bits),
+stored as SHA-256, and each works once.
+
+**Sessions.** A correct password for such an account gives the session a new
+ID and CSRF token and remembers which account is waiting — but no signed-in
+user, so every route, WebDAV included, answers it `401` exactly as it answers
+someone signed out. Only the code signs it in, with another new ID. The wait
+lasts 15 minutes. When an account turns two-step verification on, its other
+sessions that only ever proved the password — another browser, or the Android
+app — are signed out within a minute; the session that turned it on carries on.
+
+**What the server needs.**
+
+1. `php database/migrate.php` — adds two nullable columns to `users`, the
+   tables `two_factor_challenges` and `two_factor_recovery_codes`, and new
+   values to `login_attempts.scope`. Nothing is dropped or rewritten, and every
+   account starts with it off. Until it has run, sign-in works exactly as
+   before and the settings panel says the database needs updating. Without a
+   PHP command line (phpMyAdmin or Adminer only), run
+   `database/migrations/20261009_two_factor.sql` against the CloudHub database
+   instead: the same changes as plain SQL, and safe to run again.
+2. An SMS gateway in `.env` (examples in `.env.example`):
+
+   | Setting | |
+   |---|---|
+   | `SMS_DRIVER` | `twilio`, `webhook`, or `log` (development only); empty: nobody can turn two-step verification on |
+   | `SMS_FROM` | sender number (E.164) or alphanumeric sender ID |
+   | `SMS_APP_NAME` | the name in each message (default `CloudHub`) |
+   | `SMS_TIMEOUT_SECONDS` | how long to wait for the gateway (default 10) |
+   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | for `twilio`; `TWILIO_MESSAGING_SERVICE_SID` may replace `SMS_FROM` |
+   | `SMS_WEBHOOK_URL`, `SMS_WEBHOOK_TOKEN` | for `webhook` |
+   | `TWO_FACTOR_SECRET` | 32+ random bytes, hex: `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` |
+
+   **Twilio**: create an account, get a sending number (or a messaging
+   service), allow the destination countries in Twilio's SMS geographic
+   permissions, then set `SMS_DRIVER=twilio`, the account SID, the auth token
+   and `SMS_FROM`. Messages go out with one HTTPS POST; no SDK is needed.
+
+   **Webhook**: anything that takes `POST {"to", "from", "message"}` as JSON
+   with an optional `Authorization: Bearer <SMS_WEBHOOK_TOKEN>`, and answers
+   2xx when it accepted the message (400/422: the number was refused; anything
+   else: unavailable). That fronts a provider there is no driver for. Plain
+   `http://` is accepted only for this machine or a private network address.
+
+   **An Android phone with a SIM** sends the texts for free with an SMS
+   gateway app — on the phone CloudHub runs on, if it has a SIM, or any phone
+   on the same network. `SMS_WEBHOOK_FORMAT` speaks the two common apps'
+   own APIs:
+
+   | App | In the app | `.env` |
+   |---|---|---|
+   | Traccar SMS Gateway | enable the HTTP API; note the address (port 8082) and the API key | `SMS_DRIVER=webhook`<br>`SMS_WEBHOOK_FORMAT=traccar`<br>`SMS_WEBHOOK_URL=http://<phone-ip>:8082/`<br>`SMS_WEBHOOK_TOKEN=<API key>` |
+   | SMS Gateway for Android ([sms-gate.app](https://sms-gate.app)) | start the Local Server; note the address (port 8080) and the username and password | `SMS_DRIVER=webhook`<br>`SMS_WEBHOOK_FORMAT=smsgate`<br>`SMS_WEBHOOK_URL=http://<phone-ip>:8080/message`<br>`SMS_WEBHOOK_TOKEN=<username>:<password>` |
+
+   Use `127.0.0.1` as `<phone-ip>` when the app runs on the same phone as
+   CloudHub; otherwise give that phone a fixed address on the network. Let the
+   app run in the background (exempt it from battery optimisation), and mind
+   that the texts are paid for by that SIM's plan. Both formats are built to
+   the apps' published APIs and tested against stand-ins as strict as the
+   apps (Traccar's refuses a `Bearer` prefix and any extra field).
+
+   **Development**: `SMS_DRIVER=log` with `APP_ENV=development` writes each
+   message, code included, to `logs/sms-outbox.log` instead of sending it. With
+   any other `APP_ENV` it is refused and texts are off.
+
+   A driver that is named but cannot work — missing credentials, the outbox in
+   production, a plain-HTTP webhook to the internet, a gateway app's format
+   without its key — is logged once to PHP's error log, as `[sms] …` naming
+   the setting at fault, and treated as no gateway: the app and the web page
+   then say *"no text-message service is set up on this server"*. That never opens a way round
+   the code: accounts that have it on can then only finish signing in with a
+   recovery code. The same holds when the gateway is down or slow; the person
+   is told the text could not be sent and can try again or use a recovery code.
+
+**API.** The web app uses these; another client can too.
+
+| Route | |
+|---|---|
+| `POST /api/auth/login` | unchanged for accounts without it. For one with it: `401` `TWO_FACTOR_REQUIRED`, with `twoFactor` (`phoneEnding`, `codeLength`, `smsAvailable`, `codeSent`, `resendIn`, `expiresIn`) and a fresh `csrfToken`. No text is sent yet |
+| `POST /api/auth/two-factor/send` | text a code; `429` with `Retry-After` while waiting, `503` when no text can be sent |
+| `POST /api/auth/two-factor/verify` | `{"code"}` or `{"recoveryCode"}`; the usual sign-in answer on success |
+| `POST /api/auth/two-factor/cancel` | give up the sign-in |
+| `GET /api/auth/status` | also carries `twoFactor` while a sign-in waits for its code |
+| `GET /api/users/me/two-factor` | the caller's settings: `enabled`, `phoneEnding`, `recoveryCodesLeft`, `available`, … |
+| `POST /api/users/me/two-factor/start` | `{"action": "phone" \| "disable" \| "recovery", "currentPassword", "phone"?, "method"?: "recovery"}` |
+| `POST /api/users/me/two-factor/confirm` | `{"code"}`, or `{"recoveryCode"}` for the current phone; a change of number may answer `"done": false` and ask for the new number's code next |
+| `POST /api/users/me/two-factor/resend`, `…/cancel` | |
+| `DELETE /api/users/{id}/two-factor` | administrator reset, `{"currentPassword"}` |
+
+The `/api/auth/two-factor/*` routes check CSRF themselves; the others sit behind
+the same guard as every other route. Refusals carry stable codes —
+`TWO_FACTOR_CODE_INVALID` (with `attemptsLeft`), `TWO_FACTOR_CODE_EXPIRED`,
+`TWO_FACTOR_LOCKED`, `TWO_FACTOR_RESEND_COOLDOWN`, `SMS_UNAVAILABLE`, … — and
+answers name at most a number's last two digits. The Users list
+(`GET /api/users`) gains `twoFactorEnabled`, never a number.
+
+**The Android app** asks for the code too, from version 4.3: after a right
+password it texts the code, takes it (or a recovery code), and keeps the same
+limits and countdowns as the web app; **Settings** → **Two-step verification**
+turns it on and off, changes the number and makes new recovery codes. See
+*Android app* → *Two-step verification*. Version 4.2 and earlier show the
+server's message — *"This account uses two-step verification…"* — instead of
+signing in, and cost no text message: an account that turns this on needs the
+web app or 4.3.
 
 ## Installing as an app
 
@@ -442,6 +602,39 @@ different server**, which is the only route back to the address screen.
 Launching with a session that is still good no longer flashes the login form:
 the app shows the mark while it asks the server, then goes where the answer
 says.
+
+A session the server has ended — timed out, the account disabled, or two-step
+verification turned on from another device — returns to this screen with
+*"Your session ended"*, rather than leaving a file list that cannot load.
+
+### Two-step verification
+
+For an account with SMS two-step verification (see **Two-step verification
+(SMS)**) a right password turns the card into the code step: the code is texted
+as it opens, the number pad comes up, and the sixth digit checks it — **Verify**
+is there for anyone who expects a button. **Send a new code** counts down the
+server's wait; **Use a recovery code instead** takes one of the saved codes;
+Back, or **Back to sign in**, returns to the password and makes the code that
+was sent stop working. A wrong code shakes the card, empties the field and says
+how many tries are left; a sign-in that waited too long (15 minutes) goes back
+to the password. If the app is closed while the code is fetched from the
+messages app, it reopens on the code step, with the code already sent still
+good. Nothing is signed in until the server has checked the code.
+
+**Settings** → **Two-step verification** shows whether it is on, and turns it
+on, changes the number, makes new recovery codes and turns it off — each with
+the current password and a texted code, the same as the web app's **Security**
+panel. New recovery codes are shown once, numbered, with **Copy** (marked
+sensitive, so Android 13 and later keep them out of clipboard previews) and
+**Share** (to a password manager or a note); leaving without saving them asks
+first. **No access to your phone?** answers the current phone with a recovery
+code.
+
+The app does not read the text message itself. Where the phone offers it, the
+keyboard's suggestion of the newest code or the messages app's **Copy code**
+fills the field; otherwise it is typed. Reading the message directly would need
+Google Play services (the SMS Retriever API), which a self-hosted app should
+not depend on.
 
 ### Settings and Storage
 
@@ -924,6 +1117,20 @@ one and resuming it from the server's offset — plus download, rename, move,
 copy, search, trash and restore, and share create and revoke. Without
 `CLOUDHUB_TEST_URL` they skip, so an ordinary build stays green.
 
+Two-step verification has live tests of its own, against a server that writes
+its text messages to the development outbox rather than sending them:
+
+    APP_ENV=development SMS_DRIVER=log php -S 127.0.0.1:8901 -t public router.php &
+    cd android && CLOUDHUB_TEST_2FA_URL=http://127.0.0.1:8901 \
+        CLOUDHUB_TEST_SMS_OUTBOX=$PWD/../logs/sms-outbox.log gradle test
+
+They create an account of their own (as `CLOUDHUB_TEST_USER`, an
+administrator), turn it on with the code from the outbox, sign in with a texted
+code and with a recovery code, refuse a wrong code and a spent one, give up a
+waiting sign-in, turn it off, and delete the account. The code step and the
+settings screen are also state machines tested without a server: the countdown,
+the double-submission guard, the refusals and where each one leads.
+
 Decisions that are awkward to reach by hand are pure functions or plain state
 machines, tested without a server or a device: whether a saved position is
 worth resuming, whether there is room to stage a file before the copy begins,
@@ -944,7 +1151,11 @@ a phone.
 `android/keystore.jks` and `android/keystore.properties` are generated on first
 build and are **gitignored** — a committed keystore is a published signing key.
 Back them up: the package id is unchanged from the WebView build, so the native
-app installs as an update, but only while it is signed by the same key.
+app installs as an update, but only while it is signed by the same key. An APK
+signed with a different key is refused as an update ("App not installed"); it
+installs only after the old app is uninstalled, which clears what the app keeps
+on the phone — the server address, the remembered username, saved video
+positions, queued uploads — and nothing on the server.
 
 ## Working offline
 
@@ -1120,8 +1331,9 @@ Favorites page reports an error.
 
 Administrators manage accounts from the **Users** screen: create and delete
 them, set the role, enable and disable them, and reset a password. Every
-signed-in user can change their own password from the **Password** button,
-which requires their current one.
+signed-in user can change their own password from **Security** → **Change
+password**, which requires their current one. (The header button was called
+**Password** before two-step verification gave it a second section.)
 
 | Role | Can |
 |---|---|

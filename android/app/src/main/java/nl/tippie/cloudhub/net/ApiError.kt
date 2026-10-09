@@ -2,6 +2,9 @@ package nl.tippie.cloudhub.net
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Response
 
 /**
@@ -18,6 +21,14 @@ class ApiError(
     val code: String,
     message: String,
     val requestId: String? = null,
+    /**
+     * Seconds before trying again is worth it: a code asked for too soon, too
+     * many wrong codes, a gateway that is down. From the refusal's details,
+     * or its Retry-After header.
+     */
+    val retryAfter: Int? = null,
+    /** Wrong codes the code that was just refused can still take. */
+    val attemptsLeft: Int? = null,
 ) : Exception(message) {
 
     /** True when signing in again is what the caller should do. */
@@ -31,7 +42,11 @@ class ApiError(
 
     companion object {
         @Serializable private data class Envelope(val error: Body? = null, val requestId: String? = null)
-        @Serializable private data class Body(val code: String? = null, val message: String? = null)
+        @Serializable private data class Body(
+            val code: String? = null,
+            val message: String? = null,
+            val details: JsonObject? = null,
+        )
 
         private val json = Json { ignoreUnknownKeys = true }
 
@@ -43,11 +58,15 @@ class ApiError(
             val parsed = body?.takeIf { it.isNotBlank() }?.let {
                 runCatching { json.decodeFromString<Envelope>(it) }.getOrNull()
             }
+            val details = parsed?.error?.details
+            fun detail(name: String) = runCatching { details?.get(name)?.jsonPrimitive?.intOrNull }.getOrNull()
             return ApiError(
                 status = response.code,
                 code = parsed?.error?.code ?: "HTTP_${response.code}",
                 message = parsed?.error?.message ?: defaultMessage(response.code),
                 requestId = parsed?.requestId ?: response.header("X-Request-ID"),
+                retryAfter = detail("retryAfter") ?: response.header("Retry-After")?.trim()?.toIntOrNull(),
+                attemptsLeft = detail("attemptsLeft"),
             )
         }
 

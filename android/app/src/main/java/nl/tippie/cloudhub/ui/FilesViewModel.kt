@@ -65,6 +65,14 @@ data class FilesState(
     val favoriteEntries: List<FileEntry> = emptyList(),
     val favoritesLoad: LoadState = LoadState.LOADING,
     val favoritesError: String? = null,
+    /**
+     * The server no longer knows this session: it timed out, the account was
+     * disabled, or two-step verification was turned on from another device
+     * and this session had only ever proved the password. Nothing here can
+     * work until the account signs in again, so the app goes back to sign-in
+     * rather than showing a listing error.
+     */
+    val signedOut: Boolean = false,
 ) {
     enum class Sort { NAME, NEWEST, LARGEST }
 
@@ -110,6 +118,8 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
         // A new sign-in, possibly as somebody else: the last account's stars
         // must not decorate this one's files while the real ones load.
         _state.update { it.copy(favorites = emptySet(), favoriteEntries = emptyList()) }
+        // And whatever ended the last session is over.
+        _state.update { it.copy(signedOut = false) }
         viewModelScope.launch {
             runCatching { api.status() }
                 .onSuccess { _state.update { s -> s.copy(user = it.user) } }
@@ -141,6 +151,8 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
                 if (path != "/" && e.status == 404) {
                     _state.update { it.copy(message = "That folder is no longer there") }
                     open("/")
+                } else if (e.isUnauthorized) {
+                    _state.update { it.copy(load = LoadState.FAILED, loadError = e.message, signedOut = true) }
                 } else {
                     _state.update { it.copy(load = LoadState.FAILED, loadError = e.message) }
                 }

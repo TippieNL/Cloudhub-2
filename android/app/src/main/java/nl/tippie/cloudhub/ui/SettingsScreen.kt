@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
@@ -65,6 +66,7 @@ fun SettingsScreen(
     onChangeServer: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenDuplicates: () -> Unit,
+    onOpenTwoFactor: () -> Unit,
     onSignOut: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -116,6 +118,16 @@ fun SettingsScreen(
                     title = "Change password",
                     supporting = "Your current password is required",
                     onClick = { changingPassword = true },
+                    trailing = { Chevron() },
+                )
+                SettingsDivider()
+                // Open to every role for the same reason: securing your own
+                // account is not a write to anyone's files.
+                SettingsRow(
+                    icon = Icons.Default.Sms,
+                    title = "Two-step verification",
+                    supporting = "A code by text message when you sign in",
+                    onClick = onOpenTwoFactor,
                     trailing = { Chevron() },
                 )
             }

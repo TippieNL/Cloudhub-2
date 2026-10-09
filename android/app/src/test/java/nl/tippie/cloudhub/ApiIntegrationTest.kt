@@ -1,8 +1,15 @@
 package nl.tippie.cloudhub
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import nl.tippie.cloudhub.net.*
 import nl.tippie.cloudhub.ui.DuplicateRules
+import nl.tippie.cloudhub.ui.FilesViewModel
+import nl.tippie.cloudhub.ui.LoadState
 import okhttp3.RequestBody.Companion.toRequestBody
 import nl.tippie.cloudhub.ui.SearchRules
 import org.junit.Assume.assumeTrue
@@ -357,6 +364,26 @@ class ApiIntegrationTest {
             fail("a folder was starred")
         } catch (e: ApiError) {
             assertEquals(400, e.status)
+        }
+    }
+
+    @Test fun `20 a session the server has ended sends the files screen back to sign-in`() = runBlocking<Unit> {
+        requireServer()
+        // A client the server has never signed in: what an app holding an
+        // expired session -- or a password-only one, after two-step
+        // verification was turned on elsewhere -- looks like to it.
+        val stranger = CloudHubApi(baseUrl!!, CloudHubClient(InMemoryCookieStore(), object : PinnedCertificates {
+            override fun isPinned(fingerprint: String) = false
+        }))
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        try {
+            val files = FilesViewModel(stranger)
+            files.open("/")
+            val deadline = System.currentTimeMillis() + 10_000
+            while (files.state.value.load == LoadState.LOADING && System.currentTimeMillis() < deadline) delay(20)
+            assertTrue(files.state.value.signedOut, "a 401 on the listing must read as signed out, not as an empty folder")
+        } finally {
+            Dispatchers.resetMain()
         }
     }
 

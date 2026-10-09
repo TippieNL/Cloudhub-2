@@ -66,6 +66,11 @@ jobs:
       - name: API over HTTP
         run: php tests/http/run.php
 
+      # SMS two-step verification, end to end: it starts its own servers and a
+      # stand-in SMS gateway, and creates and removes its own accounts.
+      - name: Two-step verification over HTTP
+        run: php tests/http/two_factor_run.php
+
   android:
     name: Android client
     runs-on: ubuntu-latest
@@ -107,21 +112,30 @@ jobs:
           printf 'smoke-test-pass-123\n' | php tools/create-admin.php admin admin
 
       # Backgrounded so the JVM tests have something to talk to. Without
-      # CLOUDHUB_TEST_URL the 13 live API tests skip, and skipping them here
-      # would defeat the point of running them at all.
+      # CLOUDHUB_TEST_URL the live API tests skip, and skipping them here
+      # would defeat the point of running them at all. The second server is
+      # for the two-step verification tests: it "texts" into the development
+      # outbox, which they read the codes from.
       - name: Serve
         run: |
           php -S 127.0.0.1:8900 -t public router.php > /tmp/cloudhub-server.log 2>&1 &
-          for i in $(seq 1 40); do
-            curl -sf "http://127.0.0.1:8900/?route=%2Fapi%2Fauth%2Fstatus" > /dev/null && exit 0
-            sleep 0.25
+          APP_ENV=development SMS_DRIVER=log TWO_FACTOR_SECRET="$(openssl rand -hex 32)" \
+            php -S 127.0.0.1:8901 -t public router.php > /tmp/cloudhub-2fa-server.log 2>&1 &
+          for port in 8900 8901; do
+            up=0
+            for i in $(seq 1 40); do
+              curl -sf "http://127.0.0.1:$port/?route=%2Fapi%2Fauth%2Fstatus" > /dev/null && { up=1; break; }
+              sleep 0.25
+            done
+            [ "$up" = 1 ] || { echo "the server on $port never answered"; cat /tmp/cloudhub-*server.log; exit 1; }
           done
-          echo "the server never answered"; cat /tmp/cloudhub-server.log; exit 1
 
       - name: Unit and live API tests
         working-directory: android
         env:
           CLOUDHUB_TEST_URL: http://127.0.0.1:8900
+          CLOUDHUB_TEST_2FA_URL: http://127.0.0.1:8901
+          CLOUDHUB_TEST_SMS_OUTBOX: ${{ github.workspace }}/logs/sms-outbox.log
         run: gradle :app:testReleaseUnitTest --no-daemon
 
       - name: Test report
