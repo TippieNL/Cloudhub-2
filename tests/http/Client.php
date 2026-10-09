@@ -25,6 +25,9 @@ final class Client
 
     public function csrfToken(): string { return $this->csrf; }
 
+    /** A cookie this client holds, such as the session ID, to see it change. */
+    public function cookie(string $name): ?string { return $this->cookies[$name] ?? null; }
+
     /** Forget the session, as closing the browser would. */
     public function reset(): void { $this->cookies = []; $this->csrf = ''; }
 
@@ -39,9 +42,10 @@ final class Client
         return $this->send('HEAD', $route, $query, null);
     }
 
-    public function post(string $route, array $body, array $query = []): Response
+    /** @param string[] $headers extra request headers, e.g. Sec-Fetch-Site */
+    public function post(string $route, array $body = [], array $query = [], array $headers = []): Response
     {
-        return $this->send('POST', $route, $query, $body);
+        return $this->send('POST', $route, $query, $body, $headers);
     }
 
     public function put(string $route, string $raw, array $query = [], array $headers = []): Response
@@ -142,9 +146,49 @@ final class Client
      * Tempting to skip: it is the one test that fails loudly if someone
      * "simplifies" the middleware.
      */
-    public function postWithoutCsrf(string $route, array $body): Response
+    public function postWithoutCsrf(string $route, array $body = []): Response
     {
         return $this->send('POST', $route, [], $body, [], false);
+    }
+
+    /**
+     * The same POST $count times at once, on this session, for the races: two
+     * requests spending one code must not both get in.
+     *
+     * @return list<Response>
+     */
+    public function parallelPost(string $route, array $body, int $count): array
+    {
+        $url = rtrim($this->base, '/').'/?route='.rawurlencode($route);
+        $pairs = [];
+        foreach ($this->cookies as $name => $value) $pairs[] = $name.'='.$value;
+        $multi = curl_multi_init();
+        $handles = [];
+        for ($i = 0; $i < $count; $i++) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_CUSTOMREQUEST => 'POST',
+                CURLOPT_POSTFIELDS => json_encode($body), CURLOPT_TIMEOUT => 30, CURLOPT_HTTPHEADER => [
+                    'Accept: application/json', 'Content-Type: application/json',
+                    'Cookie: '.implode('; ', $pairs), 'X-CSRF-Token: '.$this->csrf]]);
+            curl_multi_add_handle($multi, $ch);
+            $handles[] = $ch;
+        }
+        do {
+            $status = curl_multi_exec($multi, $running);
+            if ($running) curl_multi_select($multi, 1.0);
+        } while ($running && $status === CURLM_OK);
+        $answers = [];
+        foreach ($handles as $ch) {
+            $raw = (string)curl_multi_getcontent($ch);
+            $size = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $responseBody = substr($raw, $size);
+            $decoded = json_decode($responseBody, true);
+            $answers[] = new Response((int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), substr($raw, 0, $size), $responseBody, is_array($decoded) ? $decoded : null);
+            curl_multi_remove_handle($multi, $ch);
+            curl_close($ch);
+        }
+        curl_multi_close($multi);
+        return $answers;
     }
 
     private function send(
@@ -223,7 +267,8 @@ final class Client
         $this->takeCookies($rawHeaders);
         $decoded = json_decode($responseBody, true);
         // The server rotates the session periodically and reissues the token
-        // with it; storing whatever arrives keeps the client in step.
+        // with it -- including on the 401 that asks for a sign-in's second
+        // step; storing whatever arrives keeps the client in step.
         if (is_array($decoded) && isset($decoded['csrfToken']) && is_string($decoded['csrfToken'])) {
             $this->csrf = $decoded['csrfToken'];
         }
