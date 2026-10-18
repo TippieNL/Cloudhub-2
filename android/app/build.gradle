@@ -25,8 +25,8 @@ android {
         // scoped-storage-free MediaStore writes stop being needed.
         minSdk 24
         targetSdk 34
-        versionCode 26
-        versionName "4.4"
+        versionCode 27
+        versionName "4.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -84,6 +84,9 @@ dependencies {
     implementation 'io.coil-kt:coil-compose:2.7.0'
     // Decodes a frame locally for a video the server has no thumbnail for.
     implementation 'io.coil-kt:coil-video:2.7.0'
+    // An animated GIF plays in the photo viewer rather than showing its first
+    // frame -- and from Android 9 an animated WebP or HEIF does too.
+    implementation 'io.coil-kt:coil-gif:2.7.0'
     // What the photo viewer's Details reads from a photo. Arrives transitively
     // with Coil and Media3, at this version; named here because the code uses
     // it directly, and in place of the platform's ExifInterface, which misreads

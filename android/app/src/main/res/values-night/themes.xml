@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The same theme for a phone in dark mode. Without it the window behind
+         the app is the light theme's, and a dark-mode launch flashed near-white
+         before the first frame. The background is the dark scheme's own
+         (ui/Theme.kt), so what arrives is the colour already showing.
+
+         A theme forced in Settings cannot reach this far: the system draws
+         this window before the app has run any code to ask. -->
+    <style name="CloudHubTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#151515</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

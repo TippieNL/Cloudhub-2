@@ -680,6 +680,19 @@ headings, each with an icon to find it by and its control on the right;
 instead of three radio buttons and 150dp of screen, and the account is a name
 and a role rather than two table rows.
 
+The status and navigation bar icons follow the theme chosen here, not just the
+phone's: they used to follow the phone either way, so a dark theme forced on a
+light phone had dark icons on a dark bar. A phone in dark mode also launches
+onto a dark window instead of flashing the light one before the first frame. A
+theme forced in Settings cannot reach that first window — the system draws it
+before the app has run — so a forced theme still opens on the phone's colour
+for a moment.
+
+**Clear** under the thumbnail cache now empties the cache the app actually
+draws from. It used to build a new image loader to clear, which emptied that
+loader's own memory cache — empty by definition — and left every thumbnail on
+screen in memory.
+
 ### The photo viewer
 
 The photo has the whole screen — behind the status and navigation bars as well
@@ -736,7 +749,10 @@ usually still in memory, so a picture is there the instant the viewer is — and
 the photos either side are already loading before they are swiped to. A photo
 that fails to load says so, with **Retry**. SVG drawings, which the server will
 not serve inline and the app cannot draw, say so too, and can still be
-downloaded or opened in another app.
+downloaded or opened in another app. An animated GIF plays rather than showing
+its first frame — so, from Android 9, does an animated WebP or HEIF — and is
+never given the sharper second decode: two copies of one animation playing out
+of step would show through each other.
 
 The gestures' arithmetic is tested on the JVM (`PhotoZoomTest`,
 `PhotoZoomStateTest`), as are the row of photos after a delete or rename
@@ -1027,16 +1043,28 @@ sheet is frequently not persistable.
 
 ### Permissions
 
-The app declares `INTERNET`, `ACCESS_NETWORK_STATE` and `POST_NOTIFICATIONS`.
-There is no `CAMERA` and no `RECORD_AUDIO` — the camera app performs the
-capture through an intent and holds its own permissions — no
-`READ_MEDIA_IMAGES` or `READ_MEDIA_VIDEO`, because the system photo picker
-returns only what was chosen, and no storage permission, because downloads go
-through `MediaStore`.
+The app declares `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS`, and
+`WRITE_EXTERNAL_STORAGE` capped at Android 9 (`maxSdkVersion="28"`). There is
+no `CAMERA` and no `RECORD_AUDIO` — the camera app performs the capture through
+an intent and holds its own permissions — no `READ_MEDIA_IMAGES` or
+`READ_MEDIA_VIDEO`, because the system photo picker returns only what was
+chosen, and nothing reads shared storage at all.
 
-`POST_NOTIFICATIONS` is the only one you are ever asked about, and it is asked
-for the first time you queue an upload rather than at launch, where a prompt
-with no context is just noise. Refuse it and uploads work exactly as before.
+The storage permission exists for one reason. Android 10 and up save a
+download through `MediaStore`, which needs no permission; Android 9 and older
+have no Downloads collection to save through, so there the file is written into
+the Downloads folder directly — and without the permission every download on
+those versions failed. Capped at 28, it does not exist on 10 and up. It is asked
+for by the first download that needs it, which carries on once it is allowed.
+On those versions the app also picks a free name (`photo (1).jpg`, as
+`MediaStore` does) instead of replacing an earlier download, and tells the media
+scanner, so the file shows in the Downloads app and the gallery. On every
+version a download that fails part-way is removed rather than left behind as a
+broken file.
+
+`POST_NOTIFICATIONS` is asked for the first time you queue an upload rather than
+at launch, where a prompt with no context is just noise. Refuse it and uploads
+work exactly as before.
 
 At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
 `FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an

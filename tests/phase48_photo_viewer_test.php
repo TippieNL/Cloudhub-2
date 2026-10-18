@@ -197,10 +197,17 @@ $checks['Back by gesture says which photo the viewer closed on'] =
     str_contains($viewer, 'BackHandler(onBack = close)')
     && str_contains($viewer, 'val close = { onBack(photos.getOrNull(pager.currentPage)?.path) }');
 
-/* --- and nothing new to ask for ------------------------------------------------- */
+/* --- and nothing to ask for ------------------------------------------------------ */
 
-$declarations = (string)preg_replace('/<!--.*?-->/s', '', $manifest);
-$checks['sharing needs no new permission'] = substr_count($declarations, '<uses-permission') === 3;
+// Through the app's own cache and its FileProvider: sharing never touches
+// shared storage, on any version, so it needs no storage permission even on
+// the old phones that now have one for downloads.
+$checks['sharing needs no storage permission'] =
+    !str_contains($copies, 'EXTERNAL_STORAGE') && !str_contains($copies, 'getExternalStorage')
+    && str_contains($copies, 'File(context.cacheDir, FOLDER)');
+// Two copies of an animation playing out of step would show through each other.
+$checks['an animation is not decoded twice'] =
+    str_contains($page, 'sharpenable = drawn !is android.graphics.drawable.Animatable &&');
 
 $bad = false;
 foreach ($checks as $name => $ok) {

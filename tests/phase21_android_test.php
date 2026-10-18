@@ -80,6 +80,18 @@ $checks['thumbnails use the same client as the API'] =
     str_contains($app, 'okHttpClient { client.okHttp }');
 $checks['playback uses the same client as the API'] =
     str_contains($player, 'OkHttpDataSource.Factory(client.okHttp)');
+// An animated GIF used to show its first frame. The platform's decoder from
+// Android 9, which plays animated WebP and HEIF too, and Coil's before that.
+$checks['animated GIFs play'] =
+    str_contains($gradle, "implementation 'io.coil-kt:coil-gif:2.7.0'")
+    && str_contains($app, 'add(ImageDecoderDecoder.Factory())')
+    && str_contains($app, 'add(GifDecoder.Factory())');
+// newImageLoader() builds a new loader each call. Clearing that one emptied a
+// memory cache nothing drew from, and opened a second disk cache over the
+// same folder as the real one's.
+$checks['clearing the cache clears the loader the app draws with'] =
+    str_contains($main, 'val loader = imageLoader')
+    && !str_contains($main, 'app.newImageLoader()');
 $checks['the session is kept across restarts'] =
     str_contains($client, 'cookieJar(') && str_contains($stores, 'class PersistentCookieStore');
 // The server rotates the session periodically; storing whatever arrives keeps
@@ -162,7 +174,37 @@ $checks['a stalled chunk does not spin'] =
 // --- permissions -----------------------------------------------------------
 $declarations = (string)preg_replace('/<!--.*?-->/s', '', $manifest);
 $checks['no camera permission is demanded'] = !str_contains($declarations, 'android.permission.CAMERA');
-$checks['no storage permission is demanded'] = !str_contains($declarations, 'EXTERNAL_STORAGE');
+/*
+ * Storage only where there is no other way in, and never on Android 10 and up.
+ *
+ * 9 and older have no MediaStore Downloads collection, so saving to the shared
+ * Downloads folder there means writing the file, which needs
+ * WRITE_EXTERNAL_STORAGE: without it every download on those versions failed.
+ * Capped at 28, so 10 and up never see it -- and nothing reads shared storage.
+ */
+$checks['storage is declared for Android 9 and older only'] =
+    (bool)preg_match(
+        '/<uses-permission\s+android:name="android\.permission\.WRITE_EXTERNAL_STORAGE"\s+android:maxSdkVersion="28"\s*\/>/',
+        $declarations
+    )
+    && substr_count($declarations, 'EXTERNAL_STORAGE') === 1;
+$checks['storage is asked for by a download, not at launch'] =
+    str_contains($main, 'if (DownloadRules.needsStoragePermission(android.os.Build.VERSION.SDK_INT)')
+    && str_contains($main, 'askStorage.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)')
+    && str_contains($read($kotlin.'/data/DownloadRules.kt'), 'sdkInt <= LAST_WITHOUT_MEDIASTORE_DOWNLOADS');
+// Nothing picks a free name there, and the folder is shared: a second
+// IMG_0001.jpg replaced the first without a word.
+$checks['an old phone does not overwrite an earlier download'] =
+    str_contains($main, 'DownloadRules.freeName(safe) { !java.io.File(dir, it).createNewFile() }')
+    && str_contains($read($root.'/android/app/src/test/java/nl/tippie/cloudhub/DownloadRulesTest.kt'),
+        'a taken name gets a number before the extension, as MediaStore does');
+// Half a file in Downloads looks exactly like the real one.
+$checks['a download that fails part-way leaves nothing behind'] =
+    str_contains($main, 'runCatching { resolver.delete(item, null, null) }')
+    && str_contains($main, 'file.delete()');
+// Written straight to the folder, a file is listed only once the scanner has seen it.
+$checks['an old phone lists the download where it was saved'] =
+    str_contains($main, 'MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)');
 // The system photo picker returns only what was chosen, and the camera app owns
 // the capture: none of this needs a media or recording permission.
 $checks['no media permission is demanded'] =
@@ -170,18 +212,20 @@ $checks['no media permission is demanded'] =
 $checks['no recording permission is demanded'] =
     !str_contains($declarations, 'android.permission.RECORD_AUDIO');
 /*
- * Network, and one more.
+ * Network, the notification, and storage on old phones.
  *
  * POST_NOTIFICATIONS arrived with the upload progress notification and is the
- * first runtime permission this app has asked for. The count is pinned rather
- * than loosened to "at most a few": the point of this check is that adding one
- * has to be a decision somebody made on purpose.
+ * first runtime permission this app has asked for; WRITE_EXTERNAL_STORAGE,
+ * capped at Android 9, came with making downloads work there at all. The count
+ * is pinned rather than loosened to "at most a few": the point of this check is
+ * that adding one has to be a decision somebody made on purpose.
  */
-$checks['only network permissions, and the notification, are requested'] =
-    substr_count($declarations, '<uses-permission') === 3
+$checks['only network, the notification, and old-phone storage are requested'] =
+    substr_count($declarations, '<uses-permission') === 4
     && str_contains($declarations, 'android.permission.INTERNET')
     && str_contains($declarations, 'android.permission.ACCESS_NETWORK_STATE')
-    && str_contains($declarations, 'android.permission.POST_NOTIFICATIONS');
+    && str_contains($declarations, 'android.permission.POST_NOTIFICATIONS')
+    && str_contains($declarations, 'android:maxSdkVersion="28"');
 $checks['downloads go through MediaStore'] = str_contains($main, 'MediaStore.Downloads.EXTERNAL_CONTENT_URI');
 
 // --- the share sheet --------------------------------------------------------
@@ -443,6 +487,17 @@ $checks['leaving a video does not undo edge to edge'] =
     !str_contains($player, 'setDecorFitsSystemWindows(window, true)');
 $checks['transparent bars still get readable icons'] =
     str_contains($main, 'isAppearanceLightStatusBars = !dark');
+// The theme the app is in, which Settings can override: following the phone
+// alone, a forced dark theme on a light phone had dark icons on a dark bar.
+$checks['bar icons follow the app\'s theme, not only the phone\'s'] =
+    str_contains($main, 'val dark = ThemeChoice.resolve(theme, androidx.compose.foundation.isSystemInDarkTheme())');
+// The window the system draws before the first frame: light, a dark-mode
+// launch flashed near-white.
+$nightThemes = $read($android.'/res/values-night/themes.xml');
+$checks['a dark-mode launch does not flash the light background'] =
+    str_contains($nightThemes, '<item name="android:windowBackground">#151515</item>')
+    && str_contains($nightThemes, '@android:color/transparent')
+    && str_contains($theme, 'background = Color(0xFF151515)');
 
 $checks['the sign-in rules are tested without a server'] =
     str_contains($signInTests, 'class SignInStateTest')

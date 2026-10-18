@@ -70,9 +70,13 @@ fun rememberUploadState(): UploadState {
     var justFinished by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf(UploadState()) }
 
-    val infos by work.getWorkInfosForUniqueWorkFlow(UploadWorker.WORK)
-        .map { list -> list.firstOrNull { it.state == WorkInfo.State.RUNNING } ?: list.lastOrNull() }
-        .collectAsState(initial = null)
+    // Built once. A flow made during composition is a new one every time, and
+    // collecting it a new subscription to WorkManager's database -- on every
+    // recomposition, and this recomposes on every chunk uploaded.
+    val infos by remember(work) {
+        work.getWorkInfosForUniqueWorkFlow(UploadWorker.WORK)
+            .map { list -> list.firstOrNull { it.state == WorkInfo.State.RUNNING } ?: list.lastOrNull() }
+    }.collectAsState(initial = null)
 
     // Keyed on the progress data as well as the info, so every chunk re-reads
     // the queue rather than only every state change.

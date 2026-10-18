@@ -258,10 +258,13 @@ internal fun PhotoPage(
                         if (state is AsyncImagePainter.State.Success) {
                             val drawn = state.result.drawable
                             zoom.drew(drawn.intrinsicWidth.toFloat(), drawn.intrinsicHeight.toFloat())
-                            sharpenable = PhotoZoom.needsDetail(
-                                drawn.intrinsicWidth, drawn.intrinsicHeight,
-                                zoom.viewportW.toInt(), zoom.viewportH.toInt(),
-                            )
+                            // Never for an animation: two copies playing out of
+                            // step would show through each other's clear pixels.
+                            sharpenable = drawn !is android.graphics.drawable.Animatable &&
+                                PhotoZoom.needsDetail(
+                                    drawn.intrinsicWidth, drawn.intrinsicHeight,
+                                    zoom.viewportW.toInt(), zoom.viewportH.toInt(),
+                                )
                             arrived()
                         }
                     },

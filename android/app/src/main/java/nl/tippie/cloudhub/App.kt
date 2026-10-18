@@ -3,6 +3,8 @@ package nl.tippie.cloudhub
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.GifDecoder
+import coil.decode.ImageDecoderDecoder
 import coil.decode.VideoFrameDecoder
 import nl.tippie.cloudhub.data.CertificatePins
 import nl.tippie.cloudhub.data.PersistentCookieStore
@@ -49,6 +51,15 @@ class CloudHubApp : Application(), ImageLoaderFactory {
                 // A video the server has no cached frame for still gets a
                 // picture, decoded from the stream on the device.
                 add(VideoFrameDecoder.Factory())
+                // Animation, for the files that have it; a still image still
+                // goes to the ordinary decoder. The platform's own decoder
+                // from Android 9, which also plays animated WebP and HEIF,
+                // and Coil's before that.
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    add(ImageDecoderDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
             }
             .crossfade(true)
             .build()
