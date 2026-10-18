@@ -260,6 +260,15 @@ data class SimpleResult(
     val success: Boolean = false,
     val message: String = "",
     val trashed: Boolean = false,
+    /** A delete into the trash: the entry that restores it, which is what Undo needs. */
+    val id: String? = null,
+    /**
+     * A rename or a restore: where the file is now. Not always where it was
+     * asked to go -- a name already taken gets " (2)" -- so this, not the
+     * request, is the path to use afterwards.
+     */
+    val path: String? = null,
+    val name: String? = null,
 )
 
 /** A bulk move or copy: partial success is reported per item, never hidden. */

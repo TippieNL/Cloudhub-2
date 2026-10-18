@@ -4,4 +4,8 @@
      the file is deleted once the upload completes. -->
 <paths>
     <cache-path name="captures" path="captures/" />
+    <!-- A photo handed from the viewer to another app (Share, Open with,
+         Set as): copied here, offered read-only to the app chosen, and
+         cleared a day later. See ui/LocalCopies.kt. -->
+    <cache-path name="shared" path="shared/" />
 </paths>

@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -171,11 +173,13 @@ fun FileActionsSheet(
  * Size, type, when it changed and where it lives.
  *
  * Every field is already in the listing the screen has, so this shows what the
- * app knows rather than asking the server anything new.
+ * app knows rather than asking the server anything new. A photo opened in the
+ * viewer adds what it says about itself -- [photo], read from the bytes the
+ * viewer downloaded to draw it -- which is no new request either.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PropertiesSheet(entry: FileEntry, onDismiss: () -> Unit) {
+fun PropertiesSheet(entry: FileEntry, onDismiss: () -> Unit, photo: PhotoFacts? = null) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Text(
             entry.name,
@@ -183,12 +187,20 @@ fun PropertiesSheet(entry: FileEntry, onDismiss: () -> Unit) {
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
         )
         HorizontalDivider()
-        Property("Type", describeKind(entry))
-        if (!entry.isDirectory) Property("Size", humanBytes(entry.size))
-        entry.modified.takeIf { it.isNotBlank() }?.let { Property("Modified", it) }
-        Property("Location", entry.path.substringBeforeLast('/', "").ifEmpty { "/" })
-        Property("Full path", entry.path)
-        Spacer(Modifier.height(24.dp))
+        // Scrolls, because a photo's full set is taller than a phone on its side.
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            // The photo's own facts first: they are what the viewer's Details is opened for.
+            photo?.taken?.let { Property("Taken", it) }
+            photo?.dimensions?.let { Property("Dimensions", it) }
+            photo?.camera?.let { Property("Camera", it) }
+            photo?.exposure?.let { Property("Exposure", it) }
+            Property("Type", describeKind(entry))
+            if (!entry.isDirectory) Property("Size", humanBytes(entry.size))
+            entry.modified.takeIf { it.isNotBlank() }?.let { Property("Modified", it) }
+            Property("Location", entry.path.substringBeforeLast('/', "").ifEmpty { "/" })
+            Property("Full path", entry.path)
+            Spacer(Modifier.height(24.dp))
+        }
     }
 }
 

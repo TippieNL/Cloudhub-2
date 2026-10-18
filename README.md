@@ -508,8 +508,9 @@ app closed.
 
 ### What it covers
 
-Sign in, browse with thumbnails, full-screen image viewing with pinch-zoom and
-swipe, video and audio playback, download to the device, upload from the
+Sign in, browse with thumbnails, an immersive photo viewer (pinch, double-tap
+and pan, swipe between photos, Share, Download, Details), video and audio
+playback, download to the device, upload from the
 gallery, the camera, a recorded clip, the file browser or the Android share
 sheet, new folder, rename, delete to trash, move, copy, recursive search, trash
 restore and empty, share links, and favorites.
@@ -679,6 +680,69 @@ headings, each with an icon to find it by and its control on the right;
 instead of three radio buttons and 150dp of screen, and the account is a name
 and a role rather than two table rows.
 
+### The photo viewer
+
+The photo has the whole screen — behind the status and navigation bars as well
+as between them — and the controls are drawn over it rather than beside it, so
+showing and hiding them never moves the picture. A tap hides them together
+with the system bars (immersive mode); a swipe in from an edge brings the bars
+back for a moment without leaving it, and another tap brings everything back.
+Zooming in hides them too. However the viewer is left, the bars come back with
+it, and over the viewer and the player their icons are always light — they
+were dark-on-black in the light theme.
+
+At the top: the name, a small **3 of 12** (not shown for a single photo), and
+the star. At the bottom: **Share**, **Download**, **Details** and **More**.
+
+- **Share** sends the photo itself: a messaging app wants the picture, not a
+  link to a server it cannot sign in to. The bytes are usually on the phone
+  already — the viewer downloaded them to draw the photo — so they are copied
+  out of the image cache, not fetched again, into one cache folder the app's
+  FileProvider exposes (`res/xml/file_paths.xml`). The app chosen gets read
+  access to that one file; copies are cleared after a day, since the receiver
+  may read it long after the share sheet closes. No permission is involved.
+- **Download** saves it to Downloads, exactly as the file menu does.
+- **Details** adds what the photo says about itself to the usual properties:
+  when it was taken, its size in pixels (the right way up, for a photo stored
+  sideways), the camera, and the exposure. They are read from the same cached
+  bytes, so asking costs no request.
+- **More** holds **Share link…** (the public link, as before — a different
+  thing from sending the photo, since anyone holding it can open the file),
+  **Open with…**, **Set as…** (wallpaper, a contact's photo) and, for accounts
+  that can write, **Rename…** and **Delete**. A delete asks first, goes to the
+  trash where the server keeps one, and offers **Undo** while its snackbar is
+  up; deleting the last photo returns to the folder. A rename keeps the photo
+  on screen at the name the server actually gave it.
+
+Zooming:
+
+- **Pinch** zooms about your fingers rather than the middle of the screen, and
+  the picture moves with them.
+- **Double tap** zooms into the point tapped, far enough to fill the screen —
+  so a landscape photo on a portrait phone loses its black bands — and again
+  zooms back out. *Remove animations* makes it a jump instead of a glide.
+- **Panning** a zoomed photo carries on and slows when let go, stopping at the
+  photo's edge. The room to pan is measured against the photo as drawn, not the
+  screen: a zoomed landscape photo used to slide up and down into its own black
+  bars and could be left half off the screen.
+- Zoomed past 1.3×, the page decodes the photo again at up to 4096 px on its
+  long edge — a 12-megapixel phone photo at its own resolution — and draws it
+  over the screen-sized one, so zoom stays sharp without every page holding a
+  50 MB bitmap. It is decoded from the bytes already cached, and only for the
+  photo on show.
+
+Every photo keeps its shape. While it loads, the grid's thumbnail stands in —
+usually still in memory, so a picture is there the instant the viewer is — and
+the photos either side are already loading before they are swiped to. A photo
+that fails to load says so, with **Retry**. SVG drawings, which the server will
+not serve inline and the app cannot draw, say so too, and can still be
+downloaded or opened in another app.
+
+The gestures' arithmetic is tested on the JVM (`PhotoZoomTest`,
+`PhotoZoomStateTest`), as are the row of photos after a delete or rename
+(`ViewerRulesTest`) and the wording of the details (`PhotoDetailsTest`); the
+wiring is pinned by `tests/phase48_photo_viewer_test.php`.
+
 ### The video player
 
 Fullscreen with a rotation to landscape and the system bars out of the way;
@@ -758,7 +822,8 @@ on. A mostly-vertical drag always stays with the photo, since a pager has no
 use for it.
 
 Pinch still zooms, a double tap zooms in and out, and a zoomed photo cannot be
-dragged off the screen and left there.
+dragged off the screen and left there — or into its own black bars; see **The
+photo viewer**.
 
 ### Coming back where you left off
 
@@ -784,7 +849,10 @@ root and is never closed, which is what lets your place in it survive.
 Closing a photo or a video also brings the list back **to that file**: swipe
 through thirty photos and Back lands on the one you ended at, not the one you
 opened. Only when it is off screen, though — scrolling a file that is already
-visible up to the top edge is a jump for no reason.
+visible up to the top edge is a jump for no reason. That holds for Back by
+gesture or button as well as the toolbar arrow: the system Back used to pop
+the viewer through the app's own handler, which never said which photo was on
+show.
 
 ### What playback costs
 

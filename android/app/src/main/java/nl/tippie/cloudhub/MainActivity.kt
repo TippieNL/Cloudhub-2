@@ -134,16 +134,7 @@ class MainActivity : ComponentActivity() {
             var theme by remember { mutableStateOf(ThemeChoice.of(app.settings.themeChoice)) }
 
             CloudHubTheme(theme) {
-                // Transparent bars mean the icons have to be told which way to
-                // contrast; without this they are white on a near-white
-                // background in light mode and invisible.
                 val dark = androidx.compose.foundation.isSystemInDarkTheme()
-                LaunchedEffect(dark) {
-                    WindowInsetsControllerCompat(window, window.decorView).apply {
-                        isAppearanceLightStatusBars = !dark
-                        isAppearanceLightNavigationBars = !dark
-                    }
-                }
 
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
@@ -179,6 +170,24 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 val screen = stack.last()
+
+                /*
+                 * Transparent bars mean the icons have to be told which way to
+                 * contrast; without this they are white on a near-white
+                 * background in light mode and invisible.
+                 *
+                 * The photo viewer and the player draw on black whatever the
+                 * theme, so over them the icons are always light -- dark ones
+                 * were all but invisible there in light mode.
+                 */
+                val onBlack = screen is Screen.Images || screen is Screen.Play
+                LaunchedEffect(dark, onBlack) {
+                    WindowInsetsControllerCompat(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = !dark && !onBlack
+                        isAppearanceLightNavigationBars = !dark && !onBlack
+                    }
+                }
+
                 /** Open a screen, remembering the one it was opened from. */
                 fun go(next: Screen) {
                     val updated = BackRules.pushed(stack.toList(), next)
@@ -451,6 +460,12 @@ class MainActivity : ComponentActivity() {
                         onBack = { photo -> reveal = photo; back() },
                         favorites = state.favorites,
                         onToggleFavorite = model::toggleFavorite,
+                        canWrite = state.canWrite,
+                        onDownload = { download(it) },
+                        onShareLink = { sharing = it },
+                        // A rename or delete in the viewer changes the folder,
+                        // and can move a star.
+                        onFilesChanged = { model.refresh() },
                     )
 
                     is Screen.Play -> PlayerScreen(
