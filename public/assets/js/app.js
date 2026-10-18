@@ -3133,8 +3133,36 @@ $('#recalculate-usage').addEventListener('click', () => loadStorage(true));
  * finder that empties a set has deleted the photo, not the duplicate -- and
  * nothing goes anywhere without being asked for. What is deleted goes to the
  * trash, like every other delete.
+ *
+ * The scan covers every file, and All / Photos / Videos / Other -- the four
+ * Favorites offers -- only narrow what is shown, so switching never scans
+ * again. A third rule follows from that: selecting and deleting act on the sets
+ * on show and nothing else. A copy ticked under Photos stays ticked while
+ * Videos is looked at, but is never deleted from there unseen.
  */
-const dupes = { groups: [], keep: {}, selected: new Set() };
+const dupes = { groups: [], keep: {}, selected: new Set(), filter: 'all', complete: true, cached: false };
+
+/**
+ * Which of the four a set belongs to: what the server says it is, or else --
+ * a report cached before it said -- what its copies' names say, read the way
+ * Favorites reads them.
+ */
+function dupeKind(group) {
+    if (group.kind === 'image' || group.kind === 'video') return group.kind;
+    if (group.kind) return 'other';
+    const kinds = group.files.map(favoriteKind);
+    return kinds.includes('image') ? 'image' : kinds.includes('video') ? 'video' : 'other';
+}
+
+/** The sets the chosen filter shows. */
+function shownDupes() {
+    return dupes.groups.filter(group => dupes.filter === 'all' || dupeKind(group) === dupes.filter);
+}
+
+/** The copies ticked among the sets on show: what the delete button acts on. */
+function shownSelection() {
+    return shownDupes().flatMap(group => group.files.map(f => f.path)).filter(p => dupes.selected.has(p));
+}
 
 function dupeKept(group) {
     const paths = group.files.map(f => f.path);
@@ -3150,21 +3178,18 @@ function dupeRemovable(group) {
 }
 
 async function loadDuplicates(refresh = false) {
-    const scope = $('#duplicates-scope').value;
     const note = $('#duplicates-note');
     note.textContent = refresh ? 'Scanning\u2026' : 'Loading\u2026';
     $('#duplicates-list').innerHTML = '';
     try {
-        const query = `scope=${encodeURIComponent(scope)}${refresh ? '&refresh=1' : ''}`;
+        // Always everything: the filters narrow the result, not the scan.
+        const query = `scope=all${refresh ? '&refresh=1' : ''}`;
         const d = await (await api(`/api/duplicates?${query}`)).json();
         dupes.groups = d.groups || [];
         dupes.keep = {};
         dupes.selected = new Set();
-        note.textContent = dupes.groups.length
-            ? `${d.groupCount} set${d.groupCount === 1 ? '' : 's'} of copies · ${fmt(d.wastedBytes)} to reclaim`
-                + (d.complete ? '' : ' · the scan stopped early, so there may be more')
-                + (d.cached ? ' · from the last scan' : '')
-            : 'Nothing here is stored twice.';
+        dupes.complete = d.complete !== false;
+        dupes.cached = !!d.cached;
         renderDuplicates();
     } catch (e) {
         note.textContent = e.message;
@@ -3172,7 +3197,28 @@ async function loadDuplicates(refresh = false) {
 }
 
 function renderDuplicates() {
-    $('#duplicates-list').innerHTML = dupes.groups.map(group => {
+    const counts = { all: dupes.groups.length, image: 0, video: 0, other: 0 };
+    for (const group of dupes.groups) counts[dupeKind(group)]++;
+    // As on Favorites: a filter that has emptied -- its last set deleted --
+    // falls back to everything, and one with nothing in it cannot be pressed.
+    if (counts[dupes.filter] === 0) dupes.filter = 'all';
+    document.querySelectorAll('[data-dupe-filter]').forEach(b => {
+        const kind = b.dataset.dupeFilter;
+        b.textContent = `${FAVORITE_KINDS[kind]} (${counts[kind]})`;
+        b.classList.toggle('active', kind === dupes.filter);
+        b.setAttribute('aria-pressed', String(kind === dupes.filter));
+        b.disabled = kind !== 'all' && counts[kind] === 0;
+    });
+
+    const shown = shownDupes();
+    const wasted = shown.reduce((total, group) => total + group.wastedBytes, 0);
+    $('#duplicates-note').textContent = shown.length
+        ? `${shown.length} set${shown.length === 1 ? '' : 's'} of copies · ${fmt(wasted)} to reclaim`
+            + (dupes.complete ? '' : ' · the scan stopped early, so there may be more')
+            + (dupes.cached ? ' · from the last scan' : '')
+        : 'Nothing here is stored twice.';
+
+    $('#duplicates-list').innerHTML = shown.map(group => {
         const kept = dupeKept(group);
         const rows = group.files.map(file => {
             const isKept = file.path === kept;
@@ -3214,23 +3260,31 @@ function renderDuplicates() {
 }
 
 function renderDuplicateActions() {
-    const bytes = dupes.groups.reduce((total, group) =>
+    const picked = shownSelection();
+    const bytes = shownDupes().reduce((total, group) =>
         total + group.files.filter(f => dupes.selected.has(f.path)).reduce((n, f) => n + f.bytes, 0), 0);
-    $('#duplicates-actions').hidden = dupes.selected.size === 0;
-    $('#duplicates-selected').textContent = `${dupes.selected.size} selected · ${fmt(bytes)} to reclaim`;
+    $('#duplicates-actions').hidden = picked.length === 0;
+    $('#duplicates-selected').textContent = `${picked.length} selected · ${fmt(bytes)} to reclaim`;
 }
 
-$('#duplicates-scope').addEventListener('change', () => loadDuplicates());
+document.querySelectorAll('[data-dupe-filter]').forEach(b => b.addEventListener('click', () => {
+    dupes.filter = b.dataset.dupeFilter;
+    renderDuplicates();
+}));
 $('#duplicates-rescan').addEventListener('click', () => loadDuplicates(true));
 $('#duplicates-select-extra').addEventListener('click', () => {
-    dupes.selected = new Set(dupes.groups.flatMap(dupeRemovable));
+    // The extra copies of what is on show; a choice made under another filter
+    // is left as it was.
+    for (const path of shownDupes().flatMap(dupeRemovable)) dupes.selected.add(path);
     renderDuplicates();
 });
 
 $('#duplicates-delete').addEventListener('click', async () => {
     // The rule, checked against the selection itself rather than trusted to
     // whatever produced it: a set with every copy ticked is the photo, gone.
-    const emptied = dupes.groups.some(group =>
+    // The sets on show are the ones checked, because they are the ones a
+    // delete from here touches -- a set is one kind, all on show or none.
+    const emptied = shownDupes().some(group =>
         group.files.length > 0 && group.files.every(f => dupes.selected.has(f.path)));
     if (emptied) {
         await askConfirm('Every copy selected',
@@ -3238,19 +3292,37 @@ $('#duplicates-delete').addEventListener('click', async () => {
             'Leave one copy of each unselected.', 'Close');
         return;
     }
-    const paths = [...dupes.selected];
+    const paths = shownSelection();
     if (!await askConfirm('Move to the trash?',
         `${paths.length} file${paths.length === 1 ? '' : 's'} will be moved to the trash, where they can be restored.`,
         'Move to trash')) return;
 
-    let failed = 0;
+    const gone = new Set();
     for (const path of paths) {
         try {
             await api('/api/files/delete', { method: 'DELETE', body: { path } });
-        } catch { failed++; }
+            gone.add(path);
+        } catch { /* counted below */ }
     }
+    const failed = paths.length - gone.size;
     toast(failed ? `${failed} could not be deleted` : `Moved ${paths.length} to the trash`);
-    await loadDuplicates(true);
+    if (S.role === 'admin') {
+        // A fresh scan, which also replaces the server's cached report.
+        await loadDuplicates(true);
+        return;
+    }
+    // Anyone else would be refused a rescan -- forcing one is an admin's -- and
+    // reloading used to leave the page blank behind that refusal. What was
+    // deleted is known, so the list is brought up to date here instead, as the
+    // Android app does.
+    dupes.groups = dupes.groups
+        .map(group => {
+            const files = group.files.filter(f => !gone.has(f.path));
+            return { ...group, files, copies: files.length, wastedBytes: group.bytes * Math.max(0, files.length - 1) };
+        })
+        .filter(group => group.files.length > 1);
+    for (const path of gone) dupes.selected.delete(path);
+    renderDuplicates();
 });
 
 async function route() {

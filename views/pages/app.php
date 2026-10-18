@@ -431,12 +431,12 @@
         <section id="duplicates-page" hidden>
             <div class="toolbar">
                 <h2>Duplicates</h2>
-                <label class="share-field">Look at
-                    <select id="duplicates-scope">
-                        <option value="media">Photos &amp; videos</option>
-                        <option value="all">Everything</option>
-                    </select>
-                </label>
+                <div class="search-scope duplicates-filter" role="group" aria-label="Show">
+                    <button type="button" data-dupe-filter="all" class="active" aria-pressed="true">All</button>
+                    <button type="button" data-dupe-filter="image" aria-pressed="false">Photos</button>
+                    <button type="button" data-dupe-filter="video" aria-pressed="false">Videos</button>
+                    <button type="button" data-dupe-filter="other" aria-pressed="false">Other</button>
+                </div>
                 <button id="duplicates-rescan" type="button">Scan again</button>
                 <button id="duplicates-select-extra" type="button">Select the extra copies</button>
             </div>

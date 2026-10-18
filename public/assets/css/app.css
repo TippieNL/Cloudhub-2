@@ -277,13 +277,13 @@ html.dark #offline-banner{background:#a06b00}
 .fav-button.on{color:#c98a00}
 html.dark .fav-button.on{color:#f2c14e}
 .preview-header .fav-button{font-size:1.4rem;border:0;background:transparent;padding:4px 8px}
-.favorites-filter button:disabled{opacity:.45;cursor:default}
-#favorites-page .toolbar{flex-wrap:wrap;gap:10px}
+.favorites-filter button:disabled,.duplicates-filter button:disabled{opacity:.45;cursor:default}
+#favorites-page .toolbar,#duplicates-page .toolbar{flex-wrap:wrap;gap:10px}
 /* On a phone the four filters share the row equally rather than running off
-   the edge of it. */
+   the edge of it -- on Favorites and on Duplicates, which offer the same four. */
 @media(max-width:650px){
- .favorites-filter{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
- .favorites-filter button{min-height:40px;padding:0 4px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .favorites-filter,.duplicates-filter{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
+ .favorites-filter button,.duplicates-filter button{min-height:40px;padding:0 4px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 }
 
 /* Security: password and SMS two-step verification. Built from the share and

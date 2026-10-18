@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import nl.tippie.cloudhub.net.*
 import nl.tippie.cloudhub.ui.DuplicateRules
+import nl.tippie.cloudhub.ui.FavoriteRules
 import nl.tippie.cloudhub.ui.FilesViewModel
 import nl.tippie.cloudhub.ui.LoadState
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -311,6 +312,8 @@ class ApiIntegrationTest {
             scan.groups.none { g -> g.files.any { it.path == "$scratch/decoy.jpg" } },
             "a file of the same size but different bytes was called a duplicate",
         )
+        // Filed under Photos, whether the server says so or the names do.
+        assertEquals(FavoriteRules.Filter.PHOTOS, DuplicateRules.kindOf(planted))
     }
 
     @Test fun `15 the last scan is readable without doing the work again`() = runBlocking {

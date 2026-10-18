@@ -1121,9 +1121,25 @@ both clients, because a duplicate finder that empties a set has not deleted a
 duplicate, it has deleted the photo. What you do delete goes to the trash, like
 any other delete.
 
-`GET /api/duplicates` backs the web page: `scope=media` (the default) or
-`scope=all`. Reading the report needs only a signed-in account; `refresh=1`,
-which forces a fresh walk of the store, is admin-only.
+**All · Photos · Videos · Other** — the four filters Favorites offers — sit at
+the top of the page on both clients, each with its count. They narrow what is
+shown and nothing else: the scan behind them covers every file, so switching
+never scans again. *Select the extra copies* and *Move to trash* act on the
+sets on show only — a copy ticked under Photos stays ticked while you look at
+Videos, but is never deleted from there unseen — and a filter whose last set
+you delete falls back to All. A set is one kind: a photo if any copy is named
+as one (`holiday.jpg` beside `holiday.jpg.bak`), then a video likewise, and
+otherwise whatever its first copy is. The server decides it, from the same
+categories the scan uses, so a HEIC is a photo on both clients.
+
+`GET /api/duplicates` backs the web page, which always asks for `scope=all`
+and filters the result itself; `scope=media` (the default) is still answered
+for anything else that calls it. Each group carries a `kind`: `image`, `video`,
+`audio`, `document`, `archive` or `other`. Reading the report needs only a
+signed-in account; `refresh=1`, which forces a fresh walk of the store, is
+admin-only. So after an editor deletes copies, the page brings its list up to
+date itself rather than asking for a rescan it would be refused — which used to
+leave it blank.
 
 ### The scan contract, for other clients
 
@@ -1144,6 +1160,15 @@ A reply carries `done`, `truncated`, counts of what has been `scanned`,
 `count`, what is `reclaimable`, and its files as `path`, `bytes` and `mtime`.
 A `GET` before anything has ever been scanned answers `started: false`, which
 is how a client tells "nothing scanned yet" from "nothing found".
+
+Two fields go beyond the contract, and a client that does not know them ignores
+them: each group's `kind`, as above, and `scope: "all"` on the reply. This
+server's contract scan covers **every file**, not only photos and videos, which
+is what puts anything under the app's Other filter. A scan stored before that
+change covered photos and videos only, so `GET` treats it as never run rather
+than serve an Other that is empty because nobody looked; the app, signed in
+with write access, then starts a fresh one. Against a server that sends no
+`kind`, the app sorts each set by its copies' names instead.
 
 Reading a scan needs only a signed-in account. **Starting one needs write
 access**, because it walks the store and reads files.

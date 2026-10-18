@@ -1378,6 +1378,9 @@ function duplicate_scan_payload(array $report): array {
             'bytes' => (int)$group['bytes'],
             'count' => (int)$group['copies'],
             'reclaimable' => (int)$group['wastedBytes'],
+            // Beyond the contract, and ignorable by a client that does not
+            // know it: what the set is, for a Photos / Videos / Other switch.
+            'kind' => (string)($group['kind'] ?? 'other'),
             'files' => $files,
         ];
     }, $report['groups']);
@@ -1385,6 +1388,9 @@ function duplicate_scan_payload(array $report): array {
     $scannedAt = (string)($report['scannedAt'] ?? gmdate('c'));
     return [
         'path' => '/',
+        // Every kind of file, which is what lets a client switch between
+        // photos, videos and everything else without scanning again.
+        'scope' => 'all',
         // Not sliced here: one request does the whole scan, so it is finished
         // by the time anyone can ask.
         'done' => true,
@@ -1436,7 +1442,12 @@ if ($path === '/api/duplicates/scan') {
         $stored = is_file($scanFile) ? json_decode((string)file_get_contents($scanFile), true) : null;
         // The one reply that says a scan has never been run here, which is how
         // a client knows to offer to start one rather than report "none found".
-        if (!is_array($stored) || !isset($stored['groups'])) {
+        //
+        // A scan kept from before this one covered every file looked at photos
+        // and videos only. Served as it was, it would answer "Other" with
+        // nothing -- true of that scan, false of the store -- so it counts as
+        // never run, and the app starts a full one.
+        if (!is_array($stored) || !isset($stored['groups']) || ($stored['scope'] ?? '') !== 'all') {
             return ['done' => false, 'groups' => [], 'scanned' => 0, 'started' => false];
         }
         return $stored;
@@ -1462,9 +1473,13 @@ if ($path === '/api/duplicates/scan') {
             throw new RuntimeException('This server scans the whole store; ask for "/"', 400);
         }
 
+        // Everything, not only photos and videos: the app sorts the sets into
+        // Photos, Videos and Other itself, and switching between them must
+        // not mean scanning again. Hardly dearer -- the walk visits every file
+        // either way, and a file is read only when another is its exact size.
         $finder = new DuplicateFinder(
             $fs, dirname(__DIR__).'/storage/.cache/hashes.json', DUPLICATE_SCAN_BUDGET_SECONDS);
-        $payload = duplicate_scan_payload($finder->scan(DuplicateFinder::MEDIA));
+        $payload = duplicate_scan_payload($finder->scan(DuplicateFinder::EVERYTHING));
 
         if (!is_dir(dirname($scanFile)))@mkdir(dirname($scanFile), 0775, true);
         @file_put_contents($scanFile, json_encode($payload, JSON_UNESCAPED_SLASHES));

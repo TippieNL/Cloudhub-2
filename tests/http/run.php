@@ -576,6 +576,10 @@ scenario('the scan contract answers the way other clients expect', function () u
     check('a group counts its copies', ($found['count'] ?? null) === 2, json_encode($found));
     check('and says what deleting the extra one gives back',
         ($found['reclaimable'] ?? null) === strlen($dupePhoto), json_encode($found['reclaimable'] ?? null));
+    // Beyond the contract, for the app's Photos / Videos / Other switch.
+    check('a set says what it is', ($found['kind'] ?? null) === 'image', json_encode($found['kind'] ?? null));
+    check('and the scan says it covered every file', ($scan->json['scope'] ?? null) === 'all',
+        json_encode($scan->json['scope'] ?? null));
     $file = $found['files'][0];
     check('a copy carries a path, a size and a modification time',
         isset($file['path'], $file['bytes'], $file['mtime']) && $file['mtime'] > 0, json_encode($file));
@@ -631,6 +635,23 @@ scenario('a scan of everything sees more than a scan of media', function () use 
     check('a scan of everything finds them', $has($everything, $scratch.'/notes-one.txt'),
         json_encode($everything->json['groupCount'] ?? null));
     check('and says which scope it ran', ($everything->json['scope'] ?? '') === 'all');
+
+    // What the two clients' Other filter is made of: the notes are neither a
+    // photo nor a video, and both reports say what they are.
+    $kindOf = function ($response, string $path): ?string {
+        foreach ($response->json['groups'] ?? [] as $group) {
+            if (in_array($path, array_column($group['files'], 'path'), true)) return $group['kind'] ?? null;
+        }
+        return null;
+    };
+    check('the web report says the notes are a document',
+        $kindOf($everything, $scratch.'/notes-one.txt') === 'document');
+    $contract = $client->post('/api/duplicates/scan', ['path' => '/', 'restart' => true]);
+    check('the app\'s scan finds them too, under the same kind',
+        $kindOf($contract, $scratch.'/notes-one.txt') === 'document', $contract->describe());
+    check('beside the photos, which are photos',
+        $kindOf($contract, $scratch.'/holiday.jpg') === 'image');
+    $client->delete('/api/duplicates/scan');
 });
 
 /* ---- playback ---------------------------------------------------------------

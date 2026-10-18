@@ -3,17 +3,20 @@ package nl.tippie.cloudhub.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +70,8 @@ fun DuplicatesScreen(
     val keeping = remember { mutableStateMapOf<String, String>() }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirming by remember { mutableStateOf(false) }
+    /** All, Photos, Videos or Other: what is shown, never what is scanned. */
+    var chosen by rememberSaveable { mutableStateOf(FavoriteRules.Filter.ALL) }
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -130,7 +135,13 @@ fun DuplicatesScreen(
         }
     }
 
-    val groups = scan?.groups.orEmpty()
+    // Everything the scan found, and the part of it the filter shows. Every
+    // action below -- selecting the extras, the count, Move to trash and the
+    // check that no set is emptied -- works on `groups`, the sets on show.
+    val found = scan?.groups.orEmpty()
+    val filter = DuplicateRules.effective(chosen, found)
+    val groups = DuplicateRules.shown(found, filter)
+    val picked = DuplicateRules.selectedIn(groups, selected)
     val freed = DuplicateRules.freedBy(groups, selected)
 
     Scaffold(
@@ -139,13 +150,15 @@ fun DuplicatesScreen(
             TopAppBar(
                 title = { Text("Duplicates", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
                 actions = {
                     // Selecting every extra copy in one go, which is the whole
-                    // point of the screen for anyone with a lot of them.
+                    // point of the screen for anyone with a lot of them. The
+                    // extras of what is on show; a choice made under another
+                    // filter is left as it was.
                     IconButton(
-                        onClick = { selected = DuplicateRules.removableIn(groups, keeping).toSet() },
+                        onClick = { selected = selected + DuplicateRules.removableIn(groups, keeping) },
                         enabled = canWrite && groups.isNotEmpty(),
                     ) { Icon(Icons.Default.DoneAll, "Select every extra copy") }
                     IconButton(
@@ -156,14 +169,14 @@ fun DuplicatesScreen(
             )
         },
         bottomBar = {
-            AnimatedVisibility(visible = selected.isNotEmpty()) {
+            AnimatedVisibility(visible = picked.isNotEmpty()) {
                 Surface(tonalElevation = 3.dp) {
                     Row(
                         Modifier.fillMaxWidth().padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("${selected.size} selected", fontWeight = FontWeight.Medium)
+                            Text("${picked.size} selected", fontWeight = FontWeight.Medium)
                             Text(
                                 "${humanBytes(freed)} to reclaim",
                                 style = MaterialTheme.typography.bodySmall,
@@ -181,7 +194,30 @@ fun DuplicatesScreen(
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            Header(scan, busy, error, gaveUp, minBytes, canWrite, supported)
+            Header(scan, groups, busy, error, gaveUp, minBytes, canWrite, supported)
+
+            // The same four as Favorites, counted in sets. One with nothing in
+            // it is shown, so the counts add up, but cannot be chosen.
+            if (found.isNotEmpty()) {
+                val counts = DuplicateRules.counts(found)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FavoriteRules.Filter.entries.forEach { option ->
+                        val count = counts[option] ?: 0
+                        FilterChip(
+                            selected = option == filter,
+                            onClick = { chosen = option },
+                            enabled = option == FavoriteRules.Filter.ALL || count > 0,
+                            label = { Text("${option.label} ($count)") },
+                        )
+                    }
+                }
+            }
 
             when {
                 supported == false -> Message(
@@ -189,7 +225,7 @@ fun DuplicatesScreen(
                         "CloudHub than the one it is running."
                 )
 
-                busy && groups.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                busy && found.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     CircularProgressIndicator()
                 }
 
@@ -198,8 +234,10 @@ fun DuplicatesScreen(
                     else "Nothing has been scanned yet, and your account cannot start a scan."
                 )
 
+                // A filter with nothing in it falls back to All, so this is
+                // the scan having found nothing at all.
                 groups.isEmpty() && error == null ->
-                    Message("No photo or video is stored twice.")
+                    Message("Nothing here is stored twice.")
 
                 else -> LazyColumn(
                     contentPadding = PaddingValues(bottom = 24.dp),
@@ -228,10 +266,12 @@ fun DuplicatesScreen(
     }
 
     if (confirming) {
+        // Against the sets on show, which are the ones a delete from here
+        // touches: a set is of one kind, so it is all on show or not at all.
         val emptied = DuplicateRules.wouldEmptyAGroup(groups, selected)
         AlertDialog(
             onDismissRequest = { confirming = false },
-            title = { Text("Move ${selected.size} to the trash?") },
+            title = { Text("Move ${picked.size} to the trash?") },
             text = {
                 Text(
                     if (emptied) {
@@ -249,7 +289,9 @@ fun DuplicatesScreen(
                     enabled = !emptied,
                     onClick = {
                         confirming = false
-                        val going = selected
+                        // What is ticked among the sets on show, and nothing
+                        // ticked under another filter.
+                        val going = picked
                         scope.launch {
                             // One request per file: the server has no bulk
                             // delete, and each of these is an ordinary delete
@@ -261,7 +303,8 @@ fun DuplicatesScreen(
                             // is known, so the list is brought up to date here
                             // rather than hashing the library again.
                             scan = scan?.let { DuplicateRules.without(it, gone) }
-                            selected = emptySet()
+                            // A choice made under another filter outlives this one.
+                            selected = selected - going
                             snackbar.showSnackbar(
                                 if (gone.size == going.size) "Moved ${gone.size} to the trash"
                                 else "${going.size - gone.size} could not be deleted"
@@ -291,6 +334,8 @@ private fun Message(text: String) {
 @Composable
 private fun Header(
     scan: DuplicateScan?,
+    /** The sets the filter shows, which is what the summary counts. */
+    shown: List<DuplicateGroup>,
     busy: Boolean,
     error: String?,
     gaveUp: Boolean,
@@ -300,7 +345,7 @@ private fun Header(
 ) {
     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(
-            DuplicateRules.summary(scan?.groups?.size ?: 0, scan?.reclaimable ?: 0) { humanBytes(it) },
+            DuplicateRules.summary(shown.size, shown.sumOf { it.reclaimable }) { humanBytes(it) },
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
