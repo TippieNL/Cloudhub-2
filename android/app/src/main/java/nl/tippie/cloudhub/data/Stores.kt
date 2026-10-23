@@ -70,6 +70,16 @@ class Settings(context: Context) {
         set(value) = prefs.edit().putBoolean("grid_view", value).apply()
 
     /**
+     * How folders are sorted -- the Sort by choice -- remembered the same way.
+     *
+     * The enum's own name, like [themeChoice], so the file stays readable and
+     * reordering the options cannot turn a saved Newest into Largest.
+     */
+    var sortChoice: String?
+        get() = prefs.getString("sort_choice", null)
+        set(value) = prefs.edit().putString("sort_choice", value).apply()
+
+    /**
      * The subtitle language last chosen, or null for none.
      *
      * A language rather than a file, for the same reason the web player stores

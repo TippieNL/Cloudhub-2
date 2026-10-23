@@ -7,9 +7,10 @@ declare(strict_types=1);
  * The ordering itself is tested on the JVM: the comparator in NaturalOrderTest
  * (the examples it was asked for, extensions, leading zeros, case, and that it
  * is a total order a sort can rely on), and the folder under every option in
- * FileSortTest. These pin the wiring around it -- one sorting system rather
- * than two, and the three options that were already there left exactly as
- * they were.
+ * FileSortTest, along with the choice surviving a restart. These pin the
+ * wiring around it -- one sorting system rather than two, the three options
+ * that were already there left exactly as they were, and the choice saved
+ * where the app keeps its other settings.
  */
 $root = dirname(__DIR__);
 $kotlin = $root.'/android/app/src/main/java/nl/tippie/cloudhub';
@@ -19,6 +20,9 @@ $readTest = fn(string $name): string =>
 
 $files = $readKt('ui/FilesScreen.kt');
 $state = $readKt('ui/FilesViewModel.kt');
+$stores = $readKt('data/Stores.kt');
+$main = $readKt('MainActivity.kt');
+$settingsScreen = $readKt('ui/SettingsScreen.kt');
 $order = $readKt('ui/NaturalOrder.kt');
 $orderTests = $readTest('NaturalOrderTest.kt');
 $sortTests = $readTest('FileSortTest.kt');
@@ -44,7 +48,7 @@ $checks['it sits between Name and Newest'] =
 /* --- one sorting system -------------------------------------------------------- */
 
 $checks['it is a fourth value of the existing sort'] =
-    str_contains($state, 'enum class Sort { NAME, NATURAL, NEWEST, LARGEST }')
+    str_contains($state, 'NAME, NATURAL, NEWEST, LARGEST;')
     && str_contains($state, 'Sort.NATURAL -> NaturalOrder.compare(a.name, b.name)');
 // Folders first under every sort, this one included.
 $checks['folders still come first'] =
@@ -59,10 +63,44 @@ $checks['Name, Newest and Largest are as they were'] =
 $checks['a state is sorted once, not on every read'] =
     str_contains($state, 'val visible: List<FileEntry> by lazy {')
     && !preg_match('/val visible: List<FileEntry>\s*\n\s*get\(\)/', $state);
-// Choosing a sort changes what is on screen and nothing else: no request, so
-// nothing on the server is moved, renamed or touched.
+// Choosing a sort changes what is on screen and what is remembered, and
+// nothing else: no request, so nothing on the server is moved, renamed or
+// touched.
+$setSort = (string)preg_replace('/^.*?(fun setSort\(sort: FilesState\.Sort\) \{.*?\n    \}).*$/s', '$1', $state);
 $checks['choosing a sort touches nothing but the screen'] =
-    str_contains($state, 'fun setSort(sort: FilesState.Sort) = _state.update { it.copy(sort = sort) }');
+    str_starts_with($setSort, 'fun setSort(sort: FilesState.Sort) {')
+    && str_contains($setSort, '_state.update { it.copy(sort = sort) }')
+    && str_contains($setSort, 'memory.sort = sort')
+    && !str_contains($setSort, 'api.') && !str_contains($setSort, 'launch');
+
+/* --- remembered across restarts ----------------------------------------------
+ *
+ * Saved as it is chosen and read back when the model is built, which is what
+ * a launch does -- the way the web app keeps cfh_sort in localStorage. Grid or
+ * list goes the same way: Settings saved that switch and nothing ever read it,
+ * so every launch opened in the grid whatever it said.
+ */
+$checks['the sort is saved under its own name'] =
+    str_contains($stores, 'var sortChoice: String?')
+    && str_contains($stores, 'prefs.getString("sort_choice", null)')
+    && str_contains($stores, 'prefs.edit().putString("sort_choice", value).apply()');
+$checks['and read back through the same names'] =
+    str_contains($state, 'get() = FilesState.Sort.of(settings.sortChoice)')
+    && str_contains($state, 'set(value) { settings.sortChoice = value.name }')
+    && str_contains($state, 'entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: NAME');
+$checks['a launch opens the way the app was left'] =
+    str_contains($state, 'MutableStateFlow(FilesState(sort = memory.sort, grid = memory.grid))')
+    && str_contains($main, 'FilesViewModel(app.api, SettingsViewMemory(app.settings))');
+$checks['grid or list is saved the same way'] =
+    str_contains($state, 'memory.grid = grid')
+    && str_contains($state, 'set(value) { settings.gridView = value }');
+$checks['the Settings switch changes the files screen, not only the file'] =
+    str_contains($main, 'onGrid = { model.setGrid(it) },')
+    && str_contains($settingsScreen, 'onChange = onGrid,')
+    && !str_contains($settingsScreen, 'settings.gridView');
+$checks['restoring is tested'] =
+    str_contains($sortTests, 'a sort chosen is the sort the next launch opens with')
+    && str_contains($sortTests, 'a saved name is read back as its sort, and anything else as Name');
 
 /* --- the comparator ------------------------------------------------------------ */
 

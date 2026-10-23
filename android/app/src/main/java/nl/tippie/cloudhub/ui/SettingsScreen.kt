@@ -61,6 +61,9 @@ fun SettingsScreen(
     videoCacheBytes: Long,
     theme: ThemeChoice,
     onTheme: (ThemeChoice) -> Unit,
+    /** Grid or list: the files screen's own, so changing it here changes it there. */
+    grid: Boolean,
+    onGrid: (Boolean) -> Unit,
     onClearCache: () -> Unit,
     onClearVideoCache: () -> Unit,
     onChangeServer: () -> Unit,
@@ -74,7 +77,6 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
-    var grid by remember { mutableStateOf(settings.gridView) }
     var remembered by remember { mutableStateOf(settings.rememberedUsername) }
     var positions by remember { mutableStateOf(settings.rememberedPositionCount()) }
     var changingPassword by remember { mutableStateOf(false) }
@@ -182,7 +184,7 @@ fun SettingsScreen(
                     title = "Open folders in the grid",
                     supporting = if (grid) "Pictures first, in a grid" else "Names first, in a list",
                     checked = grid,
-                    onChange = { grid = it; settings.gridView = it },
+                    onChange = onGrid,
                 )
             }
 

@@ -1,8 +1,15 @@
 package nl.tippie.cloudhub
 
+import nl.tippie.cloudhub.net.CloudHubApi
+import nl.tippie.cloudhub.net.CloudHubClient
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.net.InMemoryCookieStore
+import nl.tippie.cloudhub.net.PinnedCertificates
 import nl.tippie.cloudhub.ui.FilesState
 import nl.tippie.cloudhub.ui.FilesState.Sort
+import nl.tippie.cloudhub.ui.FilesViewModel
+import nl.tippie.cloudhub.ui.InMemoryViewMemory
+import nl.tippie.cloudhub.ui.ViewMemory
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotSame
@@ -12,7 +19,8 @@ import kotlin.test.assertSame
  * A folder under each of the Sort by options.
  *
  * Natural Number is new; Name, Newest and Largest are pinned here exactly as
- * they were before it, folders first under every one of them.
+ * they were before it, folders first under every one of them. Whichever is
+ * chosen -- and grid or list with it -- is what the next launch opens with.
  */
 class FileSortTest {
 
@@ -98,5 +106,55 @@ class FileSortTest {
         assertNotSame(state.visible, resorted.visible)
         assertEquals("folder 1", resorted.visible.first().name)
         assertEquals("Image 10.jpg", resorted.visible[3].name)
+    }
+
+    /* ---- across restarts ------------------------------------------------
+     *
+     * A restart is a new model built over what was saved, which is exactly
+     * what these do. Nothing here touches the network: choosing a sort or a
+     * view sends no request.
+     */
+
+    private fun model(memory: ViewMemory) = FilesViewModel(
+        CloudHubApi("http://127.0.0.1:9", CloudHubClient(InMemoryCookieStore(), object : PinnedCertificates {
+            override fun isPinned(fingerprint: String) = false
+        })),
+        memory,
+    )
+
+    @Test fun `a sort chosen is the sort the next launch opens with`() {
+        val saved = InMemoryViewMemory()
+        model(saved).setSort(Sort.NATURAL)
+        assertEquals(Sort.NATURAL, saved.sort)
+        assertEquals(Sort.NATURAL, model(saved).state.value.sort)
+    }
+
+    @Test fun `so is grid or list`() {
+        val saved = InMemoryViewMemory()
+        model(saved).setGrid(false)
+        assertEquals(false, model(saved).state.value.grid)
+    }
+
+    @Test fun `changing the sort again replaces what was saved`() {
+        val saved = InMemoryViewMemory()
+        val first = model(saved)
+        first.setSort(Sort.NATURAL)
+        first.setSort(Sort.LARGEST)
+        assertEquals(Sort.LARGEST, model(saved).state.value.sort)
+    }
+
+    @Test fun `a first launch opens at Name, in the grid`() {
+        val fresh = model(InMemoryViewMemory()).state.value
+        assertEquals(Sort.NAME, fresh.sort)
+        assertEquals(true, fresh.grid)
+    }
+
+    @Test fun `a saved name is read back as its sort, and anything else as Name`() {
+        for (sort in Sort.entries) assertEquals(sort, Sort.of(sort.name))
+        assertEquals(Sort.NAME, Sort.of(null))
+        assertEquals(Sort.NAME, Sort.of(""))
+        // Saved by a build with an option this one does not have.
+        assertEquals(Sort.NAME, Sort.of("SMALLEST"))
+        assertEquals(Sort.NATURAL, Sort.of("natural"))
     }
 }

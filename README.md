@@ -672,10 +672,16 @@ its extension is compared first, so "photo.jpg" stays ahead of "photo 2.jpg",
 hyphen sort before the dot and the underscore after it. Names that read the
 same are settled the same way every time: fewer leading zeros first ("File 1"
 before "File 01"), then upper case before lower. Name, Newest and Largest are
-unchanged. Like them, the choice holds while the app runs — through rotation and
-from folder to folder — and starts again at Name after a restart; only grid or
-list is remembered longer. The web app has no separate option because it needs
-none: its Name sort already compares numbers this way.
+unchanged. The web app has no separate option because it needs none: its Name
+sort already compares numbers this way.
+
+**The sort is remembered**, whichever it is, and so is grid or list: the app
+opens the way it was left, as the web app does with its localStorage. Both are
+saved the moment they are chosen — from the menu, the toggle on the bar or the
+switch in Settings — and read back when the app starts; a saved sort this build
+does not know opens at Name. The grid switch in Settings used to be saved and
+never read, so every launch opened in the grid whatever it said; it now decides,
+and it and the bar's toggle are one setting.
 
 **Settings** covers what previously needed a reinstall: the account and its
 role, changing your own password, the server address and how to change it,

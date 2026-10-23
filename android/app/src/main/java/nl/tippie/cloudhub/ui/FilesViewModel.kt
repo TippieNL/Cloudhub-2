@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import nl.tippie.cloudhub.data.Settings
 import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
@@ -75,7 +76,14 @@ data class FilesState(
     val signedOut: Boolean = false,
 ) {
     /** NATURAL is Name with numbers read as numbers: "File 2" before "File 10". */
-    enum class Sort { NAME, NATURAL, NEWEST, LARGEST }
+    enum class Sort {
+        NAME, NATURAL, NEWEST, LARGEST;
+
+        companion object {
+            /** A saved name back to its sort; anything unrecognised is Name, the default. */
+            fun of(name: String?): Sort = entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: NAME
+        }
+    }
 
     /**
      * What the grid should draw: search results when searching, else the folder.
@@ -116,9 +124,40 @@ data class FilesState(
     )
 }
 
-class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
+/**
+ * Where the files screen keeps its sort and its grid-or-list between launches.
+ *
+ * An interface so the model can be built with nothing Android underneath it:
+ * the app hands it [SettingsViewMemory], a test an [InMemoryViewMemory].
+ */
+interface ViewMemory {
+    var sort: FilesState.Sort
+    var grid: Boolean
+}
 
-    private val _state = MutableStateFlow(FilesState())
+/** Kept in the app's preferences, as the web app keeps them in localStorage. */
+class SettingsViewMemory(private val settings: Settings) : ViewMemory {
+    override var sort: FilesState.Sort
+        get() = FilesState.Sort.of(settings.sortChoice)
+        set(value) { settings.sortChoice = value.name }
+    override var grid: Boolean
+        get() = settings.gridView
+        set(value) { settings.gridView = value }
+}
+
+/** Kept only as long as it exists: the default, and what the tests use. */
+class InMemoryViewMemory(
+    override var sort: FilesState.Sort = FilesState.Sort.NAME,
+    override var grid: Boolean = true,
+) : ViewMemory
+
+class FilesViewModel(
+    private val api: CloudHubApi,
+    private val memory: ViewMemory = InMemoryViewMemory(),
+) : ViewModel() {
+
+    // Opened the way it was left, rather than back at Name and the grid.
+    private val _state = MutableStateFlow(FilesState(sort = memory.sort, grid = memory.grid))
     val state: StateFlow<FilesState> = _state.asStateFlow()
 
     fun start() {
@@ -263,9 +302,20 @@ class FilesViewModel(private val api: CloudHubApi) : ViewModel() {
 
     fun clearSelection() = _state.update { it.copy(selected = emptySet()) }
 
-    fun setSort(sort: FilesState.Sort) = _state.update { it.copy(sort = sort) }
+    /*
+     * Saved as they are chosen, here rather than by each control: the menu,
+     * the bar's toggle and the Settings switch all come through these, so
+     * none of them can change the view without it being remembered.
+     */
+    fun setSort(sort: FilesState.Sort) {
+        _state.update { it.copy(sort = sort) }
+        memory.sort = sort
+    }
 
-    fun setGrid(grid: Boolean) = _state.update { it.copy(grid = grid) }
+    fun setGrid(grid: Boolean) {
+        _state.update { it.copy(grid = grid) }
+        memory.grid = grid
+    }
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
 

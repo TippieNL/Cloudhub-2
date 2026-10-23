@@ -168,7 +168,8 @@ class MainActivity : ComponentActivity() {
 
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
-                    override fun <T : ViewModel> create(modelClass: Class<T>) = FilesViewModel(app.api) as T
+                    override fun <T : ViewModel> create(modelClass: Class<T>) =
+                        FilesViewModel(app.api, SettingsViewMemory(app.settings)) as T
                 })
                 val signIn: SignInViewModel = viewModel(
                     key = "sign-in",
@@ -455,6 +456,10 @@ class MainActivity : ComponentActivity() {
                         videoCacheBytes = MediaCache.sizeBytes(this@MainActivity),
                         theme = theme,
                         onTheme = { theme = it; app.settings.themeChoice = it.name },
+                        // Through the model, so the folder you go back to is
+                        // already in the view just chosen.
+                        grid = state.grid,
+                        onGrid = { model.setGrid(it) },
                         onClearCache = { clearThumbnailCache() },
                         onClearVideoCache = { MediaCache.clear(this@MainActivity) },
                         onChangeServer = { go(Screen.Setup) },
