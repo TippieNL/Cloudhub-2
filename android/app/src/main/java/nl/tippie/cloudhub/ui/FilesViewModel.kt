@@ -74,24 +74,31 @@ data class FilesState(
      */
     val signedOut: Boolean = false,
 ) {
-    enum class Sort { NAME, NEWEST, LARGEST }
+    /** NATURAL is Name with numbers read as numbers: "File 2" before "File 10". */
+    enum class Sort { NAME, NATURAL, NEWEST, LARGEST }
 
-    /** What the grid should draw: search results when searching, else the folder. */
-    val visible: List<FileEntry>
-        get() {
-            val base = searchResults ?: entries.filter {
-                query.isBlank() || it.name.contains(query, ignoreCase = true)
-            }
-            return base.sortedWith(
-                compareByDescending<FileEntry> { it.isDirectory }.thenComparator { a, b ->
-                    when (sort) {
-                        Sort.NAME -> a.name.compareTo(b.name, ignoreCase = true)
-                        Sort.NEWEST -> b.modified.compareTo(a.modified)
-                        Sort.LARGEST -> b.size.compareTo(a.size)
-                    }
-                }
-            )
+    /**
+     * What the grid should draw: search results when searching, else the folder.
+     *
+     * Worked out once per state rather than on every read. The screen reads
+     * it several times for each new state -- the grid, the empty-folder check,
+     * the scroll restore -- and as a getter each read sorted the folder again.
+     */
+    val visible: List<FileEntry> by lazy {
+        val base = searchResults ?: entries.filter {
+            query.isBlank() || it.name.contains(query, ignoreCase = true)
         }
+        base.sortedWith(
+            compareByDescending<FileEntry> { it.isDirectory }.thenComparator { a, b ->
+                when (sort) {
+                    Sort.NAME -> a.name.compareTo(b.name, ignoreCase = true)
+                    Sort.NATURAL -> NaturalOrder.compare(a.name, b.name)
+                    Sort.NEWEST -> b.modified.compareTo(a.modified)
+                    Sort.LARGEST -> b.size.compareTo(a.size)
+                }
+            }
+        )
+    }
 
     val canWrite get() = user?.canWrite == true
 

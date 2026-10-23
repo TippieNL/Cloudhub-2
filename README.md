@@ -662,6 +662,21 @@ The overflow menu carries an icon on every item and marks the sort actually in
 force — three lines reading "Sort by …" with nothing to tell them apart left you
 unable to see how a folder was sorted without changing it to find out.
 
+**Natural Number**, under Sort by beside Name, reads the numbers in a name as
+numbers: "File 2" before "File 10", "Image 2.jpg" before "Image 10.jpg", and
+"1.2.3" before "1.2.10" — dotted numbers section by section, the way versions
+are read, so "1.9" comes before "1.10". Letters compare without regard to case,
+as under Name, and folders still come first, by the same rules. The name before
+its extension is compared first, so "photo.jpg" stays ahead of "photo 2.jpg",
+"photo-2.jpg" and "photo_2.jpg" alike; character by character, the space and
+hyphen sort before the dot and the underscore after it. Names that read the
+same are settled the same way every time: fewer leading zeros first ("File 1"
+before "File 01"), then upper case before lower. Name, Newest and Largest are
+unchanged. Like them, the choice holds while the app runs — through rotation and
+from folder to folder — and starts again at Name after a restart; only grid or
+list is remembered longer. The web app has no separate option because it needs
+none: its Name sort already compares numbers this way.
+
 **Settings** covers what previously needed a reinstall: the account and its
 role, changing your own password, the server address and how to change it,
 storage and the duplicate finder, the theme (system, light or dark — the app
