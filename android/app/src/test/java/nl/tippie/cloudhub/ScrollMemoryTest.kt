@@ -87,6 +87,95 @@ class ScrollMemoryTest {
         assertEquals(ScrollMemory.Place(7, 3), restored.placeOf("/Photos/My Holiday"))
     }
 
+    /* ---- walking back up to a folder -----------------------------------------
+     *
+     * A folder is listed again when you come back to it, so the place is found
+     * by name first: by then a file may have been added above, the sort may
+     * have changed, or the filter you found the folder through been cleared.
+     */
+
+    private val sixty = (1..60).map { "/Photos/Folder ${it.toString().padStart(2, '0')}" }
+
+    @Test
+    fun `the folder you opened comes back at the height it had on screen`() {
+        val memory = ScrollMemory()
+        // First on screen was row 40, 12 px in; the folder opened sat 300 px down.
+        memory.rememberOpening("/Photos", 40, 12, key = sixty[40], opened = sixty[44], openedTop = 300)
+        // Asked for as "row 44, 300 px below the top" -- which, with nothing
+        // changed, is exactly the screen that was left.
+        assertEquals(ScrollMemory.Start(44, -300), ScrollMemory.startFor(memory.placeOf("/Photos"), sixty))
+    }
+
+    @Test
+    fun `it is found by name when the list has changed meanwhile`() {
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 2, 0, key = sixty[40], opened = sixty[44], openedTop = 300)
+        // Left while filtered down to a handful; back, the list is all sixty.
+        assertEquals(44, ScrollMemory.startFor(memory.placeOf("/Photos"), sixty).index)
+        // And with ten files added above it, still the same folder.
+        val more = (1..10).map { "/Photos/A new file $it" } + sixty
+        assertEquals(54, ScrollMemory.startFor(memory.placeOf("/Photos"), more).index)
+    }
+
+    @Test
+    fun `a folder partly scrolled off the top comes back partly off`() {
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 44, 40, key = sixty[44], opened = sixty[44], openedTop = -40)
+        assertEquals(ScrollMemory.Start(44, 40), ScrollMemory.startFor(memory.placeOf("/Photos"), sixty))
+    }
+
+    @Test
+    fun `without an opened folder, the first file on screen is found by name`() {
+        val memory = ScrollMemory()
+        memory.remember("/Photos", 20, 17, key = sixty[20])
+        val shuffled = sixty.reversed()
+        assertEquals(ScrollMemory.Start(shuffled.indexOf(sixty[20]), 17), ScrollMemory.startFor(memory.placeOf("/Photos"), shuffled))
+    }
+
+    @Test
+    fun `with both names gone, the same row -- or the last, in a shorter list`() {
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 20, 17, key = "/Photos/gone", opened = "/Photos/also gone", openedTop = 300)
+        assertEquals(ScrollMemory.Start(20, 17), ScrollMemory.startFor(memory.placeOf("/Photos"), sixty))
+        assertEquals(ScrollMemory.Start(9, 0), ScrollMemory.startFor(memory.placeOf("/Photos"), sixty.take(10)))
+    }
+
+    @Test
+    fun `a folder never visited, or empty, opens at the top`() {
+        assertEquals(ScrollMemory.TOP, ScrollMemory.startFor(null, sixty))
+        val memory = ScrollMemory()
+        memory.remember("/Photos", 20, 17, key = sixty[20])
+        assertEquals(ScrollMemory.TOP, ScrollMemory.startFor(memory.placeOf("/Photos"), emptyList()))
+    }
+
+    @Test
+    fun `scrolling after coming back replaces the opened folder`() {
+        // The folder opened is the place to come back to only until you move
+        // on: scroll, and an ordinary place is written over it.
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 40, 12, key = sixty[40], opened = sixty[44], openedTop = 300)
+        memory.remember("/Photos", 5, 0, key = sixty[5])
+        assertNull(memory.placeOf("/Photos")?.opened)
+        assertEquals(ScrollMemory.Start(5, 0), ScrollMemory.startFor(memory.placeOf("/Photos"), sixty))
+    }
+
+    @Test
+    fun `the bar is remembered with the place, and never as more than shown`() {
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 40, 12, key = sixty[40], opened = sixty[44], openedTop = 300, bar = -128f)
+        assertEquals(-128f, memory.placeOf("/Photos")?.bar)
+        memory.remember("/Photos", 40, 12, key = sixty[40], bar = 30f)
+        assertEquals(0f, memory.placeOf("/Photos")?.bar)
+    }
+
+    @Test
+    fun `names and the bar survive being written down and read back`() {
+        val memory = ScrollMemory()
+        memory.rememberOpening("/Photos", 40, 12, key = sixty[40], opened = sixty[44], openedTop = 300, bar = -64f)
+        val restored = ScrollMemory(memory.snapshot())
+        assertEquals(memory.placeOf("/Photos"), restored.placeOf("/Photos"))
+    }
+
     /* ---- coming back to the file you were on ------------------------------ */
 
     @Test

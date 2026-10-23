@@ -877,6 +877,29 @@ walking up out of a subfolder lands where you were in the parent rather than at
 its top. The memory is bounded at 32 folders, dropped oldest-first, since the
 folder you just left is the one you are most likely to return to.
 
+That memory did not, in the end, survive walking back up: the parent still came
+back at its top. Three things undid it. The memory lived inside the list, which
+is taken down whenever the loading placeholders replace it — any folder slower
+than the skeleton's 120 ms delay — so a slow subfolder wiped every remembered
+place. One scroll state was shared by every folder, and opening a folder
+empties the list before the next one arrives; a lazy list measured with nothing
+in it resets to the top, and the recorder wrote that down as the place you had
+just left. And the effects read the folder they were started with rather than
+the one on screen.
+
+Now the memory sits above the placeholders, and every arrival — a folder opened
+or returned to, the grid switched to the list, a search shown or ended — gets
+its own scroll state **created at the remembered place**, so the first frame is
+already right: nothing is restored after the fact, nothing jumps, and the list
+is never laid out empty. Opening a folder also notes which one and how far down
+the screen it sat, so coming back puts it under your finger again, found **by
+name**: a file added above, a different sort, or the filter you found it
+through cleared on the way back does not land you on a neighbour. The top
+bar's tucked-away state is part of the place, since the list moves with the
+bar; a folder never visited opens at the top with the bar shown, and a list too
+short to scroll always gets its bar back. Ending an All folders search puts the
+folder back where it was, too.
+
 A screen that has been *closed*, though, is finished with, and its state is
 dropped: kept, it would outrank the arguments the screen is next opened with.
 The photo viewer remembers which photo is on show, so holding that across

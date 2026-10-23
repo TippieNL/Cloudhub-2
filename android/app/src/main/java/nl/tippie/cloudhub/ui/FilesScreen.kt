@@ -31,12 +31,12 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
@@ -277,6 +277,7 @@ fun FilesScreen(
             BrowserContent(
                 api = api,
                 state = state,
+                bar = scrollBehavior.state,
                 onOpen = { entry -> if (entry.isDirectory) model.open(entry.path) else onOpenFile(entry) },
                 onLongPress = model::toggleSelected,
                 onMenu = { menuFor = it },
@@ -378,10 +379,12 @@ private data class PickerRequest(val paths: List<String>, val moving: Boolean)
  * crossfade is the whole point: replacing placeholders with content in a single
  * frame is what makes an app feel like it stuttered rather than loaded.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BrowserContent(
     api: CloudHubApi,
     state: FilesState,
+    bar: TopAppBarState,
     onOpen: (FileEntry) -> Unit,
     onLongPress: (String) -> Unit,
     onMenu: (FileEntry) -> Unit,
@@ -394,6 +397,16 @@ private fun BrowserContent(
     // Held briefly past the answer so a fast folder does not flash a skeleton
     // and a slow one does not blink it away the instant it lands.
     val settled = rememberSettledSkeleton(shown)
+
+    /*
+     * Where each folder was left, held out here rather than in the list.
+     *
+     * The list is taken down whenever the placeholders take its place -- any
+     * folder slower to arrive than the skeleton's delay, or a filter that
+     * matches nothing -- and a memory kept inside it went with it, so walking
+     * back up landed at the top every time the folder below had been slow.
+     */
+    val memory = rememberSaveable(saver = ScrollMemorySaver) { ScrollMemory() }
 
     AnimatedContent(
         targetState = settled,
@@ -410,7 +423,7 @@ private fun BrowserContent(
             Shown.ERROR -> LoadFailed(state.loadError, onRetry)
             Shown.EMPTY -> EmptyFolder(canWrite = state.canWrite, onNewFolder = onNewFolder)
             Shown.NO_MATCHES -> NoMatches(state.query, searchedEverywhere = state.searchMode, stillSearching = state.searching)
-            Shown.CONTENT -> EntryList(api, state, onOpen, onLongPress, onMenu, revealPath, onRevealed)
+            Shown.CONTENT -> EntryList(api, state, memory, bar, onOpen, onLongPress, onMenu, revealPath, onRevealed)
         }
     }
 }
@@ -480,10 +493,13 @@ private fun SkeletonList(grid: Boolean) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EntryList(
     api: CloudHubApi,
     state: FilesState,
+    memory: ScrollMemory,
+    bar: TopAppBarState,
     onOpen: (FileEntry) -> Unit,
     onLongPress: (String) -> Unit,
     onMenu: (FileEntry) -> Unit,
@@ -492,55 +508,98 @@ private fun EntryList(
 ) {
     val entries = state.visible
     val searching = state.searchResults != null
+    // The list as it is now, for the effects below: one started for an
+    // earlier composition would otherwise go on reading the list it began
+    // with -- which is how restoring used to wait for ever on an empty one.
+    val latest by rememberUpdatedState(entries)
 
     /*
-     * Where this folder was when you left it.
+     * One scroll state per arrival -- a folder opened or come back to, the
+     * view switched, a search shown or ended -- created already at the place
+     * remembered for it, so the first frame of a folder is in the right place.
+     * Nothing is restored after the fact, so nothing jumps, and there is no
+     * restoring effect for anything else to race.
      *
-     * The list states below are saveable, so the screen holder keeps them
-     * while you are watching a video -- but there is one of them for every
-     * folder, so it can only describe the folder on screen. The memory is what
-     * makes walking up a folder land where you were rather than at the top.
+     * A single state shared by every folder was the other half of the bug.
+     * Opening a folder empties the list before the next one arrives, and a
+     * lazy list measured with nothing in it resets to the top -- which the
+     * recorder then wrote down as the place you had just left. A state here
+     * is only ever laid out with its own folder's items, because the list is
+     * left out entirely while there are none (below).
      */
-    val memory = rememberSaveable(saver = ScrollMemorySaver) { ScrollMemory() }
-    val grid = rememberLazyGridState()
-    val list = rememberLazyListState()
-    /*
-     * Read through functions rather than into values.
-     *
-     * snapshotFlow re-runs when state read *inside* its block changes; a
-     * position captured out here would be one value the flow never sees change,
-     * so the folder would be recorded once, at the top, and nowhere else.
-     */
-    val firstVisible = { if (state.grid) grid.firstVisibleItemIndex else list.firstVisibleItemIndex }
-    val offset = { if (state.grid) grid.firstVisibleItemScrollOffset else list.firstVisibleItemScrollOffset }
+    val arrival = Arrival(state.path, state.grid, searching)
+    val start = remember(arrival) {
+        // A search starts at its first result; a folder where it was left.
+        if (searching) ScrollMemory.TOP
+        else ScrollMemory.startFor(memory.placeOf(state.path), entries.map { it.path })
+    }
+    val grid = remember(arrival) { LazyGridState(start.index, start.offset) }
+    val list = remember(arrival) { LazyListState(start.index, start.offset) }
+
+    // The bar as it was in this folder -- shown, for one never visited --
+    // set before the first layout, so the rows land where they were on the
+    // screen and not just in the list. Search results leave it alone.
+    DisposableEffect(arrival) {
+        if (!arrival.searching) bar.heightOffset = memory.placeOf(arrival.path)?.bar ?: 0f
+        onDispose { }
+    }
+
+    val firstVisible = { if (arrival.grid) grid.firstVisibleItemIndex else list.firstVisibleItemIndex }
+    val offset = { if (arrival.grid) grid.firstVisibleItemScrollOffset else list.firstVisibleItemScrollOffset }
+    val laidOut = { if (arrival.grid) grid.layoutInfo.totalItemsCount else list.layoutInfo.totalItemsCount }
     val lastVisible = {
         // Branched whole: the two layout infos have no common item type, so
         // asking one question of both does not compile.
-        if (state.grid) (grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible())
+        if (arrival.grid) (grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible())
         else (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: firstVisible())
     }
 
-    // Restoration happens once per folder, and recording waits for it: a
-    // recorder running first would write "the top" over the place being
-    // restored, every time.
-    var restored by remember(state.path) { mutableStateOf(false) }
-
-    LaunchedEffect(state.path, state.grid) {
-        // An empty list cannot be scrolled; wait for the folder to arrive.
-        snapshotFlow { state.visible.size }.first { it > 0 }
-        val place = memory.placeOf(state.path)
-        if (place != null) {
-            if (state.grid) grid.scrollToItem(place.index, place.offset)
-            else list.scrollToItem(place.index, place.offset)
-        }
-        restored = true
+    /*
+     * Where this folder is, written down as it scrolls -- read inside the
+     * flow, so every move is seen. Not before the state's first layout, when
+     * it only holds the place it was created at; and never for search
+     * results, which are not the folder.
+     */
+    LaunchedEffect(arrival) {
+        if (arrival.searching) return@LaunchedEffect
+        snapshotFlow { Triple(firstVisible(), offset(), laidOut()) to bar.heightOffset }
+            .collect { (place, tucked) ->
+                val (index, at, items) = place
+                val now = latest
+                if (items > 0 && now.isNotEmpty()) {
+                    memory.remember(arrival.path, index, at, now.getOrNull(index)?.path, tucked)
+                }
+            }
     }
 
-    LaunchedEffect(state.path, state.grid) {
-        snapshotFlow { Triple(firstVisible(), offset(), state.visible.size) }
-            .collect { (index, at, size) ->
-                if (restored && size > 0) memory.remember(state.path, index, at)
-            }
+    // A list too short to scroll cannot bring a hidden bar back -- scrolling
+    // up is how it returns -- so a folder that has shrunk since the bar was
+    // tucked away gets it back once it is laid out.
+    LaunchedEffect(arrival) {
+        snapshotFlow { laidOut() }.first { it > 0 }
+        val scrolls = if (arrival.grid) grid.canScrollForward || grid.canScrollBackward
+            else list.canScrollForward || list.canScrollBackward
+        if (!scrolls) bar.heightOffset = 0f
+    }
+
+    /*
+     * Opening one of this folder's folders: where it sat on screen, so coming
+     * back puts it under your finger again even if the list has changed -- a
+     * file added, the sort switched, or the filter you found it through
+     * cleared by Back on the way up. Taken at the tap, the last moment the
+     * list on screen is this folder's: opening empties it while the next one
+     * loads.
+     */
+    val leaving: (Int, FileEntry) -> Unit = leaving@{ index, entry ->
+        if (!entry.isDirectory || arrival.searching) return@leaving
+        val top = if (arrival.grid) grid.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.offset?.y
+            else list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.offset
+        if (top != null) {
+            val first = firstVisible()
+            memory.rememberOpening(
+                state.path, first, offset(), entries.getOrNull(first)?.path, entry.path, top, bar.heightOffset,
+            )
+        }
     }
 
     /*
@@ -551,11 +610,13 @@ private fun EntryList(
      * since scrolling a file that is already visible up to the top edge is a
      * jump for no reason.
      */
-    LaunchedEffect(revealPath, entries.size, restored) {
-        if (revealPath == null || !restored || entries.isEmpty()) return@LaunchedEffect
-        val target = ScrollMemory.indexOfPath(entries.map { it.path }, revealPath)
+    LaunchedEffect(revealPath, arrival) {
+        if (revealPath == null) return@LaunchedEffect
+        // Laid out first, or "is it on screen" has no answer.
+        snapshotFlow { laidOut() }.first { it > 0 }
+        val target = ScrollMemory.indexOfPath(latest.map { it.path }, revealPath)
         if (ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())) {
-            if (state.grid) grid.scrollToItem(target) else list.scrollToItem(target)
+            if (arrival.grid) grid.scrollToItem(target) else list.scrollToItem(target)
         }
         onRevealed()
     }
@@ -569,7 +630,10 @@ private fun EntryList(
         else entrance.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
     }
 
-    if (state.grid) {
+    if (entries.isEmpty()) {
+        // A folder on its way: nothing to measure until its items are here.
+        Box(Modifier.fillMaxSize())
+    } else if (arrival.grid) {
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = GRID_MIN_CELL),
             state = grid,
@@ -581,7 +645,7 @@ private fun EntryList(
             itemsIndexed(entries) { index, entry ->
                 FileTile(
                     api, entry, entry.path in state.selected, searching,
-                    onOpen = { onOpen(entry) },
+                    onOpen = { leaving(index, entry); onOpen(entry) },
                     onLongPress = { onLongPress(entry.path) },
                     onMenu = { onMenu(entry) },
                     // animateItem gives filtering-as-you-type a re-flow rather
@@ -600,7 +664,7 @@ private fun EntryList(
             itemsIndexed(entries) { index, entry ->
                 FileRow(
                     api, entry, entry.path in state.selected, searching,
-                    onOpen = { onOpen(entry) },
+                    onOpen = { leaving(index, entry); onOpen(entry) },
                     onLongPress = { onLongPress(entry.path) },
                     onMenu = { onMenu(entry) },
                     modifier = Modifier.animateItem().staggered(entrance.value, index),
@@ -611,21 +675,40 @@ private fun EntryList(
     }
 }
 
+/** What a scroll state belongs to: one folder, in one view, as itself or as search results. */
+private data class Arrival(val path: String, val grid: Boolean, val searching: Boolean)
+
 /**
  * The remembered folders, written down.
  *
- * Flat on purpose -- path, index, offset repeating -- because a Saver has to
- * survive being written to a Bundle, and a map of data classes does not.
+ * Flat on purpose -- path, index, offset, first file, opened folder and its
+ * height, the bar, repeating -- because a Saver has to survive being written
+ * to a Bundle, and a map of data classes does not. A missing name is written
+ * as "". Anything that does not read back as seven fields of the right kinds
+ * -- a row written by an older build, say -- is dropped rather than trusted.
  */
 private val ScrollMemorySaver = listSaver<ScrollMemory, Any>(
     save = { memory ->
-        memory.snapshot().flatMap { (path, place) -> listOf(path, place.index, place.offset) }
+        memory.snapshot().flatMap { (path, place) ->
+            listOf(path, place.index, place.offset, place.key.orEmpty(), place.opened.orEmpty(), place.openedTop, place.bar)
+        }
     },
     restore = { flat ->
         val places = LinkedHashMap<String, ScrollMemory.Place>()
-        flat.chunked(3).forEach { row ->
-            if (row.size == 3) {
-                places[row[0] as String] = ScrollMemory.Place(row[1] as Int, row[2] as Int)
+        flat.chunked(7).forEach { row ->
+            val path = row.getOrNull(0) as? String
+            val index = row.getOrNull(1) as? Int
+            val offset = row.getOrNull(2) as? Int
+            val key = row.getOrNull(3) as? String
+            val opened = row.getOrNull(4) as? String
+            val openedTop = row.getOrNull(5) as? Int
+            val tucked = row.getOrNull(6) as? Float
+            if (path != null && index != null && offset != null && key != null && opened != null &&
+                openedTop != null && tucked != null
+            ) {
+                places[path] = ScrollMemory.Place(
+                    index, offset, key.ifEmpty { null }, opened.ifEmpty { null }, openedTop, tucked,
+                )
             }
         }
         ScrollMemory(places)

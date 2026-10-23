@@ -107,35 +107,76 @@ $checks['every screen has a stable key to file it under'] =
     str_contains($main, 'private sealed interface Screen {')
     && str_contains($main, 'val key: String')
     && str_contains($main, 'override val key = "files"');
-// The list state has to be the one the effects read; created inline, it is a
-// different object each time and nothing can restore it.
-$checks['the list keeps a scroll position that can be restored'] =
-    str_contains($files, 'val grid = rememberLazyGridState()')
-    && str_contains($files, 'val list = rememberLazyListState()')
+/*
+ * Walking back up a folder landed at the top, every time -- three causes,
+ * each pinned here so none can come back:
+ *
+ *  - the memory lived inside the list, and the list is taken down whenever
+ *    the placeholders take its place, so a slow folder below wiped it;
+ *  - one scroll state was shared by every folder, and opening a folder
+ *    empties the list before the next arrives -- a lazy list measured empty
+ *    resets to the top, and the recorder wrote that down as the place left;
+ *  - the effects read the state they were started with, so restoring could
+ *    wait for ever on a list that was empty when it began.
+ */
+$entryList = (string)preg_replace('/^.*?(private fun EntryList\(.*?)\n\/\*\*.*$/s', '$1', $files);
+$browser = (string)preg_replace('/^.*?(private fun BrowserContent\(.*?)\n\/\*\*.*$/s', '$1', $files);
+$checks['the memory is held above the placeholders, not in the list they replace'] =
+    str_contains($browser, 'val memory = rememberSaveable(saver = ScrollMemorySaver) { ScrollMemory() }')
+    && str_contains($browser, 'EntryList(api, state, memory, bar,')
+    && !str_contains($entryList, 'rememberSaveable(saver = ScrollMemorySaver)');
+// Created already at the remembered place, so the first frame of a folder is
+// the right one: nothing is restored after the fact, so nothing jumps -- and
+// created inline, a state would be a different object every recomposition.
+$checks['each arrival gets a scroll state created at its place'] =
+    str_contains($entryList, 'val arrival = Arrival(state.path, state.grid, searching)')
+    && str_contains($entryList, 'ScrollMemory.startFor(memory.placeOf(state.path), entries.map { it.path })')
+    && str_contains($entryList, 'val grid = remember(arrival) { LazyGridState(start.index, start.offset) }')
+    && str_contains($entryList, 'val list = remember(arrival) { LazyListState(start.index, start.offset) }')
     && str_contains($files, 'state = grid,')
     && str_contains($files, 'state = list,')
     && !str_contains($files, 'state = rememberLazyGridState()');
+$checks['a list is never measured empty, so it never resets to the top'] =
+    str_contains($entryList, "if (entries.isEmpty()) {\n        // A folder on its way: nothing to measure until its items are here.\n        Box(Modifier.fillMaxSize())");
 $checks['a position is kept per folder, with tests'] =
     str_contains($memory, 'class ScrollMemory')
-    && str_contains($files, 'memory.remember(state.path, index, at)')
-    && str_contains($files, 'memory.placeOf(state.path)')
+    && str_contains($entryList, 'memory.remember(arrival.path, index, at, now.getOrNull(index)?.path, tucked)')
     && str_contains($memoryTests, 'each folder keeps its own place');
-// Recording before restoring writes "the top" over the place being restored,
-// every single time.
 // snapshotFlow re-runs on state read *inside* its block: a position captured
-// outside is one value the flow never sees change, so the folder would be
-// recorded once, at the top, and never again.
+// outside is one value the flow never sees change.
 $checks['the position is read inside the flow, not captured outside it'] =
-    str_contains($files, 'snapshotFlow { Triple(firstVisible(), offset(), state.visible.size) }');
-$checks['recording waits until the place has been restored'] =
-    str_contains($files, 'if (restored && size > 0) memory.remember')
-    && str_contains($files, 'restored = true');
-// A folder that has not arrived cannot be scrolled.
-$checks['restoring waits for the folder to arrive'] =
-    str_contains($files, 'snapshotFlow { state.visible.size }.first { it > 0 }');
+    str_contains($entryList, 'snapshotFlow { Triple(firstVisible(), offset(), laidOut()) to bar.heightOffset }');
+// Nothing before the state's first layout, when it only holds where it was
+// created; and the newest list, not the one the effect started with.
+$checks['nothing is recorded before the folder has been laid out'] =
+    str_contains($entryList, 'if (items > 0 && now.isNotEmpty()) {')
+    && str_contains($entryList, 'val latest by rememberUpdatedState(entries)');
+// Search results are not the folder.
+$checks['search results are not recorded as the folder'] =
+    str_contains($entryList, 'if (arrival.searching) return@LaunchedEffect')
+    && str_contains($entryList, 'if (searching) ScrollMemory.TOP');
+/*
+ * The folder you opened, under your finger again: taken at the tap, the last
+ * moment the list on screen is this folder's, and found by name on the way
+ * back -- a file added, the sort changed or a filter cleared does not land
+ * you on a neighbour.
+ */
+$checks['the folder opened is remembered at the tap, by name'] =
+    str_contains($entryList, 'memory.rememberOpening(')
+    && substr_count($entryList, 'onOpen = { leaving(index, entry); onOpen(entry) },') === 2
+    && str_contains($memory, 'fun startFor(place: Place?, paths: List<String>): Start {')
+    && str_contains($memoryTests, 'it is found by name when the list has changed meanwhile');
+// The bar hides as you scroll and the list moves with it, so a place on screen
+// is the list's position and the bar's.
+$checks['the bar comes back with the place'] =
+    str_contains($entryList, 'bar.heightOffset = memory.placeOf(arrival.path)?.bar ?: 0f')
+    && str_contains($entryList, 'if (!scrolls) bar.heightOffset = 0f')
+    && str_contains($files, 'bar = scrollBehavior.state,');
 $checks['what is remembered survives the screen being rebuilt'] =
     str_contains($files, 'rememberSaveable(saver = ScrollMemorySaver)')
-    && str_contains($files, 'private val ScrollMemorySaver = listSaver<ScrollMemory, Any>');
+    && str_contains($files, 'private val ScrollMemorySaver = listSaver<ScrollMemory, Any>')
+    && str_contains($files, 'flat.chunked(7).forEach { row ->')
+    && str_contains($memoryTests, 'names and the bar survive being written down and read back');
 // Swiping through thirty photos and coming back should land on the one you
 // ended at, not the one you opened.
 // The viewer keeps its own copy of the row, `photos`, so a delete or a rename
@@ -146,8 +187,8 @@ $checks['the viewer says which file it was closed on'] =
     && str_contains($main, 'onBack = { photo -> reveal = photo; back() }')
     && str_contains($main, 'onBack = { reveal = current.entry.path; back() }');
 $checks['and the list comes back to it'] =
-    str_contains($files, 'ScrollMemory.indexOfPath(entries.map { it.path }, revealPath)')
-    && str_contains($files, 'ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())')
+    str_contains($entryList, 'ScrollMemory.indexOfPath(latest.map { it.path }, revealPath)')
+    && str_contains($entryList, 'ScrollMemory.shouldReveal(target, firstVisible(), lastVisible())')
     && str_contains($memoryTests, 'a photo already on screen is left where it is');
 /*
  * ...but a screen that has been closed is over.
