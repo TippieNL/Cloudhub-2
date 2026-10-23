@@ -488,7 +488,7 @@ private fun Activity.setFullscreen(enabled: Boolean) {
     }
 }
 
-private tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
+internal tailrec fun android.content.Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is android.content.ContextWrapper -> baseContext.findActivity()
     else -> null

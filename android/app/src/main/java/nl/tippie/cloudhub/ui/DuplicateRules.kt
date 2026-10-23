@@ -2,6 +2,8 @@ package nl.tippie.cloudhub.ui
 
 import nl.tippie.cloudhub.net.DuplicateGroup
 import nl.tippie.cloudhub.net.DuplicateScan
+import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.ui.FavoriteRules.Filter
 
 /**
  * What the duplicates screen offers to delete, and when to stop asking.
@@ -83,6 +85,78 @@ object DuplicateRules {
     fun freedBy(groups: List<DuplicateGroup>, selected: Set<String>): Long =
         groups.sumOf { group -> group.files.filter { it.path in selected }.sumOf { it.bytes } }
 
+    /* ---- Photos, Videos, Other ---------------------------------------------
+     *
+     * The four filters Favorites offers, so "Photos" means one thing across the
+     * app. They narrow what is shown and nothing else: the scan covers every
+     * file, so switching never scans again -- and what Move to trash and
+     * "select every extra copy" act on is the sets on show, never one out of
+     * sight.
+     */
+
+    /** Which filter a set belongs to: Photos, Videos or Other, never All. */
+    fun kindOf(group: DuplicateGroup): Filter = when (group.kind) {
+        "image" -> Filter.PHOTOS
+        "video" -> Filter.VIDEOS
+        null -> byNames(group)
+        else -> Filter.OTHER
+    }
+
+    /**
+     * A server that does not say what a set is -- an older build, or another
+     * one -- is read by its copies' names, the way the server would: a photo
+     * if any copy is named as one, then a video. Byte-identical copies can
+     * still be named differently, "holiday.jpg" beside "holiday.jpg.bak".
+     */
+    private fun byNames(group: DuplicateGroup): Filter {
+        val kinds = group.files.map { kindOfName(it.path) }
+        return when {
+            Filter.PHOTOS in kinds -> Filter.PHOTOS
+            Filter.VIDEOS in kinds -> Filter.VIDEOS
+            else -> Filter.OTHER
+        }
+    }
+
+    private fun kindOfName(path: String): Filter {
+        val ext = nameOf(path).substringAfterLast('.', "").lowercase()
+        return when {
+            ext in FileEntry.IMAGE || ext in CAMERA_STILLS -> Filter.PHOTOS
+            ext in FileEntry.VIDEO -> Filter.VIDEOS
+            else -> Filter.OTHER
+        }
+    }
+
+    /**
+     * Photos the app cannot draw but a server files as photos -- what an
+     * iPhone and a scanner save. A duplicate finder still files them there.
+     */
+    private val CAMERA_STILLS = setOf("heic", "heif", "tif", "tiff")
+
+    fun matches(filter: Filter, group: DuplicateGroup): Boolean =
+        filter == Filter.ALL || kindOf(group) == filter
+
+    fun counts(groups: List<DuplicateGroup>): Map<Filter, Int> =
+        Filter.entries.associateWith { filter -> groups.count { matches(filter, it) } }
+
+    /**
+     * The filter actually in force. One that has emptied -- its last set
+     * deleted -- falls back to All, as on Favorites, rather than leaving an
+     * empty screen behind a selected chip.
+     */
+    fun effective(chosen: Filter, groups: List<DuplicateGroup>): Filter =
+        if (chosen != Filter.ALL && groups.none { matches(chosen, it) }) Filter.ALL else chosen
+
+    fun shown(groups: List<DuplicateGroup>, filter: Filter): List<DuplicateGroup> =
+        groups.filter { matches(filter, it) }
+
+    /**
+     * The copies ticked among the sets on show: what Move to trash acts on. A
+     * copy ticked under Photos stays ticked while Videos is looked at, but is
+     * never deleted from there unseen.
+     */
+    fun selectedIn(groups: List<DuplicateGroup>, selected: Set<String>): Set<String> =
+        groups.flatMapTo(LinkedHashSet()) { group -> group.files.map { it.path }.filter { it in selected } }
+
     /**
      * True when a selection would leave a group with nothing in it.
      *
@@ -141,10 +215,14 @@ object DuplicateRules {
         else -> "$groupCount ${if (groupCount == 1) "set" else "sets"} of copies · ${humanBytes(reclaimable)} to reclaim"
     }
 
-    /** What the scan is doing right now, under the summary. */
+    /**
+     * What the scan is doing right now, under the summary. "Files", since the
+     * scan here covers every kind -- and says nothing wrong of a server whose
+     * scan does not.
+     */
     fun activity(scan: DuplicateScan): String = when {
-        scan.done -> "${scan.scanned} photos and videos checked"
-        scan.toHash <= 0 -> "Looking through ${scan.scanned} photos and videos…"
+        scan.done -> "${scan.scanned} files checked"
+        scan.toHash <= 0 -> "Looking through ${scan.scanned} files…"
         else -> "Comparing ${scan.hashed} of ${scan.toHash} possible matches…"
     }
 }

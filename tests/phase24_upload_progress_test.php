@@ -64,6 +64,10 @@ $checks['the progress the worker already published is now read'] =
 // The queue file is not observable on its own; the progress flow is the signal.
 $checks['the queue is re-read on every tick, not only on state changes'] =
     str_contains($tracker, 'LaunchedEffect(infos, infos?.progress)');
+// A flow built during composition is a new subscription on every
+// recomposition -- and the tracker recomposes on every chunk.
+$checks['the progress flow is built once, not per recomposition'] =
+    str_contains($tracker, 'val infos by remember(work) {');
 $checks['the bar is docked rather than floating over the files'] =
     str_contains($files, 'bottomBar = {') && str_contains($files, 'UploadTracker(');
 $checks['every queued file is listed, with the one in flight marked'] =
@@ -121,9 +125,12 @@ $declarations = (string)preg_replace('/<!--.*?-->/s', '', $manifest);
 // Stripped, or the comment explaining why setForeground() is avoided trips the
 // check that it is not used.
 $uploadCode = (string)preg_replace('#/\*.*?\*/|//[^\n]*#s', '', $uploads);
+// Four in all now: the fourth, WRITE_EXTERNAL_STORAGE capped at Android 9, is
+// the downloads' (phase21). Uploads still added exactly one.
 $checks['exactly one permission was added, and it is the notification one'] =
     str_contains($declarations, 'android.permission.POST_NOTIFICATIONS')
-    && substr_count($declarations, '<uses-permission') === 3;
+    && substr_count($declarations, '<uses-permission') === 4
+    && str_contains($declarations, 'android:maxSdkVersion="28"');
 $checks['no foreground service was taken on'] =
     !str_contains($declarations, 'FOREGROUND_SERVICE_DATA_SYNC')
     && !str_contains($uploadCode, 'setForeground(');
@@ -137,9 +144,14 @@ $checks['the prompt is not repeated on every upload'] =
     str_contains($stores, 'var notificationsAsked: Boolean')
     && str_contains($main, 'if (app.settings.notificationsAsked) return');
 // The other permissions this app has never wanted.
-foreach (['CAMERA', 'RECORD_AUDIO', 'READ_MEDIA_IMAGES', 'READ_MEDIA_VIDEO', 'EXTERNAL_STORAGE'] as $absent) {
+foreach (['CAMERA', 'RECORD_AUDIO', 'READ_MEDIA_IMAGES', 'READ_MEDIA_VIDEO', 'READ_EXTERNAL_STORAGE',
+          'MANAGE_EXTERNAL_STORAGE'] as $absent) {
     $checks["still no $absent permission"] = !str_contains($declarations, $absent);
 }
+// Android 13 and up ask first: checked by name before posting, so the check is
+// visible to lint and to a reader, not only implied by the calls that cope.
+$checks['the notification permission is checked before posting'] =
+    str_contains($uploads, 'ContextCompat.checkSelfPermission(applicationContext, android.Manifest.permission.POST_NOTIFICATIONS)');
 
 $bad = false;
 foreach ($checks as $name => $ok) {

@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import nl.tippie.cloudhub.net.*
 import nl.tippie.cloudhub.ui.DuplicateRules
+import nl.tippie.cloudhub.ui.FavoriteRules
 import nl.tippie.cloudhub.ui.FilesViewModel
 import nl.tippie.cloudhub.ui.LoadState
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -162,7 +163,10 @@ class ApiIntegrationTest {
         requireServer()
         api.makeFolder("$scratch/sub")
 
-        assertTrue(api.rename("$scratch/chunked.bin", "$scratch/renamed.bin").success)
+        val renamed = api.rename("$scratch/chunked.bin", "$scratch/renamed.bin")
+        assertTrue(renamed.success)
+        // The photo viewer keeps a renamed photo on screen at the path this says.
+        assertEquals("$scratch/renamed.bin", renamed.path, "rename did not say where the file is now")
         assertTrue(api.list(scratch).any { it.name == "renamed.bin" })
 
         val moved = api.move(listOf("$scratch/renamed.bin"), "$scratch/sub")
@@ -218,7 +222,12 @@ class ApiIntegrationTest {
         if (!deleted.trashed) return@runBlocking   // trash disabled on this server
         val entry = api.trash().entries.firstOrNull { it.originalPath == "$scratch/renamed.bin" }
             ?: fail("deleted file is not in the trash")
-        assertTrue(api.restore(entry.id).success)
+        // The viewer's Undo restores by the id the delete answered with, and
+        // shows the photo again at the path the restore answers with.
+        assertEquals(entry.id, deleted.id, "the delete did not say which trash entry it made")
+        val restored = api.restore(deleted.id!!)
+        assertTrue(restored.success)
+        assertEquals("$scratch/renamed.bin", restored.path, "restore did not say where it put the file")
         assertTrue(api.list(scratch).any { it.name == "renamed.bin" }, "restore did not put it back")
     }
 
@@ -303,6 +312,8 @@ class ApiIntegrationTest {
             scan.groups.none { g -> g.files.any { it.path == "$scratch/decoy.jpg" } },
             "a file of the same size but different bytes was called a duplicate",
         )
+        // Filed under Photos, whether the server says so or the names do.
+        assertEquals(FavoriteRules.Filter.PHOTOS, DuplicateRules.kindOf(planted))
     }
 
     @Test fun `15 the last scan is readable without doing the work again`() = runBlocking {

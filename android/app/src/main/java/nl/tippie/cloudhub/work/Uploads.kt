@@ -1,9 +1,11 @@
 package nl.tippie.cloudhub.work
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.work.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
@@ -254,6 +256,13 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
      */
 
     private fun notify(done: Long, total: Long, filesLeft: Int, name: String?) {
+        // Android 13 and up ask first, and until the answer is yes a post is
+        // only dropped. Checked by name rather than left to the calls below,
+        // which do cope -- but say so to nothing that reads the code.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(applicationContext, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
         val manager = NotificationManagerCompat.from(applicationContext)
         if (!manager.areNotificationsEnabled()) return
 

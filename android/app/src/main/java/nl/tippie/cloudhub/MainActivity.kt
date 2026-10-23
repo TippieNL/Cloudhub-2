@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -15,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -25,6 +27,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import coil.imageLoader
+import nl.tippie.cloudhub.data.DownloadRules
 import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
@@ -108,6 +112,28 @@ class MainActivity : ComponentActivity() {
         askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
 
+    /**
+     * Storage, on Android 9 and older only: see DownloadRules.
+     *
+     * Asked for by the Download tap itself, so the prompt explains itself, and
+     * the download carries on the moment it is allowed. Refused, it says where
+     * the setting lives -- Android stops showing the prompt after a refusal
+     * with "Don't ask again", and a download that silently does nothing would
+     * look broken.
+     */
+    private var waitingDownload: FileEntry? = null
+    private val askStorage = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val entry = waitingDownload ?: return@registerForActivityResult
+        waitingDownload = null
+        if (granted) download(entry)
+        else Toast.makeText(
+            this,
+            "Saving to Downloads needs storage access on this version of Android. " +
+                "Allow it in Settings > Apps > CloudHub > Permissions.",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
     /** Where the camera was told to write; consumed when it reports success. */
     private var captureUri: Uri? = null
 
@@ -134,16 +160,11 @@ class MainActivity : ComponentActivity() {
             var theme by remember { mutableStateOf(ThemeChoice.of(app.settings.themeChoice)) }
 
             CloudHubTheme(theme) {
-                // Transparent bars mean the icons have to be told which way to
-                // contrast; without this they are white on a near-white
-                // background in light mode and invisible.
-                val dark = androidx.compose.foundation.isSystemInDarkTheme()
-                LaunchedEffect(dark) {
-                    WindowInsetsControllerCompat(window, window.decorView).apply {
-                        isAppearanceLightStatusBars = !dark
-                        isAppearanceLightNavigationBars = !dark
-                    }
-                }
+                // The theme the app is really in: the phone's, unless Settings
+                // overrides it. The bar icons used to follow the phone either
+                // way, so a forced dark theme on a light phone had dark icons
+                // on a dark bar.
+                val dark = ThemeChoice.resolve(theme, androidx.compose.foundation.isSystemInDarkTheme())
 
                 val model: FilesViewModel = viewModel(factory = object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
@@ -179,6 +200,24 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 val screen = stack.last()
+
+                /*
+                 * Transparent bars mean the icons have to be told which way to
+                 * contrast; without this they are white on a near-white
+                 * background in light mode and invisible.
+                 *
+                 * The photo viewer and the player draw on black whatever the
+                 * theme, so over them the icons are always light -- dark ones
+                 * were all but invisible there in light mode.
+                 */
+                val onBlack = screen is Screen.Images || screen is Screen.Play
+                LaunchedEffect(dark, onBlack) {
+                    WindowInsetsControllerCompat(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = !dark && !onBlack
+                        isAppearanceLightNavigationBars = !dark && !onBlack
+                    }
+                }
+
                 /** Open a screen, remembering the one it was opened from. */
                 fun go(next: Screen) {
                     val updated = BackRules.pushed(stack.toList(), next)
@@ -451,6 +490,12 @@ class MainActivity : ComponentActivity() {
                         onBack = { photo -> reveal = photo; back() },
                         favorites = state.favorites,
                         onToggleFavorite = model::toggleFavorite,
+                        canWrite = state.canWrite,
+                        onDownload = { download(it) },
+                        onShareLink = { sharing = it },
+                        // A rename or delete in the viewer changes the folder,
+                        // and can move a star.
+                        onFilesChanged = { model.refresh() },
                     )
 
                     is Screen.Play -> PlayerScreen(
@@ -502,9 +547,20 @@ class MainActivity : ComponentActivity() {
             .filter { it.isFile }.sumOf { it.length() }
     }.getOrDefault(0L)
 
+    /**
+     * Empty the loader the app actually draws with.
+     *
+     * This used to ask newImageLoader() for a fresh loader each time -- which
+     * cleared that new loader's memory cache, empty by definition, and opened a
+     * second disk cache over the same folder as the real one's. The thumbnails
+     * on screen stayed in memory, and two caches shared one journal.
+     */
+    // Coil 2 still marks its disk cache experimental; deliberately used, as in LocalCopies.
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
     private fun clearThumbnailCache() {
-        runCatching { app.newImageLoader().diskCache?.clear() }
-        runCatching { app.newImageLoader().memoryCache?.clear() }
+        val loader = imageLoader
+        runCatching { loader.diskCache?.clear() }
+        runCatching { loader.memoryCache?.clear() }
     }
 
     /* ---- camera ----------------------------------------------------------- */
@@ -641,13 +697,22 @@ class MainActivity : ComponentActivity() {
     /* ---- downloads -------------------------------------------------------- */
 
     private fun download(entry: FileEntry) {
+        if (DownloadRules.needsStoragePermission(android.os.Build.VERSION.SDK_INT) &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            waitingDownload = entry
+            askStorage.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
         Toast.makeText(this, "Downloading ${entry.name}…", Toast.LENGTH_SHORT).show()
         lifecycleScope.launch(Dispatchers.IO) {
             val message = try {
-                app.api.openDownload(entry.path).use { body ->
+                val saved = app.api.openDownload(entry.path).use { body ->
                     saveToDownloads(this@MainActivity, entry.name, body.byteStream())
                 }
-                "Saved ${entry.name} to Downloads"
+                // The name it was saved under, which is not this one when that was taken.
+                "Saved $saved to Downloads"
             } catch (e: Exception) {
                 "Could not download ${entry.name}: ${e.message}"
             }
@@ -675,8 +740,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Stream into the device's Downloads folder without buffering the whole file. */
-private fun saveToDownloads(context: Context, name: String, input: java.io.InputStream) {
+/**
+ * Stream into the device's Downloads folder without buffering the whole file,
+ * and say what it was saved as.
+ *
+ * Android 10 and up go through MediaStore, which needs no permission. Older
+ * versions have no Downloads collection, so the file is written to the folder
+ * directly -- which is what WRITE_EXTERNAL_STORAGE, declared for them alone,
+ * is for. Either way a download that fails part-way leaves nothing behind:
+ * half a file in Downloads looks exactly like the real one.
+ */
+private fun saveToDownloads(context: Context, name: String, input: java.io.InputStream): String {
     val safe = name.substringAfterLast('/').ifBlank { "download" }
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
         val values = android.content.ContentValues().apply {
@@ -686,15 +760,38 @@ private fun saveToDownloads(context: Context, name: String, input: java.io.Input
         val resolver = context.contentResolver
         val item = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: throw java.io.IOException("The Downloads folder refused the file")
-        resolver.openOutputStream(item)?.use { input.copyTo(it) }
-            ?: throw java.io.IOException("The Downloads folder could not be opened")
+        try {
+            resolver.openOutputStream(item)?.use { input.copyTo(it) }
+                ?: throw java.io.IOException("The Downloads folder could not be opened")
+        } catch (e: Exception) {
+            runCatching { resolver.delete(item, null, null) }
+            throw e
+        }
         values.clear()
         values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
         resolver.update(item, values, null, null)
+        // MediaStore picks a free name when this one is taken; say which.
+        return runCatching {
+            resolver.query(item, arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull() ?: safe
     } else {
         val dir = android.os.Environment
             .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-        dir.mkdirs()
-        java.io.File(dir, safe).outputStream().use { input.copyTo(it) }
+        if (!dir.isDirectory && !dir.mkdirs()) throw java.io.IOException("The Downloads folder could not be created")
+        // Nothing here picks a free name, and writing to a taken one would
+        // replace an earlier download without a word. createNewFile() claims
+        // the name as it checks it, so two downloads cannot pick the same one.
+        val file = java.io.File(dir, DownloadRules.freeName(safe) { !java.io.File(dir, it).createNewFile() })
+        try {
+            file.outputStream().use { input.copyTo(it) }
+        } catch (e: Exception) {
+            file.delete()
+            throw e
+        }
+        // Listed by the Downloads app and the gallery only once the media
+        // scanner has seen it.
+        android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+        return file.name
     }
 }

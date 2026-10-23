@@ -16,6 +16,17 @@
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!--
+        Saving a download into the shared Downloads folder on Android 9 and
+        older, which have no MediaStore Downloads collection to save through:
+        there, writing the file is the only way in, and without this every
+        download failed with a permission error. Capped at 28, so Android 10
+        and up never see it. Asked for when a download needs it, not at launch.
+        See data/DownloadRules.kt.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <!--
       No permissions beyond the network, deliberately.
 
       CAMERA: the camera app takes the photo or the clip through the capture
@@ -26,8 +37,9 @@
       only what the user chose, so reading the gallery wholesale is never
       needed.
 
-      Storage: downloads go through MediaStore, which grants an app writes to
-      its own Downloads entries.
+      Storage: on Android 10 and up downloads go through MediaStore, which
+      grants an app writes to its own Downloads entries; older versions are the
+      one exception, above. Nothing ever reads shared storage.
     -->
 
     <application

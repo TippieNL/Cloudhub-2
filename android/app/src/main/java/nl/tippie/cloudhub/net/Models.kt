@@ -260,6 +260,15 @@ data class SimpleResult(
     val success: Boolean = false,
     val message: String = "",
     val trashed: Boolean = false,
+    /** A delete into the trash: the entry that restores it, which is what Undo needs. */
+    val id: String? = null,
+    /**
+     * A rename or a restore: where the file is now. Not always where it was
+     * asked to go -- a name already taken gets " (2)" -- so this, not the
+     * request, is the path to use afterwards.
+     */
+    val path: String? = null,
+    val name: String? = null,
 )
 
 /** A bulk move or copy: partial success is reported per item, never hidden. */
@@ -327,13 +336,19 @@ data class MyStorage(
 @Serializable
 data class DuplicateScan(
     val path: String = "/",
+    /**
+     * "all" when the scan covered every kind of file, as this server's does.
+     * Beyond the contract, so absent from a server that does not say -- which
+     * is not the same as saying it looked at photos and videos only.
+     */
+    val scope: String? = null,
     val done: Boolean = false,
     /**
      * Present, and false, only in the reply to a GET before anything has been
      * scanned. A slice of a real scan omits it, which is why it defaults true.
      */
     val started: Boolean = true,
-    /** Media files walked, and how many shared a size with another. */
+    /** Files walked, and how many shared a size with another. */
     val scanned: Int = 0,
     val candidates: Int = 0,
     /** Progress through the candidates, and how many were read rather than
@@ -359,6 +374,13 @@ data class DuplicateGroup(
     /** What deleting all but one copy would give back: bytes x (count - 1). */
     val reclaimable: Long = 0,
     val files: List<DuplicateFile> = emptyList(),
+    /**
+     * What the set is -- "image", "video", "document", "audio", "archive" or
+     * "other" -- as the server's own categories say, so a HEIC counts as a
+     * photo. Beyond the contract; null from a server that does not say, when
+     * the names are read instead (DuplicateRules.kindOf).
+     */
+    val kind: String? = null,
 )
 
 /**

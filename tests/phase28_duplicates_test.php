@@ -116,6 +116,25 @@ foreach ($all['groups'] as $group) {
 }
 $checks['...and found when the scan covers everything'] = $documents !== null && $documents['copies'] === 2;
 
+/* --- what kind of set it is -------------------------------------------------
+ *
+ * What the Photos / Videos / Other switch on both clients sorts by. Decided
+ * here, from the categories the scan itself uses, so a HEIC is a photo on
+ * every client rather than whatever each one's list of extensions says.
+ */
+$checks['a set of photos says it is one'] = $photos !== null && ($photos['kind'] ?? '') === 'image';
+$checks['a set of videos likewise'] = ($clipGroup['kind'] ?? '') === 'video';
+$checks['and a set of documents says what it is'] = ($documents['kind'] ?? '') === 'document';
+// Byte-identical copies need not be named alike.
+$checks['copies named differently are a photo if any copy is named as one'] =
+    DuplicateFinder::kindOf([['path' => '/holiday.jpg.bak'], ['path' => '/holiday.jpg']]) === 'image'
+    && DuplicateFinder::kindOf([['path' => '/clip.bin'], ['path' => '/clip.mov']]) === 'video';
+$checks['a photo the browser cannot draw is still a photo'] =
+    DuplicateFinder::kindOf([['path' => '/IMG_1.HEIC'], ['path' => '/IMG_1 (1).heic']]) === 'image';
+$checks['anything else is what its first copy is'] =
+    DuplicateFinder::kindOf([['path' => '/a.zip'], ['path' => '/b.pdf']]) === 'archive'
+    && DuplicateFinder::kindOf([['path' => '/README'], ['path' => '/README.old']]) === 'other';
+
 /* --- what it says ---------------------------------------------------------- */
 
 $checks['the space to be won back is what deleting the extras gives'] =
@@ -238,6 +257,41 @@ $checks['an incomplete scan says so'] =
     str_contains($screen, 'scan?.truncated == true')
     && str_contains($appJs, 'the scan stopped early');
 
+/*
+ * All / Photos / Videos / Other, the four Favorites offers. They narrow what is
+ * shown and nothing else, so the scan behind them covers every file and
+ * switching never scans again -- and a delete acts on the sets on show, never
+ * on a copy ticked under another filter and out of sight.
+ */
+$checks['the web page offers the four filters'] =
+    str_contains($appView, 'data-dupe-filter="all"')
+    && str_contains($appView, 'data-dupe-filter="image"')
+    && str_contains($appView, 'data-dupe-filter="video"')
+    && str_contains($appView, 'data-dupe-filter="other"')
+    && !str_contains($appView, 'id="duplicates-scope"');
+$checks['and they narrow one scan of everything'] =
+    str_contains($appJs, "const query = `scope=all\${refresh ? '&refresh=1' : ''}`;")
+    && str_contains($appJs, 'if (group.kind === \'image\' || group.kind === \'video\') return group.kind;');
+$checks['the web page deletes only what is on show'] =
+    str_contains($appJs, 'const paths = shownSelection();')
+    && str_contains($appJs, 'const emptied = shownDupes().some(group =>')
+    && str_contains($appJs, 'for (const path of shownDupes().flatMap(dupeRemovable)) dupes.selected.add(path);');
+// Forcing a scan is an admin's, so for anyone else the reload after a delete
+// was a 403 and a blank page. What was deleted is known; it is pruned instead.
+$checks['an editor\'s delete does not blank the page'] =
+    str_contains($appJs, "if (S.role === 'admin') {")
+    && str_contains($appJs, '.filter(group => group.files.length > 1);');
+$checks['the app offers the same four'] =
+    str_contains($screen, 'FilterChip(')
+    && str_contains($screen, 'val filter = DuplicateRules.effective(chosen, found)')
+    && str_contains($screen, 'val groups = DuplicateRules.shown(found, filter)')
+    && str_contains($rules, 'fun kindOf(group: DuplicateGroup): Filter = when (group.kind) {');
+$checks['and deletes only what is on show'] =
+    str_contains($screen, 'val picked = DuplicateRules.selectedIn(groups, selected)')
+    && str_contains($screen, 'val going = picked')
+    && str_contains($androidTests, 'only what is ticked among the sets on show is deleted')
+    && str_contains($androidTests, 'selecting the extras under one filter keeps a choice made under another');
+
 /* --- one protocol for every client -------------------------------------------
  *
  * The Android app talks to whichever CloudHub its owner points it at, so it
@@ -281,6 +335,19 @@ $checks['this server answers the same contract'] =
     && str_contains($index, 'function duplicate_scan_payload(array $report): array {')
     && str_contains($index, "'reclaimable' => (int)\$group['wastedBytes'],")
     && str_contains($index, "'truncated' => !\$report['complete'],");
+// Two fields beyond the contract, which a client that does not know them
+// ignores: what each set is, and that the scan covered every file -- the
+// app's Other filter is empty, not missing, only if both are true.
+$checks['the app\'s scan covers every file and says what each set is'] =
+    str_contains($index, '$payload = duplicate_scan_payload($finder->scan(DuplicateFinder::EVERYTHING));')
+    && str_contains($index, "'kind' => (string)(\$group['kind'] ?? 'other'),")
+    && str_contains($index, "'scope' => 'all',")
+    && str_contains($models, 'val kind: String? = null,')
+    && str_contains($models, 'val scope: String? = null,');
+// A scan kept from when this one covered photos and videos only would answer
+// Other with nothing -- true of that scan, false of the store.
+$checks['a scan of photos and videos only is not served as one of everything'] =
+    str_contains($index, "|| (\$stored['scope'] ?? '') !== 'all') {");
 // A viewer may see what a scan found; running one walks the store and reads
 // files, which is a write-guarded request here as it is there.
 $checks['reading a scan is free, running one is not'] =

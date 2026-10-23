@@ -177,6 +177,24 @@ final class DuplicateFinder
         return (string)($best['path'] ?? '');
     }
 
+    /**
+     * What a set of copies is, for a client's Photos / Videos / Other switch.
+     *
+     * The copies are the same bytes, but their names need not agree --
+     * "holiday.jpg" beside "holiday.jpg.bak" -- so a set that any copy says is
+     * a photo is a photo, then a video likewise, and otherwise it is what its
+     * first copy says. Decided here, from the categories the scan itself uses,
+     * so a HEIC is a photo on every client rather than whatever each one's own
+     * list of extensions happens to say.
+     */
+    public static function kindOf(array $copies): string
+    {
+        $kinds = array_map(fn(array $c) => FileService::fileCategory((string)$c['path']), $copies);
+        if (in_array('image', $kinds, true)) return 'image';
+        if (in_array('video', $kinds, true)) return 'video';
+        return $kinds[0] ?? 'other';
+    }
+
     private function describe(string $hash, array $copies): array
     {
         usort($copies, fn(array $a, array $b) => [$a['modified'], $a['path']] <=> [$b['modified'], $b['path']]);
@@ -184,6 +202,7 @@ final class DuplicateFinder
 
         return [
             'hash' => substr($hash, 0, 16),
+            'kind' => self::kindOf($copies),
             'bytes' => $bytes,
             // What deleting all but one would give back.
             'wastedBytes' => $bytes * (count($copies) - 1),

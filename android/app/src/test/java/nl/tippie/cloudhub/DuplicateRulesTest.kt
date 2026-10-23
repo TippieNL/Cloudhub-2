@@ -4,6 +4,7 @@ import nl.tippie.cloudhub.net.DuplicateFile
 import nl.tippie.cloudhub.net.DuplicateGroup
 import nl.tippie.cloudhub.net.DuplicateScan
 import nl.tippie.cloudhub.ui.DuplicateRules
+import nl.tippie.cloudhub.ui.FavoriteRules.Filter
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -207,5 +208,102 @@ class DuplicateRulesTest {
         assertEquals("No duplicates found", DuplicateRules.summary(0, 0) { "$it B" })
         assertEquals("1 set of copies · 500 B to reclaim", DuplicateRules.summary(1, 500) { "$it B" })
         assertEquals("4 sets of copies · 2000 B to reclaim", DuplicateRules.summary(4, 2000) { "$it B" })
+    }
+
+    @Test
+    fun `the activity line says files, since the scan covers every kind`() {
+        assertEquals("120 files checked", DuplicateRules.activity(scan().copy(scanned = 120)))
+    }
+
+    /* ---- Photos, Videos, Other -----------------------------------------
+     *
+     * The four filters Favorites offers. They narrow what is shown and
+     * nothing else -- and what is deleted is what is shown.
+     */
+
+    private fun kinded(kind: String?, vararg paths: String) =
+        group(*paths.map { it to 100L }.toTypedArray()).copy(kind = kind)
+
+    @Test
+    fun `the server's word for a set decides its filter`() {
+        assertEquals(Filter.PHOTOS, DuplicateRules.kindOf(kinded("image", "/a.jpg", "/b.jpg")))
+        assertEquals(Filter.VIDEOS, DuplicateRules.kindOf(kinded("video", "/a.mp4", "/b.mp4")))
+        // Documents, music, archives: whatever is neither is Other, as on Favorites.
+        for (kind in listOf("document", "audio", "archive", "other")) {
+            assertEquals(Filter.OTHER, DuplicateRules.kindOf(kinded(kind, "/a.pdf", "/b.pdf")), kind)
+        }
+    }
+
+    @Test
+    fun `the server's word wins over the names`() {
+        // A HEIC is a photo to the server, whatever this app can draw.
+        assertEquals(Filter.PHOTOS, DuplicateRules.kindOf(kinded("image", "/a.heic", "/b.heic")))
+        assertEquals(Filter.OTHER, DuplicateRules.kindOf(kinded("document", "/scan.jpg", "/scan.pdf")))
+    }
+
+    @Test
+    fun `a server that does not say is read by the names`() {
+        assertEquals(Filter.PHOTOS, DuplicateRules.kindOf(kinded(null, "/a.jpg", "/b.JPG")))
+        assertEquals(Filter.PHOTOS, DuplicateRules.kindOf(kinded(null, "/a.heic", "/b.heic")))
+        assertEquals(Filter.VIDEOS, DuplicateRules.kindOf(kinded(null, "/a.mp4", "/b.mov")))
+        assertEquals(Filter.OTHER, DuplicateRules.kindOf(kinded(null, "/a.pdf", "/b.pdf")))
+        assertEquals(Filter.OTHER, DuplicateRules.kindOf(kinded(null, "/README", "/copy-of-README")))
+    }
+
+    @Test
+    fun `copies named differently are a photo if any is named as one`() {
+        // The same bytes, saved again with ".bak" on the end.
+        assertEquals(Filter.PHOTOS, DuplicateRules.kindOf(kinded(null, "/holiday.jpg.bak", "/holiday.jpg")))
+    }
+
+    private val mixed = listOf(
+        kinded("image", "/p1.jpg", "/p2.jpg"),
+        kinded("image", "/q1.jpg", "/q2.jpg"),
+        kinded("video", "/v1.mp4", "/v2.mp4"),
+        kinded("document", "/d1.pdf", "/d2.pdf"),
+    )
+
+    @Test
+    fun `every set is counted under its own filter, and all of them under All`() {
+        val counts = DuplicateRules.counts(mixed)
+        assertEquals(4, counts[Filter.ALL])
+        assertEquals(2, counts[Filter.PHOTOS])
+        assertEquals(1, counts[Filter.VIDEOS])
+        assertEquals(1, counts[Filter.OTHER])
+    }
+
+    @Test
+    fun `a filter shows its own sets and nothing else`() {
+        assertEquals(listOf("/v1.mp4"), DuplicateRules.shown(mixed, Filter.VIDEOS).map { DuplicateRules.groupId(it) })
+        assertEquals(listOf("/d1.pdf"), DuplicateRules.shown(mixed, Filter.OTHER).map { DuplicateRules.groupId(it) })
+        assertEquals(mixed, DuplicateRules.shown(mixed, Filter.ALL))
+    }
+
+    @Test
+    fun `a filter with nothing left in it falls back to All`() {
+        // The last set of videos deleted: not an empty screen behind a chip.
+        val noVideos = mixed.filter { it.kind != "video" }
+        assertEquals(Filter.ALL, DuplicateRules.effective(Filter.VIDEOS, noVideos))
+        assertEquals(Filter.PHOTOS, DuplicateRules.effective(Filter.PHOTOS, noVideos))
+    }
+
+    @Test
+    fun `only what is ticked among the sets on show is deleted`() {
+        // A photo ticked, then Videos chosen: a delete from there takes the
+        // video, and never the photo out of sight.
+        val selected = setOf("/p2.jpg", "/v2.mp4")
+        val videos = DuplicateRules.shown(mixed, Filter.VIDEOS)
+        assertEquals(setOf("/v2.mp4"), DuplicateRules.selectedIn(videos, selected))
+        assertEquals(selected, DuplicateRules.selectedIn(mixed, selected))
+    }
+
+    @Test
+    fun `selecting the extras under one filter keeps a choice made under another`() {
+        val selected = setOf("/p2.jpg")
+        val videos = DuplicateRules.shown(mixed, Filter.VIDEOS)
+        val after = selected + DuplicateRules.removableIn(videos, emptyMap())
+        assertEquals(setOf("/p2.jpg", "/v2.mp4"), after)
+        // ...and every set on show still keeps a copy.
+        assertFalse(DuplicateRules.wouldEmptyAGroup(videos, after))
     }
 }

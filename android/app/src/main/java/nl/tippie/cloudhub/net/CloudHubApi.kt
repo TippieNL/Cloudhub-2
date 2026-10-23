@@ -71,7 +71,14 @@ class CloudHubApi(
 
     fun downloadUrl(path: String): HttpUrl = url("/api/files/download", "path" to path)
 
-    fun previewUrl(path: String): HttpUrl = url("/api/files/preview", "path" to path)
+    /**
+     * [version] -- the listing's modified time -- changes the URL when the file
+     * does, as it does for a thumbnail, so a cache keyed on the URL can never
+     * hand back the old bytes of a file replaced under the same name. The
+     * server ignores it.
+     */
+    fun previewUrl(path: String, version: String? = null): HttpUrl =
+        url("/api/files/preview", "path" to path, "v" to version)
 
     fun subtitleUrl(path: String): HttpUrl = url("/api/files/subtitle", "path" to path)
 

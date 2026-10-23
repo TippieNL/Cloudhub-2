@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -835,6 +836,10 @@ private fun BrowserTopBar(
                 MenuHeading("Sort by")
                 SortItem("Name", Icons.Default.SortByAlpha, sort == FilesState.Sort.NAME) {
                     onOverflow(false); onSort(FilesState.Sort.NAME)
+                }
+                // Beside Name, which it is with numbers read as numbers.
+                SortItem("Natural Number", Icons.Default.FormatListNumbered, sort == FilesState.Sort.NATURAL) {
+                    onOverflow(false); onSort(FilesState.Sort.NATURAL)
                 }
                 SortItem("Newest", Icons.Default.Schedule, sort == FilesState.Sort.NEWEST) {
                     onOverflow(false); onSort(FilesState.Sort.NEWEST)

@@ -138,9 +138,11 @@ $checks['what is remembered survives the screen being rebuilt'] =
     && str_contains($files, 'private val ScrollMemorySaver = listSaver<ScrollMemory, Any>');
 // Swiping through thirty photos and coming back should land on the one you
 // ended at, not the one you opened.
+// The viewer keeps its own copy of the row, `photos`, so a delete or a rename
+// in it shows at once; the photo on show is read from that copy.
 $checks['the viewer says which file it was closed on'] =
     str_contains($viewerScreens, 'onBack: (String?) -> Unit')
-    && str_contains($viewerScreens, 'onBack(images.getOrNull(pager.currentPage)?.path)')
+    && str_contains($viewerScreens, 'onBack(photos.getOrNull(pager.currentPage)?.path)')
     && str_contains($main, 'onBack = { photo -> reveal = photo; back() }')
     && str_contains($main, 'onBack = { reveal = current.entry.path; back() }');
 $checks['and the list comes back to it'] =
@@ -175,28 +177,37 @@ $checks['signing out drops the remembered place'] =
  */
 $zoom = $readKt('ui/PhotoZoom.kt');
 $zoomTests = (string)@file_get_contents($root.'/android/app/src/test/java/nl/tippie/cloudhub/PhotoZoomTest.kt');
+// Each page of the viewer -- the photo and its gestures -- is ui/PhotoPage.kt.
+$page = $readKt('ui/PhotoPage.kt');
 
+// The width handed over is the photo's as drawn, not the page's: a photo
+// narrower than the screen has less room to pan before the pager should get
+// the drag.
 $checks['a drag is offered to the pager rather than swallowed'] =
-    str_contains($viewerScreens, '.transformable(')
-    && str_contains($viewerScreens, 'canPan = { pan ->')
-    && str_contains($viewerScreens, 'PhotoZoom.panBelongsToPhoto(scale, offsetX, pan.x, pan.y, size.width.toFloat())');
+    str_contains($page, '.transformable(')
+    && str_contains($page, 'canPan = { pan ->')
+    && str_contains($page, 'PhotoZoom.panBelongsToPhoto(zoom.scale, zoom.offsetX, pan.x, pan.y, zoom.drawnW, zoom.viewportW)');
 // The detector that consumed everything.
 $checks['the gesture detector that ate the swipe is gone'] =
-    !str_contains($viewerScreens, 'detectTransformGestures');
+    !str_contains($viewerScreens, 'detectTransformGestures') && !str_contains($page, 'detectTransformGestures');
 $checks['who owns a drag is decided in one place, with tests'] =
     str_contains($zoom, 'object PhotoZoom')
     && str_contains($zoom, 'fun panBelongsToPhoto(')
     && str_contains($zoomTests, "a drag across a photo that fits the screen is the pager's");
 // Zooming has to keep working, or the fix trades one gesture for another.
 $checks['pinch and double tap still zoom'] =
-    str_contains($viewerScreens, 'rememberTransformableState')
-    && str_contains($viewerScreens, 'PhotoZoom.scaled(scale, zoomChange)')
-    && str_contains($viewerScreens, 'onDoubleTap = {')
+    str_contains($page, 'rememberTransformableState')
+    && str_contains($page, 'PhotoZoom.scaled(scale, zoomChange)')
+    && str_contains($page, 'onDoubleTap = {')
     && str_contains($zoomTests, 'double tap zooms in, and again zooms out');
-// A picture flung off the screen leaves nothing to drag back.
+// A picture flung off the screen leaves nothing to drag back. Clamped to the
+// photo as drawn: clamped to the page, a zoomed landscape photo could still be
+// dragged up and down into its own black bars.
 $checks['a zoomed photo cannot be dragged off the screen'] =
-    str_contains($viewerScreens, 'PhotoZoom.clampPan(offsetX + pan.x, scale, size.width.toFloat())')
-    && str_contains($zoomTests, 'a photo cannot be dragged off the screen');
+    str_contains($page, 'PhotoZoom.clampPan(x, next, drawnW, viewportW)')
+    && str_contains($page, 'PhotoZoom.clampPan(y, next, drawnH, viewportH)')
+    && str_contains($zoomTests, 'a photo cannot be dragged off the screen')
+    && str_contains($zoomTests, 'a zoomed landscape photo cannot be dragged into its black bars');
 // A vertical drag handed to a pager is a zoomed photo that cannot pan up.
 $checks['a vertical drag stays with the photo'] =
     str_contains($zoom, 'if (abs(dragY) > abs(dragX)) return true')

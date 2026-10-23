@@ -508,8 +508,9 @@ app closed.
 
 ### What it covers
 
-Sign in, browse with thumbnails, full-screen image viewing with pinch-zoom and
-swipe, video and audio playback, download to the device, upload from the
+Sign in, browse with thumbnails, an immersive photo viewer (pinch, double-tap
+and pan, swipe between photos, Share, Download, Details), video and audio
+playback, download to the device, upload from the
 gallery, the camera, a recorded clip, the file browser or the Android share
 sheet, new folder, rename, delete to trash, move, copy, recursive search, trash
 restore and empty, share links, and favorites.
@@ -661,6 +662,21 @@ The overflow menu carries an icon on every item and marks the sort actually in
 force — three lines reading "Sort by …" with nothing to tell them apart left you
 unable to see how a folder was sorted without changing it to find out.
 
+**Natural Number**, under Sort by beside Name, reads the numbers in a name as
+numbers: "File 2" before "File 10", "Image 2.jpg" before "Image 10.jpg", and
+"1.2.3" before "1.2.10" — dotted numbers section by section, the way versions
+are read, so "1.9" comes before "1.10". Letters compare without regard to case,
+as under Name, and folders still come first, by the same rules. The name before
+its extension is compared first, so "photo.jpg" stays ahead of "photo 2.jpg",
+"photo-2.jpg" and "photo_2.jpg" alike; character by character, the space and
+hyphen sort before the dot and the underscore after it. Names that read the
+same are settled the same way every time: fewer leading zeros first ("File 1"
+before "File 01"), then upper case before lower. Name, Newest and Largest are
+unchanged. Like them, the choice holds while the app runs — through rotation and
+from folder to folder — and starts again at Name after a restart; only grid or
+list is remembered longer. The web app has no separate option because it needs
+none: its Name sort already compares numbers this way.
+
 **Settings** covers what previously needed a reinstall: the account and its
 role, changing your own password, the server address and how to change it,
 storage and the duplicate finder, the theme (system, light or dark — the app
@@ -678,6 +694,85 @@ headings, each with an icon to find it by and its control on the right;
 (forgetting positions, signing out) ask first. The theme is one segmented row
 instead of three radio buttons and 150dp of screen, and the account is a name
 and a role rather than two table rows.
+
+The status and navigation bar icons follow the theme chosen here, not just the
+phone's: they used to follow the phone either way, so a dark theme forced on a
+light phone had dark icons on a dark bar. A phone in dark mode also launches
+onto a dark window instead of flashing the light one before the first frame. A
+theme forced in Settings cannot reach that first window — the system draws it
+before the app has run — so a forced theme still opens on the phone's colour
+for a moment.
+
+**Clear** under the thumbnail cache now empties the cache the app actually
+draws from. It used to build a new image loader to clear, which emptied that
+loader's own memory cache — empty by definition — and left every thumbnail on
+screen in memory.
+
+### The photo viewer
+
+The photo has the whole screen — behind the status and navigation bars as well
+as between them — and the controls are drawn over it rather than beside it, so
+showing and hiding them never moves the picture. A tap hides them together
+with the system bars (immersive mode); a swipe in from an edge brings the bars
+back for a moment without leaving it, and another tap brings everything back.
+Zooming in hides them too. However the viewer is left, the bars come back with
+it, and over the viewer and the player their icons are always light — they
+were dark-on-black in the light theme.
+
+At the top: the name, a small **3 of 12** (not shown for a single photo), and
+the star. At the bottom: **Share**, **Download**, **Details** and **More**.
+
+- **Share** sends the photo itself: a messaging app wants the picture, not a
+  link to a server it cannot sign in to. The bytes are usually on the phone
+  already — the viewer downloaded them to draw the photo — so they are copied
+  out of the image cache, not fetched again, into one cache folder the app's
+  FileProvider exposes (`res/xml/file_paths.xml`). The app chosen gets read
+  access to that one file; copies are cleared after a day, since the receiver
+  may read it long after the share sheet closes. No permission is involved.
+- **Download** saves it to Downloads, exactly as the file menu does.
+- **Details** adds what the photo says about itself to the usual properties:
+  when it was taken, its size in pixels (the right way up, for a photo stored
+  sideways), the camera, and the exposure. They are read from the same cached
+  bytes, so asking costs no request.
+- **More** holds **Share link…** (the public link, as before — a different
+  thing from sending the photo, since anyone holding it can open the file),
+  **Open with…**, **Set as…** (wallpaper, a contact's photo) and, for accounts
+  that can write, **Rename…** and **Delete**. A delete asks first, goes to the
+  trash where the server keeps one, and offers **Undo** while its snackbar is
+  up; deleting the last photo returns to the folder. A rename keeps the photo
+  on screen at the name the server actually gave it.
+
+Zooming:
+
+- **Pinch** zooms about your fingers rather than the middle of the screen, and
+  the picture moves with them.
+- **Double tap** zooms into the point tapped, far enough to fill the screen —
+  so a landscape photo on a portrait phone loses its black bands — and again
+  zooms back out. *Remove animations* makes it a jump instead of a glide.
+- **Panning** a zoomed photo carries on and slows when let go, stopping at the
+  photo's edge. The room to pan is measured against the photo as drawn, not the
+  screen: a zoomed landscape photo used to slide up and down into its own black
+  bars and could be left half off the screen.
+- Zoomed past 1.3×, the page decodes the photo again at up to 4096 px on its
+  long edge — a 12-megapixel phone photo at its own resolution — and draws it
+  over the screen-sized one, so zoom stays sharp without every page holding a
+  50 MB bitmap. It is decoded from the bytes already cached, and only for the
+  photo on show.
+
+Every photo keeps its shape. While it loads, the grid's thumbnail stands in —
+usually still in memory, so a picture is there the instant the viewer is — and
+the photos either side are already loading before they are swiped to. A photo
+that fails to load says so, with **Retry**. SVG drawings, which the server will
+not serve inline and the app cannot draw, say so too, and can still be
+downloaded or opened in another app. An animated GIF plays rather than showing
+its first frame — so, from Android 9, does an animated WebP or HEIF — and is
+never given the sharper second decode: two copies of one animation playing out
+of step would show through each other.
+
+The gestures' arithmetic is tested on the JVM (`PhotoZoomTest`,
+`PhotoZoomStateTest`), as are the row of photos after a delete or rename
+(`ViewerRulesTest`) and the wording of the details (`PhotoDetailsTest`); the
+wiring is pinned by `tests/phase48_photo_viewer_test.php`.
 
 ### The video player
 
@@ -758,7 +853,8 @@ on. A mostly-vertical drag always stays with the photo, since a pager has no
 use for it.
 
 Pinch still zooms, a double tap zooms in and out, and a zoomed photo cannot be
-dragged off the screen and left there.
+dragged off the screen and left there — or into its own black bars; see **The
+photo viewer**.
 
 ### Coming back where you left off
 
@@ -784,7 +880,10 @@ root and is never closed, which is what lets your place in it survive.
 Closing a photo or a video also brings the list back **to that file**: swipe
 through thirty photos and Back lands on the one you ended at, not the one you
 opened. Only when it is off screen, though — scrolling a file that is already
-visible up to the top edge is a jump for no reason.
+visible up to the top edge is a jump for no reason. That holds for Back by
+gesture or button as well as the toolbar arrow: the system Back used to pop
+the viewer through the app's own handler, which never said which photo was on
+show.
 
 ### What playback costs
 
@@ -959,16 +1058,28 @@ sheet is frequently not persistable.
 
 ### Permissions
 
-The app declares `INTERNET`, `ACCESS_NETWORK_STATE` and `POST_NOTIFICATIONS`.
-There is no `CAMERA` and no `RECORD_AUDIO` — the camera app performs the
-capture through an intent and holds its own permissions — no
-`READ_MEDIA_IMAGES` or `READ_MEDIA_VIDEO`, because the system photo picker
-returns only what was chosen, and no storage permission, because downloads go
-through `MediaStore`.
+The app declares `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS`, and
+`WRITE_EXTERNAL_STORAGE` capped at Android 9 (`maxSdkVersion="28"`). There is
+no `CAMERA` and no `RECORD_AUDIO` — the camera app performs the capture through
+an intent and holds its own permissions — no `READ_MEDIA_IMAGES` or
+`READ_MEDIA_VIDEO`, because the system photo picker returns only what was
+chosen, and nothing reads shared storage at all.
 
-`POST_NOTIFICATIONS` is the only one you are ever asked about, and it is asked
-for the first time you queue an upload rather than at launch, where a prompt
-with no context is just noise. Refuse it and uploads work exactly as before.
+The storage permission exists for one reason. Android 10 and up save a
+download through `MediaStore`, which needs no permission; Android 9 and older
+have no Downloads collection to save through, so there the file is written into
+the Downloads folder directly — and without the permission every download on
+those versions failed. Capped at 28, it does not exist on 10 and up. It is asked
+for by the first download that needs it, which carries on once it is allowed.
+On those versions the app also picks a free name (`photo (1).jpg`, as
+`MediaStore` does) instead of replacing an earlier download, and tells the media
+scanner, so the file shows in the Downloads app and the gallery. On every
+version a download that fails part-way is removed rather than left behind as a
+broken file.
+
+`POST_NOTIFICATIONS` is asked for the first time you queue an upload rather than
+at launch, where a prompt with no context is just noise. Refuse it and uploads
+work exactly as before.
 
 At install you will also see `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` and
 `FOREGROUND_SERVICE`. Those are merged in by WorkManager and are what let an
@@ -1025,9 +1136,25 @@ both clients, because a duplicate finder that empties a set has not deleted a
 duplicate, it has deleted the photo. What you do delete goes to the trash, like
 any other delete.
 
-`GET /api/duplicates` backs the web page: `scope=media` (the default) or
-`scope=all`. Reading the report needs only a signed-in account; `refresh=1`,
-which forces a fresh walk of the store, is admin-only.
+**All · Photos · Videos · Other** — the four filters Favorites offers — sit at
+the top of the page on both clients, each with its count. They narrow what is
+shown and nothing else: the scan behind them covers every file, so switching
+never scans again. *Select the extra copies* and *Move to trash* act on the
+sets on show only — a copy ticked under Photos stays ticked while you look at
+Videos, but is never deleted from there unseen — and a filter whose last set
+you delete falls back to All. A set is one kind: a photo if any copy is named
+as one (`holiday.jpg` beside `holiday.jpg.bak`), then a video likewise, and
+otherwise whatever its first copy is. The server decides it, from the same
+categories the scan uses, so a HEIC is a photo on both clients.
+
+`GET /api/duplicates` backs the web page, which always asks for `scope=all`
+and filters the result itself; `scope=media` (the default) is still answered
+for anything else that calls it. Each group carries a `kind`: `image`, `video`,
+`audio`, `document`, `archive` or `other`. Reading the report needs only a
+signed-in account; `refresh=1`, which forces a fresh walk of the store, is
+admin-only. So after an editor deletes copies, the page brings its list up to
+date itself rather than asking for a rescan it would be refused — which used to
+leave it blank.
 
 ### The scan contract, for other clients
 
@@ -1048,6 +1175,15 @@ A reply carries `done`, `truncated`, counts of what has been `scanned`,
 `count`, what is `reclaimable`, and its files as `path`, `bytes` and `mtime`.
 A `GET` before anything has ever been scanned answers `started: false`, which
 is how a client tells "nothing scanned yet" from "nothing found".
+
+Two fields go beyond the contract, and a client that does not know them ignores
+them: each group's `kind`, as above, and `scope: "all"` on the reply. This
+server's contract scan covers **every file**, not only photos and videos, which
+is what puts anything under the app's Other filter. A scan stored before that
+change covered photos and videos only, so `GET` treats it as never run rather
+than serve an Other that is empty because nobody looked; the app, signed in
+with write access, then starts a fresh one. Against a server that sends no
+`kind`, the app sorts each set by its copies' names instead.
 
 Reading a scan needs only a signed-in account. **Starting one needs write
 access**, because it walks the store and reads files.
