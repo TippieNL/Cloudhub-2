@@ -2083,7 +2083,18 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         // made and sent. ensure() measures the header before it decodes, and
         // answers a file it already knows is unreadable without reading it.
         if (ThumbnailService::isImage($f) && !$thumbs->canKeep($f))send_thumbnail_bytes($thumbs->renderUncached($f));
-        send_thumbnail($thumbs->ensure($f, true)['path']);
+        try {
+            $kept = $thumbs->ensure($f, true)['path'];
+        } catch (RuntimeException $e) {
+            // Made but not kept: a full disk, nowhere to write, or storage that
+            // will not take a file's time -- which is how a kept thumbnail is
+            // matched to its photo. The gallery is answered all the same, with
+            // one made afresh, rather than with an error; the scan says why.
+            if ($e->getCode() !== ThumbnailService::CANNOT_KEEP)throw $e;
+            error_log('['.Http::requestId().'] [thumbnails] '.$fs->relative($f).' was not kept: '.$e->getMessage());
+            send_thumbnail_bytes($thumbs->renderUncached($f));
+        }
+        send_thumbnail($kept);
     });
 
     /**

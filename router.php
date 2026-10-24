@@ -41,16 +41,16 @@ function dev_content_type(string $file): string
 /**
  * Tell the application which script it is really running.
  *
- * PHP 8.2's built-in server hands a request whose path ends in an extension --
- * /share/TOKEN/holiday.jpg, /webdav/Photos/beach.jpg -- to this router with
- * SCRIPT_NAME set to that path and SCRIPT_FILENAME set to this file, as if the
- * URL named a script. Http::basePath() reads the install folder from
- * SCRIPT_NAME, so it took "/share/TOKEN" for one and stripped it: every share
- * link ending in its file's name, and every WebDAV file, answered "Not found".
- * PHP 8.3 and later report the front controller, as Apache and nginx always
- * have. Under this router the application sits at the root of the server, so
- * that is what it is told -- in the form the later versions use, and only when
- * the server has named the router itself.
+ * PHP's built-in server (8.2 and 8.3.6 alike, measured) hands a request whose
+ * path ends in an extension -- /share/TOKEN/holiday.jpg,
+ * /webdav/Photos/beach.jpg -- to this router with SCRIPT_NAME set to that path
+ * and SCRIPT_FILENAME set to this file, as if the URL named a script.
+ * Http::basePath() reads the install folder from SCRIPT_NAME, so it took
+ * "/share/TOKEN" for one and stripped it: every share link ending in its
+ * file's name, and every WebDAV file, answered "Not found". Apache and nginx
+ * report the front controller. Under this router the application sits at the
+ * root of the server, so that is what it is told -- in the form the server
+ * itself uses for any other path, and only when it has named the router.
  */
 function dev_front_controller(string $uri): void
 {
