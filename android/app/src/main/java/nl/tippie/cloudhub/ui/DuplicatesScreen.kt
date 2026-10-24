@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -29,10 +30,12 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import nl.tippie.cloudhub.CloudHubApp
 import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.DuplicateGroup
 import nl.tippie.cloudhub.net.DuplicateScan
+import nl.tippie.cloudhub.net.thumbnailVersion
 
 /**
  * The same photo, twice.
@@ -444,9 +447,12 @@ private fun GroupCard(
                         .clickable(enabled = canWrite && !kept) { onToggle(file.path) }
                         .padding(vertical = 6.dp),
                 ) {
+                    // Versioned like the grid's, so a copy replaced since the
+                    // last look is not shown with the old picture.
                     AsyncImage(
-                        model = api.thumbnailUrlFor(file.path).toString(),
+                        model = api.thumbnailUrlFor(file.path, thumbnailVersion(file.mtime.toString(), file.bytes)).toString(),
                         contentDescription = null,
+                        imageLoader = CloudHubApp.thumbnailsOf(LocalContext.current),
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .size(44.dp)

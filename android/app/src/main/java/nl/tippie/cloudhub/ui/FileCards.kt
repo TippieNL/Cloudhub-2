@@ -49,6 +49,7 @@ import coil.request.CachePolicy
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import nl.tippie.cloudhub.CloudHubApp
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 
@@ -414,6 +415,11 @@ private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
     }
 }
 
+/**
+ * The server's thumbnail of a photo, never the photo: a 512 px WebP, decoded
+ * at the size of the tile or row it fills. Through the thumbnail loader, whose
+ * disk cache opening full-size photos cannot push it out of.
+ */
 @Composable
 private fun ThumbnailImage(url: String, description: String, modifier: Modifier) {
     val context = LocalContext.current
@@ -421,6 +427,7 @@ private fun ThumbnailImage(url: String, description: String, modifier: Modifier)
     SubcomposeAsyncImage(
         model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
         contentDescription = description,
+        imageLoader = CloudHubApp.thumbnailsOf(context),
         contentScale = ContentScale.Crop,
         modifier = modifier,
     ) {

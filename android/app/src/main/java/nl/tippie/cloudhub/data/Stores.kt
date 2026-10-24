@@ -80,6 +80,17 @@ class Settings(context: Context) {
         set(value) = prefs.edit().putString("sort_choice", value).apply()
 
     /**
+     * The server's thumbnail format, as its config last said: in every
+     * thumbnail URL, so a launch asks with the URLs the cache already holds
+     * rather than different ones until the config arrives.
+     */
+    var thumbnailFormat: Int?
+        get() = prefs.getInt("thumbnail_format", -1).takeIf { it >= 0 }
+        set(value) =
+            if (value == null) prefs.edit().remove("thumbnail_format").apply()
+            else prefs.edit().putInt("thumbnail_format", value).apply()
+
+    /**
      * The subtitle language last chosen, or null for none.
      *
      * A language rather than a file, for the same reason the web player stores

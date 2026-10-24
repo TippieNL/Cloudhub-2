@@ -33,6 +33,7 @@ import nl.tippie.cloudhub.data.MediaCache
 import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.ui.*
 import nl.tippie.cloudhub.work.StageResult
+import nl.tippie.cloudhub.work.ThumbnailScanWorker
 import nl.tippie.cloudhub.work.UploadQueue
 import nl.tippie.cloudhub.work.UploadWorker
 
@@ -357,6 +358,13 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(state.user?.username) {
                     if (state.user == null) screenState.removeState(Screen.Files.key)
                 }
+                // Photos already on the server get thumbnails in the
+                // background, asked for by an account that may run the scan.
+                // Kept if one is going, so every start costs at most one
+                // request that does nothing.
+                LaunchedEffect(state.user?.username, state.canWrite) {
+                    if (state.canWrite) ThumbnailScanWorker.enqueue(this@MainActivity)
+                }
 
                 screenState.SaveableStateProvider(screen.key) {
                 when (val current = screen) {
@@ -460,6 +468,10 @@ class MainActivity : ComponentActivity() {
                         // already in the view just chosen.
                         grid = state.grid,
                         onGrid = { model.setGrid(it) },
+                        thumbnailStatus = rememberThumbnailStatus(app.api),
+                        onPrepareThumbnails = if (state.canWrite) {
+                            { ThumbnailScanWorker.enqueue(this@MainActivity, restart = true) }
+                        } else null,
                         onClearCache = { clearThumbnailCache() },
                         onClearVideoCache = { MediaCache.clear(this@MainActivity) },
                         onChangeServer = { go(Screen.Setup) },
@@ -542,14 +554,16 @@ class MainActivity : ComponentActivity() {
     }.getOrDefault("unknown")
 
     /**
-     * What Coil's disk cache is holding.
+     * What Coil's disk caches are holding: thumbnails, and the photos opened
+     * full size, which keep a cache of their own (see CloudHubApp.thumbnails).
      *
-     * Measured rather than tracked: the loader writes to it in the background
-     * and nothing else here would know when it grew.
+     * Measured rather than tracked: the loaders write to them in the background
+     * and nothing else here would know when they grew.
      */
     private fun thumbnailCacheBytes(): Long = runCatching {
-        java.io.File(cacheDir, "image_cache").walkBottomUp()
-            .filter { it.isFile }.sumOf { it.length() }
+        listOf("image_cache", "thumbnail_cache").sumOf { dir ->
+            java.io.File(cacheDir, dir).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+        }
     }.getOrDefault(0L)
 
     /**
@@ -565,6 +579,8 @@ class MainActivity : ComponentActivity() {
     private fun clearThumbnailCache() {
         val loader = imageLoader
         runCatching { loader.diskCache?.clear() }
+        runCatching { app.thumbnails.diskCache?.clear() }
+        // One memory cache, shared by both loaders.
         runCatching { loader.memoryCache?.clear() }
     }
 

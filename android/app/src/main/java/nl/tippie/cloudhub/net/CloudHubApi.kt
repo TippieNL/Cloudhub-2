@@ -56,16 +56,32 @@ class CloudHubApi(
         return builder.build()
     }
 
-    fun thumbnailUrl(entry: FileEntry): HttpUrl =
-        url("/api/thumbnail", "path" to entry.path, "v" to entry.modified)
+    /**
+     * The server's thumbnail format, once known: read from the config and
+     * kept across launches (see [onThumbnailFormat]), so the first screen of a
+     * new launch asks with the same URLs as the last one did.
+     */
+    @Volatile var thumbnailFormat: Int? = null
+
+    /** Told when the config says what the format is, so it can be kept. */
+    @Volatile var onThumbnailFormat: ((Int?) -> Unit)? = null
 
     /**
-     * A thumbnail for a path with no listing row behind it -- the duplicates
-     * screen has paths, not entries. No version marker, so the browser cache
-     * may serve a stale frame for a replaced file; a 44dp preview beside a
-     * name and a folder is not where that matters.
+     * A thumbnail, never the original: a 512 px WebP the server makes once and
+     * keeps. The file's modified time and size and the server's thumbnail
+     * format are in the URL, so a replaced file or a new format is a new URL --
+     * the caches here and on the server hold one for a year, keyed on exactly
+     * this. The size is there because times are whole seconds: a photo
+     * replaced within the second it arrived keeps its time, rarely its size.
      */
-    fun thumbnailUrlFor(path: String): HttpUrl = url("/api/thumbnail", "path" to path)
+    fun thumbnailUrl(entry: FileEntry): HttpUrl = thumbnailUrlFor(entry.path, thumbnailVersion(entry.modified, entry.size))
+
+    /**
+     * The same for a path with no listing row behind it -- the duplicates
+     * screen has paths, times and sizes, not entries.
+     */
+    fun thumbnailUrlFor(path: String, version: String? = null): HttpUrl =
+        url("/api/thumbnail", "path" to path, "v" to version, "t" to thumbnailFormat?.toString())
 
     fun streamUrl(path: String): HttpUrl = url("/api/files/stream", "path" to path)
 
@@ -200,7 +216,25 @@ class CloudHubApi(
     suspend fun cancelTwoFactorChange(): SimpleResult =
         post("/api/users/me/two-factor/cancel", emptyMap()) { decode(it) }
 
-    suspend fun config(): ServerConfigInfo = get("/api/files/config") { decode(it) }
+    suspend fun config(): ServerConfigInfo =
+        get<ServerConfigInfo>("/api/files/config") { decode(it) }.also { config ->
+            if (config.thumbnailFormat != thumbnailFormat) {
+                thumbnailFormat = config.thumbnailFormat
+                onThumbnailFormat?.invoke(config.thumbnailFormat)
+            }
+        }
+
+    /**
+     * Carry the server's thumbnail scan on for one slice -- about
+     * [ServerConfigInfo.thumbnailScanSeconds] -- and say how far it has got.
+     * [restart] begins a new one; otherwise a finished scan less than a day
+     * old answers at once, doing nothing. Needs write access.
+     */
+    suspend fun continueThumbnailScan(restart: Boolean = false): ThumbnailScanProgress =
+        postJson("/api/thumbnails/scan", """{"restart":$restart}""") { decode(it) }
+
+    /** How far the thumbnail scan has got, doing no work. Anyone signed in may ask. */
+    suspend fun thumbnailScan(): ThumbnailScanProgress = get("/api/thumbnails/scan") { decode(it) }
 
     /* ---- storage --------------------------------------------------------- */
 
@@ -455,3 +489,9 @@ class CloudHubApi(
         }
     }
 }
+
+/**
+ * A thumbnail URL's `v`: the file's time and size together, the way the web
+ * client writes it too (see [CloudHubApi.thumbnailUrl]).
+ */
+fun thumbnailVersion(modified: String, size: Long): String = "$modified-$size"

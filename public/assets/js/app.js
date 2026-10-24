@@ -1057,6 +1057,14 @@ function initVideoThumbnails() {
     }
 }
 
+/*
+ * The thumbnail format, ThumbnailService::FORMAT on the server, in every
+ * thumbnail URL: the server sends them cacheable for a year, so a URL that
+ * stayed the same would keep the browser showing the old size for that year
+ * after the server began making them larger.
+ */
+const THUMBNAIL_FORMAT = 2;
+
 const CARD_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif']);
 const CARD_VIDEO_EXT = new Set(['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts']);
 const CARD_AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac']);
@@ -1086,7 +1094,9 @@ function fileCard(f, { selectable = true, showFolder = false } = {}) {
     // actually does with this file.
     const playable = videoExt.has(ext) || audioExt.has(ext);
     const preview = f.isDirectory ? '' : `<button data-preview="${encoded}">${playable ? 'Play' : 'Preview'}</button>`;
-    const thumbnailUrl = appUrl('/api/thumbnail?path=' + encodeURIComponent(f.path) + '&v=' + encodeURIComponent(f.modified || ''));
+    // The size beside the time: times are whole seconds, and a photo replaced
+    // within the second it arrived keeps its time but rarely its size.
+    const thumbnailUrl = appUrl('/api/thumbnail?path=' + encodeURIComponent(f.path) + '&v=' + encodeURIComponent((f.modified || '') + '-' + (f.size ?? '')) + '&t=' + THUMBNAIL_FORMAT);
     let thumb = '<span class="file-icon">📄</span>';
 
     if (f.isDirectory) {

@@ -13,6 +13,12 @@ import nl.tippie.cloudhub.ui.FilesViewModel
 import nl.tippie.cloudhub.ui.LoadState
 import okhttp3.RequestBody.Companion.toRequestBody
 import nl.tippie.cloudhub.ui.SearchRules
+import nl.tippie.cloudhub.ui.ThumbnailRules
+import okhttp3.Request
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.util.zip.CRC32
+import java.util.zip.DeflaterOutputStream
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.FixMethodOrder
@@ -46,6 +52,7 @@ class ApiIntegrationTest {
         private val password: String = System.getenv("CLOUDHUB_TEST_PASS") ?: "smoke-test-pass-123"
 
         private lateinit var api: CloudHubApi
+        private lateinit var http: CloudHubClient
         private var signedIn = false
 
         /** Folder this run owns, so a failure never damages real files. */
@@ -58,6 +65,7 @@ class ApiIntegrationTest {
             val client = CloudHubClient(InMemoryCookieStore(), object : PinnedCertificates {
                 override fun isPinned(fingerprint: String) = false
             })
+            http = client
             api = CloudHubApi(url, client)
             runBlocking {
                 val result = api.login(username, password)
@@ -396,6 +404,108 @@ class ApiIntegrationTest {
         } finally {
             Dispatchers.resetMain()
         }
+    }
+
+    /**
+     * A real PNG -- a colour gradient, encoded here by hand, since the host
+     * JVM's image classes are not on an Android test's classpath.
+     */
+    private fun png(width: Int, height: Int): ByteArray {
+        val rows = ByteArrayOutputStream()
+        for (y in 0 until height) {
+            rows.write(0)  // no filter
+            for (x in 0 until width) {
+                rows.write(x * 255 / width)
+                rows.write(y * 255 / height)
+                rows.write(0x40)
+            }
+        }
+        val out = ByteArrayOutputStream()
+        fun chunk(type: String, data: ByteArray) {
+            val crc = CRC32().apply { update(type.toByteArray()); update(data) }
+            out.write(ByteBuffer.allocate(4).putInt(data.size).array())
+            out.write(type.toByteArray())
+            out.write(data)
+            out.write(ByteBuffer.allocate(4).putInt(crc.value.toInt()).array())
+        }
+        out.write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+        // 8-bit RGB, no interlace.
+        chunk("IHDR", ByteBuffer.allocate(13).putInt(width).putInt(height).put(8).put(2).put(0).put(0).put(0).array())
+        chunk("IDAT", ByteArrayOutputStream().also { z -> DeflaterOutputStream(z).use { it.write(rows.toByteArray()) } }.toByteArray())
+        chunk("IEND", ByteArray(0))
+        return out.toByteArray()
+    }
+
+    /** The width and height a WebP declares, from whichever of its three headers it has. */
+    private fun webpSize(bytes: ByteArray): Pair<Int, Int> {
+        fun u8(i: Int) = bytes[i].toInt() and 0xFF
+        fun u16(i: Int) = u8(i) or (u8(i + 1) shl 8)
+        fun u24(i: Int) = u16(i) or (u8(i + 2) shl 16)
+        return when (String(bytes, 12, 4, Charsets.US_ASCII)) {
+            "VP8 " -> (u16(26) and 0x3FFF) to (u16(28) and 0x3FFF)
+            "VP8L" -> {
+                val bits = u24(21) or (u8(24) shl 24)
+                ((bits and 0x3FFF) + 1) to (((bits shr 14) and 0x3FFF) + 1)
+            }
+            "VP8X" -> (u24(24) + 1) to (u24(27) + 1)
+            else -> fail("not a WebP: ${String(bytes, 0, 16, Charsets.US_ASCII)}")
+        }
+    }
+
+    @Test fun `21 a photo's thumbnail is a small WebP, and the photo is untouched`() = runBlocking {
+        requireServer()
+        val config = api.config()
+        assumeTrue("this server keeps no thumbnails ahead of time", config.thumbnailScanSeconds != null)
+        assertEquals(config.thumbnailFormat, api.thumbnailFormat, "the app does not ask with the format the server published")
+
+        val original = png(1200, 800)
+        put("$scratch/sunset.png", original)
+        val entry = api.list(scratch).first { it.name == "sunset.png" }
+        val url = api.thumbnailUrl(entry)
+        assertEquals(config.thumbnailFormat?.toString(), url.queryParameter("t"))
+        assertEquals(thumbnailVersion(entry.modified, entry.size), url.queryParameter("v"))
+
+        val thumbnail = http.okHttp.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            assertEquals(200, response.code, "the thumbnail was not served")
+            assertEquals("image/webp", response.header("Content-Type")?.substringBefore(';')?.trim())
+            assertTrue(response.header("Cache-Control").orEmpty().contains("immutable"),
+                "a thumbnail's URL changes with its photo, so it can be kept for good")
+            response.body!!.bytes()
+        }
+        assertEquals("RIFF", String(thumbnail, 0, 4, Charsets.US_ASCII))
+        assertEquals("WEBP", String(thumbnail, 8, 4, Charsets.US_ASCII))
+        val (w, h) = webpSize(thumbnail)
+        assertEquals(512, maxOf(w, h), "not fitted into 512 px: ${w}x$h")
+        assertEquals(1.5, w.toDouble() / h, 0.01, "the photo's shape was not kept: ${w}x$h")
+        assertTrue(thumbnail.size < original.size / 4, "a thumbnail of ${thumbnail.size} bytes is no saving")
+
+        val downloaded = api.openDownload("$scratch/sunset.png").use { it.bytes() }
+        assertTrue(downloaded.contentEquals(original), "the original was changed by making its thumbnail")
+    }
+
+    @Test fun `22 the thumbnail scan runs in slices to done, and can be read back`() = runBlocking {
+        requireServer()
+        assumeTrue("this server keeps no thumbnails ahead of time", api.config().thumbnailScanSeconds != null)
+        val began = System.currentTimeMillis()
+        var slices = 1
+        var scan = api.continueThumbnailScan(restart = true)
+        while (ThumbnailRules.shouldContinue(scan, System.currentTimeMillis() - began) && slices < 500) {
+            scan = api.continueThumbnailScan()
+            slices++
+        }
+        if (scan.busy) return@runBlocking  // someone else's scan holds it; theirs will finish
+        assertTrue(scan.done, "the scan never finished after $slices slices: $scan")
+        assertEquals(scan.found, scan.processed, "not everything it found was looked at")
+        assertTrue(ThumbnailRules.ready(scan) >= 1, "the photo from the last test was not counted: $scan")
+
+        val read = api.thumbnailScan()
+        assertTrue(read.done && read.startedAt == scan.startedAt, "reading the scan back gave another: $read")
+
+        // Begun again with every thumbnail current: found, checked, none made.
+        var again = api.continueThumbnailScan(restart = true)
+        while (ThumbnailRules.shouldContinue(again, System.currentTimeMillis() - began)) again = api.continueThumbnailScan()
+        if (again.busy) return@runBlocking
+        assertEquals(0, again.generated, "a second scan made thumbnails that were already there: $again")
     }
 
     @Test fun `99 clean up`() = runBlocking {

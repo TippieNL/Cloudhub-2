@@ -300,6 +300,48 @@ data class ServerConfigInfo(
     val duplicateMinBytes: Long? = null,
     val duplicateScanSeconds: Int? = null,
     val duplicateMaxFiles: Int? = null,
+    /**
+     * The server's thumbnail format, which goes in every thumbnail URL: the
+     * server sends thumbnails cacheable for a year, so when it starts making
+     * them differently -- larger, as it did at 2 -- only a new URL makes a
+     * cache let go of the old ones. Absent from a server that keeps no
+     * thumbnails, and then the URL carries none.
+     */
+    val thumbnailFormat: Int? = null,
+    /** Present when the server can make thumbnails ahead of time; see ThumbnailScanProgress. */
+    val thumbnailScanSeconds: Int? = null,
+)
+
+/**
+ * How far the server's thumbnail scan has got, from /api/thumbnails/scan.
+ *
+ * The scan gives every photo already in the store a thumbnail before anyone
+ * opens its folder: `walk` lists what is there, `make` makes what is
+ * missing, `sweep` clears what belongs to nothing. POST carries it on, a
+ * slice at a time, while [done] is false; GET reads it.
+ */
+@Serializable
+data class ThumbnailScanProgress(
+    /** False until a scan has ever run on this server. */
+    val started: Boolean = false,
+    val done: Boolean = false,
+    /** Someone else's slice holds the scan -- another device, or the server's own tool. */
+    val busy: Boolean = false,
+    val phase: String? = null,
+    /** Photos and videos found so far, and how many of them have been checked. */
+    val found: Int = 0,
+    val processed: Int = 0,
+    val generated: Int = 0,
+    /** Already had a current thumbnail. */
+    val valid: Int = 0,
+    /** Video frames brought across from the server's old layout. */
+    val adopted: Int = 0,
+    /** Not readable as images; not tried again until they change. */
+    val failed: Int = 0,
+    val skipped: Int = 0,
+    val removed: Int = 0,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
 )
 
 /** What one account is using, from /api/storage/me -- readable by anyone. */

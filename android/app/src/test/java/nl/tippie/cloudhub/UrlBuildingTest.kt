@@ -3,10 +3,13 @@ package nl.tippie.cloudhub
 import nl.tippie.cloudhub.data.ServerAddress
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.CloudHubClient
+import nl.tippie.cloudhub.net.FileEntry
 import nl.tippie.cloudhub.net.InMemoryCookieStore
 import nl.tippie.cloudhub.net.PinnedCertificates
+import nl.tippie.cloudhub.net.thumbnailVersion
 import org.junit.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -65,6 +68,36 @@ class UrlBuildingTest {
         )) {
             assertTrue(url.encodedPath.endsWith("/"), "$url does not address the front controller")
         }
+    }
+
+    private val beach = FileEntry(
+        name = "beach.jpg", path = "/Photos/beach.jpg", isDirectory = false,
+        size = 48_213, modified = "2026-10-24T21:14:19+00:00",
+    )
+
+    @Test fun `a thumbnail url carries the photo's time and size, and the server's format once known`() {
+        val api = apiFor("http://host:8000")
+        val before = api.thumbnailUrl(beach)
+        assertEquals("/api/thumbnail", before.queryParameter("route"))
+        assertEquals("/Photos/beach.jpg", before.queryParameter("path"))
+        assertEquals("2026-10-24T21:14:19+00:00-48213", before.queryParameter("v"))
+        assertNull(before.queryParameter("t"), "no format is claimed before the server has said one")
+
+        api.thumbnailFormat = 2
+        assertEquals("2", api.thumbnailUrl(beach).queryParameter("t"))
+    }
+
+    @Test fun `a photo replaced within the second it arrived still gets a new thumbnail url`() {
+        // Times are whole seconds: the same time, a different photo. The same
+        // URL would keep the old picture in caches that hold it for a year.
+        val api = apiFor("http://host:8000")
+        assertNotEquals(api.thumbnailUrl(beach), api.thumbnailUrl(beach.copy(size = 51_007)))
+        assertEquals(api.thumbnailUrl(beach), api.thumbnailUrl(beach.copy()), "while the same file keeps its URL")
+    }
+
+    @Test fun `the duplicates screen versions its thumbnails the same way`() {
+        val url = apiFor("http://host").thumbnailUrlFor("/a.jpg", thumbnailVersion("1700000000", 99))
+        assertEquals("1700000000-99", url.queryParameter("v"))
     }
 
     @Test fun `a subtitle is addressed by its own path`() {

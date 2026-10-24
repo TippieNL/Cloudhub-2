@@ -171,6 +171,9 @@ class FilesViewModel(
                 .onSuccess { _state.update { s -> s.copy(user = it.user) } }
             open("/")
             loadFavorites()
+            // What the config says about thumbnails goes into every thumbnail
+            // URL from now on, and is kept for the next launch's first screen.
+            runCatching { api.config() }
         }
     }
 

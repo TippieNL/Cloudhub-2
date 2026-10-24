@@ -73,6 +73,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import nl.tippie.cloudhub.CloudHubApp
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
 import kotlin.math.abs
@@ -234,9 +235,12 @@ internal fun PhotoPage(
                     },
             ) {
                 if (photo !is AsyncImagePainter.State.Success) {
+                    // The grid's own thumbnail, from the cache it was just
+                    // drawn from, while the original arrives.
                     AsyncImage(
                         model = thumbUrl,
                         contentDescription = null,
+                        imageLoader = CloudHubApp.thumbnailsOf(context),
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),
                         onState = { state ->

@@ -1574,6 +1574,213 @@ scenario('the Favorites page is served', function () use ($client) {
     check('the page loads', $page->status === 200 && str_contains($page->body, 'id="favorites-page"'), (string)$page->status);
 });
 
+/* ---- thumbnails kept beside the store ------------------------------------------ */
+
+/*
+ * Every photo has a small WebP of its own in a tree that mirrors the store --
+ * storage/.thumbnails/files/<the photo's path>.webp -- made as the photo
+ * arrives, moved, copied and removed with it, and made again when it goes
+ * missing. The photo itself is never written to.
+ */
+$thumbTree = $root.'/storage/.thumbnails/files';
+$thumbOf = fn(string $path): string => $thumbTree.$path.'.webp';
+$photo = function (int $w, int $h, int $tint = 0): string {
+    $im = imagecreatetruecolor($w, $h);
+    for ($x = 0; $x < $w; $x += 8) {
+        imagefilledrectangle($im, $x, 0, $x + 7, $h - 1,
+            imagecolorallocate($im, ($x * 255 / $w + $tint) % 256, 120, (255 - $x * 255 / $w) % 256));
+    }
+    ob_start(); imagejpeg($im, null, 90); return (string)ob_get_clean();
+};
+$photoPut = function (string $path, string $bytes, string $conflict = 'overwrite') use ($client): ?string {
+    $init = $client->post('/api/uploads/init', ['targetPath' => dirname($path), 'name' => basename($path),
+        'size' => strlen($bytes), 'uploadId' => 'pic'.bin2hex(random_bytes(6)), 'conflict' => $conflict]);
+    $id = (string)($init->json['id'] ?? '');
+    if ($id === '') return null;
+    $client->putChunk($id, 0, $bytes);
+    $done = $client->post('/api/uploads/complete', ['id' => $id]);
+    return $done->ok() ? (string)($done->json['path'] ?? '') : null;
+};
+// Made once the reply has gone, so it can land a moment after the reply does.
+$soon = function (callable $ready, float $seconds = 5.0): bool {
+    $until = microtime(true) + $seconds;
+    do {
+        clearstatcache();
+        if ($ready()) return true;
+        usleep(50_000);
+    } while (microtime(true) < $until);
+    return false;
+};
+$size = function ($response): ?array {
+    if ($response->status !== 200) return null;
+    $im = @imagecreatefromstring($response->body);
+    return $im ? [imagesx($im), imagesy($im)] : null;
+};
+$canThumb = extension_loaded('gd') && (gd_info()['WebP Support'] ?? false) && (gd_info()['JPEG Support'] ?? false);
+
+scenario('a new photo gets a thumbnail without anyone asking', function () use ($client, $scratch, $thumbOf, $photo, $photoPut, $soon, $size, $root, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/pics']);
+    $bytes = $photo(1600, 1000);
+    $path = $photoPut($scratch.'/pics/sunset.jpg', $bytes);
+    check('the photo uploads', $path === $scratch.'/pics/sunset.jpg', (string)$path);
+
+    // Looked for on disk before any thumbnail is asked for, so this is the
+    // one the upload made and not one made on demand.
+    check('its thumbnail is kept at the mirrored path', $soon(fn() => is_file($thumbOf($scratch.'/pics/sunset.jpg'))),
+        $thumbOf($scratch.'/pics/sunset.jpg'));
+    $kept = (string)@file_get_contents($thumbOf($scratch.'/pics/sunset.jpg'));
+    check('as WebP', substr($kept, 0, 4) === 'RIFF' && substr($kept, 8, 4) === 'WEBP', bin2hex(substr($kept, 0, 12)));
+    $source = $root.'/storage/files'.$scratch.'/pics/sunset.jpg';
+    if (is_file($source)) {
+        check('stamped with the photo\'s own time, which is how it is known to be current',
+            filemtime($thumbOf($scratch.'/pics/sunset.jpg')) === filemtime($source));
+    }
+
+    $thumb = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/sunset.jpg', 't' => 2]);
+    check('the route serves it', $thumb->status === 200 && str_contains((string)$thumb->header('Content-Type'), 'image/webp'),
+        $thumb->describe());
+    check('fitted into 512 pixels with its shape kept', $size($thumb) === [512, 320], json_encode($size($thumb)));
+    check('and it is the kept one, not a second decode', $thumb->body === $kept);
+    check('cached by the browser for good, since its URL changes with the photo',
+        str_contains((string)$thumb->header('Cache-Control'), 'immutable'), (string)$thumb->header('Cache-Control'));
+    $etag = (string)$thumb->header('ETag');
+    $again = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/sunset.jpg', 't' => 2], ['If-None-Match: '.$etag]);
+    check('and asked again with its tag, answered with nothing', $etag !== '' && $again->status === 304, $again->describe());
+
+    $original = $client->get('/api/files/download', ['path' => $scratch.'/pics/sunset.jpg']);
+    check('the photo itself is untouched', $original->ok() && $original->body === $bytes,
+        strlen($original->body).' bytes, '.$original->describe());
+
+    // Replaced by a different picture: the old thumbnail is stale by its time
+    // and the new one is the new picture's.
+    $photoPut($scratch.'/pics/sunset.jpg', $photo(700, 700, 90));
+    $square = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/sunset.jpg', 't' => 2]);
+    check('an overwritten photo gets a thumbnail of the new picture', $size($square) === [512, 512], json_encode($size($square)));
+});
+
+scenario('two photos with the same name keep their own thumbnails', function () use ($client, $scratch, $thumbOf, $photo, $photoPut, $soon, $size, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $first = $photoPut($scratch.'/pics/twin.jpg', $photo(800, 600));
+    $second = $photoPut($scratch.'/pics/twin.jpg', $photo(600, 800), 'rename');
+    check('the second is kept beside the first under a free name',
+        $first === $scratch.'/pics/twin.jpg' && $second !== null && $second !== $first, (string)$second);
+    if ($second === null || $second === $first) return;
+
+    check('each has its own thumbnail', $soon(fn() => is_file($thumbOf($first)) && is_file($thumbOf($second))));
+    check('the first is the landscape one',
+        $size($client->get('/api/thumbnail', ['path' => $first])) === [512, 384]);
+    check('the second the portrait one',
+        $size($client->get('/api/thumbnail', ['path' => $second])) === [384, 512]);
+});
+
+scenario('a thumbnail follows its photo', function () use ($client, $scratch, $thumbOf, $photo, $photoPut, $soon, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $photoPut($scratch.'/pics/walk.jpg', $photo(900, 600));
+    $soon(fn() => is_file($thumbOf($scratch.'/pics/walk.jpg')));
+
+    $client->post('/api/files/rename', ['oldPath' => $scratch.'/pics/walk.jpg', 'newPath' => $scratch.'/pics/stroll.jpg']);
+    clearstatcache();
+    check('a rename moves it', is_file($thumbOf($scratch.'/pics/stroll.jpg')) && !is_file($thumbOf($scratch.'/pics/walk.jpg')));
+
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/pics/album']);
+    $client->post('/api/files/copy', ['paths' => [$scratch.'/pics/stroll.jpg'], 'destination' => $scratch.'/pics/album']);
+    clearstatcache();
+    check('a copy gets one without a decode', is_file($thumbOf($scratch.'/pics/album/stroll.jpg')));
+
+    $client->post('/api/files/move', ['paths' => [$scratch.'/pics/album'], 'destination' => $scratch]);
+    clearstatcache();
+    check('a folder moved takes its thumbnails along',
+        is_file($thumbOf($scratch.'/album/stroll.jpg')) && !is_dir(dirname($thumbOf($scratch.'/pics/album/stroll.jpg'))));
+
+    $gone = $client->delete('/api/files/delete', ['path' => $scratch.'/album/stroll.jpg']);
+    clearstatcache();
+    check('a delete removes it', !is_file($thumbOf($scratch.'/album/stroll.jpg')), $gone->describe());
+    $client->post('/api/trash/restore', ['id' => (string)($gone->json['id'] ?? '')]);
+    check('and a restore makes it again', $soon(fn() => is_file($thumbOf($scratch.'/album/stroll.jpg'))));
+});
+
+scenario('a missing or damaged thumbnail is made again', function () use ($client, $scratch, $thumbOf, $photo, $photoPut, $soon, $size, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $photoPut($scratch.'/pics/lost.jpg', $photo(1000, 500));
+    $kept = $thumbOf($scratch.'/pics/lost.jpg');
+    $soon(fn() => is_file($kept));
+
+    @unlink($kept);
+    $back = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/lost.jpg']);
+    clearstatcache();
+    check('a deleted thumbnail is made when it is next shown', $size($back) === [512, 256] && is_file($kept), $back->describe());
+
+    file_put_contents($kept, 'not a picture at all');
+    $mended = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/lost.jpg']);
+    check('one written over is made again rather than served', $size($mended) !== null, $mended->describe());
+
+    // A file named like a photo that is not one: refused, and remembered so
+    // the next gallery is answered without trying again.
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/pics/broken']);
+    $photoPut($scratch.'/pics/broken/garbled.jpg', str_repeat('this is not a jpeg ', 200));
+    $refused = $client->get('/api/thumbnail', ['path' => $scratch.'/pics/broken/garbled.jpg']);
+    check('a damaged photo is refused, not a server error', $refused->status === 415, $refused->describe());
+    check('and remembered', $soon(fn() => is_file($thumbOf($scratch.'/pics/broken/garbled.jpg').'.failed')));
+    check('the file is still listed and still downloads',
+        $client->get('/api/files/download', ['path' => $scratch.'/pics/broken/garbled.jpg'])->ok());
+
+    $outside = $client->get('/api/thumbnail', ['path' => $scratch.'/../../config/config.php']);
+    check('a path out of the store is refused', in_array($outside->status, [400, 403, 404], true), $outside->describe());
+});
+
+scenario('the scan gives every photo a thumbnail, once', function () use ($base, $client, $scratch, $root, $thumbTree, $thumbOf, $photo, $photoPut, $soon, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    // A photo that was in the store before thumbnails were kept: put there
+    // by hand, as an older build or a copy straight onto the disk would.
+    $folder = $root.'/storage/files'.$scratch.'/pics';
+    $planted = is_dir($folder) && file_put_contents($folder.'/from-before.jpg', $photo(640, 480)) !== false;
+    $photoPut($scratch.'/pics/forgotten.jpg', $photo(500, 500));
+    $soon(fn() => is_file($thumbOf($scratch.'/pics/forgotten.jpg')));
+    @unlink($thumbOf($scratch.'/pics/forgotten.jpg'));
+    // And one left behind by a photo that is gone.
+    @mkdir($thumbTree.$scratch.'/pics', 0775, true);
+    file_put_contents($thumbOf($scratch.'/pics/long-gone.jpg'), 'RIFF....WEBP');
+
+    $viewer = new Client($base);
+    $viewer->signIn('viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+    check('a viewer can read how far it got', $viewer->get('/api/thumbnails/scan')->ok());
+    $refused = $viewer->post('/api/thumbnails/scan', ['restart' => true]);
+    check('but cannot run it', $refused->status === 403, $refused->describe());
+
+    $run = function (bool $restart) use ($client): array {
+        $scan = $client->post('/api/thumbnails/scan', ['restart' => $restart])->json ?? [];
+        for ($i = 0; $i < 40 && !($scan['done'] ?? false); $i++) {
+            if ($scan['busy'] ?? false) usleep(500_000);
+            $scan = $client->post('/api/thumbnails/scan')->json ?? [];
+        }
+        return $scan;
+    };
+    $scan = $run(true);
+    check('it finishes', ($scan['done'] ?? false) === true, json_encode($scan));
+    check('having looked at everything it found', ($scan['processed'] ?? -1) === ($scan['found'] ?? -2), json_encode($scan));
+    check('and made the missing ones', ($scan['generated'] ?? 0) >= ($planted ? 2 : 1), json_encode($scan));
+    clearstatcache();
+    if ($planted) check('a photo from before has one now', is_file($thumbOf($scratch.'/pics/from-before.jpg')));
+    check('a photo that lost its thumbnail has it back', is_file($thumbOf($scratch.'/pics/forgotten.jpg')));
+    check('the damaged photo is counted, not retried forever', ($scan['failed'] ?? 0) >= 1, json_encode($scan));
+    check('a thumbnail with no photo is cleared away', !is_file($thumbOf($scratch.'/pics/long-gone.jpg')));
+
+    $read = $client->get('/api/thumbnails/scan');
+    check('the account stays readable', ($read->json['done'] ?? false) === true
+        && ($read->json['generated'] ?? -1) === ($scan['generated'] ?? -2), $read->describe());
+
+    $twice = $run(true);
+    check('a second scan makes nothing', ($twice['done'] ?? false) === true && ($twice['generated'] ?? -1) === 0,
+        json_encode($twice));
+    check('and finds every thumbnail current', ($twice['valid'] ?? 0) >= ($planted ? 2 : 1), json_encode($twice));
+
+    $config = $client->get('/api/files/config');
+    check('the server says it keeps thumbnails, and in which format',
+        ($config->json['thumbnailFormat'] ?? null) === 2 && ($config->json['thumbnailScanSeconds'] ?? 0) > 0,
+        json_encode(['thumbnailFormat' => $config->json['thumbnailFormat'] ?? null]));
+});
+
 scenario('tidying the scratch folder', function () use ($client, $scratch) {
     $client->delete('/api/files/delete', ['path' => $scratch]);
     $trash = $client->get('/api/trash');

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PersonOff
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Sms
@@ -64,6 +65,10 @@ fun SettingsScreen(
     /** Grid or list: the files screen's own, so changing it here changes it there. */
     grid: Boolean,
     onGrid: (Boolean) -> Unit,
+    /** How far the server's thumbnails have got; see rememberThumbnailStatus(). */
+    thumbnailStatus: ThumbnailStatus,
+    /** Check every photo for a thumbnail now -- null for an account that may not. */
+    onPrepareThumbnails: (() -> Unit)?,
     onClearCache: () -> Unit,
     onClearVideoCache: () -> Unit,
     onChangeServer: () -> Unit,
@@ -156,6 +161,29 @@ fun SettingsScreen(
                     supporting = "Photos and videos stored more than once",
                     onClick = onOpenDuplicates,
                     trailing = { Chevron() },
+                )
+                SettingsDivider()
+                // Made on the server, which has the photos, and kept there:
+                // what scrolls past in a folder is these, never the originals.
+                // A scan in the background makes them for photos that were
+                // there before; this says how far it has got.
+                val canCheck = onPrepareThumbnails != null && !thumbnailStatus.running
+                SettingsRow(
+                    icon = Icons.Default.PhotoLibrary,
+                    title = "Photo thumbnails",
+                    supporting = ThumbnailRules.summary(thumbnailStatus.scan, thumbnailStatus.running),
+                    enabled = onPrepareThumbnails == null || canCheck,
+                    onClick = if (canCheck) {
+                        {
+                            onPrepareThumbnails?.invoke()
+                            scope.launch { snackbar.showSnackbar("Checking every photo for a thumbnail") }
+                        }
+                    } else null,
+                    trailing = when {
+                        thumbnailStatus.running -> { { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) } }
+                        canCheck -> { { SettingsValue("Check now") } }
+                        else -> null
+                    },
                 )
                 SettingsDivider()
                 SettingsRow(

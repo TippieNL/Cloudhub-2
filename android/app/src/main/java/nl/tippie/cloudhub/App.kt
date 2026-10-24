@@ -3,6 +3,8 @@ package nl.tippie.cloudhub
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.decode.VideoFrameDecoder
@@ -32,11 +34,48 @@ class CloudHubApp : Application(), ImageLoaderFactory {
         pins = CertificatePins(settings)
         client = CloudHubClient(PersistentCookieStore(settings), pins)
         api = CloudHubApi(settings.serverUrl.orEmpty(), client)
+        api.thumbnailFormat = settings.thumbnailFormat
+        api.onThumbnailFormat = { settings.thumbnailFormat = it }
     }
 
     fun useServer(url: String) {
         settings.serverUrl = url
         api.baseUrl = url
+        // Another server's format says nothing about this one's.
+        api.thumbnailFormat = null
+        settings.thumbnailFormat = null
+    }
+
+    /** One memory cache for both loaders: a thumbnail decoded for the grid is the one the viewer shows first. */
+    private val memory: MemoryCache by lazy { MemoryCache.Builder(this).maxSizePercent(0.25).build() }
+
+    /**
+     * Thumbnails, with a disk cache of their own.
+     *
+     * One cache for everything meant every photo opened full size -- several
+     * megabytes each -- pushed hundreds of 30 KB thumbnails out of it, and the
+     * grid fetched them again on the next scroll. Apart, opening photos can
+     * only push out other photos. 2% of the disk, between 32 MB and 512 MB:
+     * room for well over ten thousand thumbnails on any phone that has it.
+     *
+     * The server marks a thumbnail cacheable for a year, and its URL changes
+     * with the file and with the thumbnail format, so what is held here is
+     * read from disk -- never asked for again -- until it is pushed out.
+     */
+    val thumbnails: ImageLoader by lazy {
+        ImageLoader.Builder(this)
+            .okHttpClient { client.okHttp }
+            .memoryCache { memory }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("thumbnail_cache"))
+                    .maxSizePercent(0.02)
+                    .minimumMaxSizeBytes(32L * 1024 * 1024)
+                    .maximumMaxSizeBytes(512L * 1024 * 1024)
+                    .build()
+            }
+            .crossfade(true)
+            .build()
     }
 
     /**
@@ -47,6 +86,7 @@ class CloudHubApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .okHttpClient { client.okHttp }
+            .memoryCache { memory }
             .components {
                 // A video the server has no cached frame for still gets a
                 // picture, decoded from the stream on the device.
@@ -67,5 +107,9 @@ class CloudHubApp : Application(), ImageLoaderFactory {
     companion object {
         fun from(context: android.content.Context) =
             context.applicationContext as CloudHubApp
+
+        /** The thumbnail loader, or the ordinary one where there is no app to ask -- a preview, a test. */
+        fun thumbnailsOf(context: android.content.Context): ImageLoader =
+            (context.applicationContext as? CloudHubApp)?.thumbnails ?: coil.Coil.imageLoader(context)
     }
 }
