@@ -167,12 +167,16 @@ fun SettingsScreen(
                 // what scrolls past in a folder is these, never the originals.
                 // A scan in the background makes them for photos that were
                 // there before; this says how far it has got.
-                val canCheck = onPrepareThumbnails != null && !thumbnailStatus.running
+                // Nothing to press while a check is running or waiting for a
+                // connection, or against a server that has no scan to run. The
+                // automatic run also waits for battery, which a check asked
+                // for does not -- so that one can still be pressed past.
+                val canCheck = onPrepareThumbnails != null && thumbnailStatus.supported != false &&
+                    !thumbnailStatus.running && !(thumbnailStatus.waiting && !thumbnailStatus.waitsForBattery)
                 SettingsRow(
                     icon = Icons.Default.PhotoLibrary,
                     title = "Photo thumbnails",
-                    supporting = ThumbnailRules.summary(thumbnailStatus.scan, thumbnailStatus.running),
-                    enabled = onPrepareThumbnails == null || canCheck,
+                    supporting = ThumbnailRules.summary(thumbnailStatus),
                     onClick = if (canCheck) {
                         {
                             onPrepareThumbnails?.invoke()

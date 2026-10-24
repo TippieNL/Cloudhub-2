@@ -177,7 +177,11 @@ Three ways to run it:
 - **The Android app** keeps it going by itself, in the background, for accounts
   that may write: on every start, through WorkManager, when there is a network
   and the battery is not low. **Settings → Photo thumbnails** shows how far it
-  has got, and **Check now** checks every photo again.
+  has got, and **Check now** checks every photo again — online, whatever the
+  battery. When another client's slice holds the scan (another phone, the
+  command line, or the app's own last request, which the server finishes after
+  the worker that sent it has stopped), the app waits it out and asks again
+  rather than taking "busy" for "done".
 - **The command line**, for a large library or a cron job:
 
   ```bash
@@ -866,7 +870,10 @@ every photo already in the store — "Preparing · 1,200 of 5,000", then "All
 5,000 ready" — while the app keeps that going in the background (see
 **Thumbnails**); **Check now** checks every photo again. It is there for
 accounts that may write, since running the scan is a write; everyone else's
-thumbnails are made as their photos are first shown.
+thumbnails are made as their photos are first shown. A check asked for with no
+connection says "Waiting for a connection…" until it can start; one the server
+refused says why ("Stopped: … · tries again later") and is tried again by
+itself; and against a server from before the scan there is nothing to press.
 
 **Clear** under the thumbnail cache now empties the cache the app actually
 draws from. It used to build a new image loader to clear, which emptied that

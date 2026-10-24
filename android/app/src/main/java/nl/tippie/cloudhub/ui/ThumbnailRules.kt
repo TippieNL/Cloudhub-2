@@ -22,9 +22,39 @@ object ThumbnailRules {
      */
     const val RUN_MILLIS = 8 * 60_000L
 
-    /** Whether to ask for another slice. */
-    fun shouldContinue(scan: ThumbnailScanProgress, elapsedMillis: Long): Boolean =
-        !scan.done && !scan.busy && elapsedMillis < RUN_MILLIS
+    /**
+     * How long to wait when someone else's slice holds the scan before asking
+     * again. A slice is about eight seconds, so one wait usually sees it out.
+     */
+    const val BUSY_WAIT_MILLIS = 10_000L
+
+    /**
+     * Busy answers in a row before a run leaves the scan to whoever holds it
+     * and comes back later: about a minute, which an abandoned slice -- one
+     * whose worker was stopped while the server carried on -- never lasts.
+     */
+    const val BUSY_TRIES = 6
+
+    /** What the worker does with a slice's answer. */
+    enum class Next {
+        /** Ask for the next slice straight away. */
+        ASK_AGAIN,
+        /** Someone else's slice holds the scan: wait for it, then ask again. */
+        WAIT,
+        /** Every photo has been checked. */
+        DONE,
+        /** Out of time for this run, or busy for too long: come back later. */
+        LATER,
+    }
+
+    fun next(scan: ThumbnailScanProgress, elapsedMillis: Long, busyInARow: Int): Next = when {
+        // Busy says nothing about this request having run, even when the last
+        // scan reads as done -- so a check asked for has not begun yet.
+        scan.busy -> if (busyInARow < BUSY_TRIES && elapsedMillis + BUSY_WAIT_MILLIS < RUN_MILLIS) Next.WAIT else Next.LATER
+        scan.done -> Next.DONE
+        elapsedMillis >= RUN_MILLIS -> Next.LATER
+        else -> Next.ASK_AGAIN
+    }
 
     /** Photos and videos that have a thumbnail, as far as the last scan knows. */
     fun ready(scan: ThumbnailScanProgress): Int = scan.generated + scan.valid + scan.adopted
@@ -37,8 +67,21 @@ object ThumbnailRules {
     }
 
     /**
-     * One line for Settings. [scan] is null before the server has been asked,
-     * or for a server that keeps no thumbnails ahead of time.
+     * One line for Settings, saying first what is happening on this phone --
+     * a check waiting for a connection, or one that stopped short -- and
+     * otherwise how far the server has got.
+     */
+    fun summary(status: ThumbnailStatus, number: (Int) -> String = { "%,d".format(it) }): String = when {
+        status.supported == false -> "Made as photos are first shown"
+        status.running -> summary(status.scan, running = true, number = number)
+        status.waiting -> if (status.waitsForBattery) "Waiting for a connection and battery…" else "Waiting for a connection…"
+        status.error != null -> "Stopped: ${status.error} · tries again later"
+        else -> summary(status.scan, running = false, number = number)
+    }
+
+    /**
+     * How far the server has got. [scan] is null before the server has been
+     * asked, or for a server that keeps no thumbnails ahead of time.
      */
     fun summary(scan: ThumbnailScanProgress?, running: Boolean, number: (Int) -> String = { "%,d".format(it) }): String =
         when {

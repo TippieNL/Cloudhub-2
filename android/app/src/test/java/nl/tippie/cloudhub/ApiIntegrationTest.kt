@@ -489,7 +489,7 @@ class ApiIntegrationTest {
         val began = System.currentTimeMillis()
         var slices = 1
         var scan = api.continueThumbnailScan(restart = true)
-        while (ThumbnailRules.shouldContinue(scan, System.currentTimeMillis() - began) && slices < 500) {
+        while (ThumbnailRules.next(scan, System.currentTimeMillis() - began, 0) == ThumbnailRules.Next.ASK_AGAIN && slices < 500) {
             scan = api.continueThumbnailScan()
             slices++
         }
@@ -503,7 +503,9 @@ class ApiIntegrationTest {
 
         // Begun again with every thumbnail current: found, checked, none made.
         var again = api.continueThumbnailScan(restart = true)
-        while (ThumbnailRules.shouldContinue(again, System.currentTimeMillis() - began)) again = api.continueThumbnailScan()
+        while (ThumbnailRules.next(again, System.currentTimeMillis() - began, 0) == ThumbnailRules.Next.ASK_AGAIN) {
+            again = api.continueThumbnailScan()
+        }
         if (again.busy) return@runBlocking
         assertEquals(0, again.generated, "a second scan made thumbnails that were already there: $again")
     }

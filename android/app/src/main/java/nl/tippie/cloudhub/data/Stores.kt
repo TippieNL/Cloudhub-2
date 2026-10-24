@@ -91,6 +91,16 @@ class Settings(context: Context) {
             else prefs.edit().putInt("thumbnail_format", value).apply()
 
     /**
+     * Why the background thumbnail scan last stopped short, for Settings to
+     * say; cleared by the next answer the server gives it.
+     */
+    var thumbnailScanError: String?
+        get() = prefs.getString("thumbnail_scan_error", null)
+        set(value) =
+            if (value == null) prefs.edit().remove("thumbnail_scan_error").apply()
+            else prefs.edit().putString("thumbnail_scan_error", value).apply()
+
+    /**
      * The subtitle language last chosen, or null for none.
      *
      * A language rather than a file, for the same reason the web player stores

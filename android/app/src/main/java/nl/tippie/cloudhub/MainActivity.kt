@@ -468,7 +468,7 @@ class MainActivity : ComponentActivity() {
                         // already in the view just chosen.
                         grid = state.grid,
                         onGrid = { model.setGrid(it) },
-                        thumbnailStatus = rememberThumbnailStatus(app.api),
+                        thumbnailStatus = rememberThumbnailStatus(app.api, app.settings),
                         onPrepareThumbnails = if (state.canWrite) {
                             { ThumbnailScanWorker.enqueue(this@MainActivity, restart = true) }
                         } else null,

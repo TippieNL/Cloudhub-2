@@ -5,10 +5,12 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.work.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import nl.tippie.cloudhub.CloudHubApp
 import nl.tippie.cloudhub.net.ApiError
 import nl.tippie.cloudhub.net.ThumbnailScanProgress
 import nl.tippie.cloudhub.ui.ThumbnailRules
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,39 +32,61 @@ import java.util.concurrent.TimeUnit
 class ThumbnailScanWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val api = (applicationContext as CloudHubApp).api
-        val began = SystemClock.elapsedRealtime()
+        val app = applicationContext as CloudHubApp
         return try {
-            // The token can be stale after a restart, and every slice is a POST.
-            api.status()
-            // A server that keeps no thumbnails ahead of time says so by not
-            // publishing the scan; there is nothing to ask it for.
-            if (api.config().thumbnailScanSeconds == null) return Result.success()
-
-            var scan = api.continueThumbnailScan(restart = inputData.getBoolean(KEY_RESTART, false))
-            setProgress(scan.toData())
-            while (ThumbnailRules.shouldContinue(scan, SystemClock.elapsedRealtime() - began)) {
-                scan = api.continueThumbnailScan()
-                setProgress(scan.toData())
-            }
-            when {
-                // Busy is someone else's scan -- another phone, the server's own
-                // tool -- which will finish it; this one has nothing to add.
-                scan.done || scan.busy -> Result.success(scan.toData())
-                // Out of time for this run, not out of work: the place is kept
-                // on the server, and the next run carries on from it.
-                else -> Result.retry()
-            }
+            scan(app)
         } catch (e: CancellationException) {
             throw e
         } catch (e: ApiError) {
             // Signed out, no write access, or a server without the scan: none
             // of that is helped by asking again.
-            if (e.status in GIVE_UP) Result.success() else Result.retry()
+            if (e.status in GIVE_UP) Result.success() else stopped(app, e.message ?: "the server said ${e.status}")
+        } catch (e: IOException) {
+            stopped(app, "no connection to the server")
         } catch (e: Exception) {
             Log.w(TAG, "thumbnail scan: ${e.message}")
-            Result.retry()
+            stopped(app, e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    private suspend fun scan(app: CloudHubApp): Result {
+        val api = app.api
+        val began = SystemClock.elapsedRealtime()
+        // The token can be stale after a restart, and every slice is a POST.
+        api.status()
+        // A server that keeps no thumbnails ahead of time says so by not
+        // publishing the scan; there is nothing to ask it for.
+        if (api.config().thumbnailScanSeconds == null) return Result.success()
+
+        // Asked for until a slice has really run: an answer of busy means this
+        // request did nothing, so a check that begins again has not begun yet.
+        var restart = inputData.getBoolean(KEY_RESTART, false)
+        var busyInARow = 0
+        while (true) {
+            val scan = api.continueThumbnailScan(restart)
+            setProgress(scan.toData())
+            if (app.settings.thumbnailScanError != null) app.settings.thumbnailScanError = null
+            if (scan.busy) busyInARow++ else { busyInARow = 0; restart = false }
+            when (ThumbnailRules.next(scan, SystemClock.elapsedRealtime() - began, busyInARow)) {
+                ThumbnailRules.Next.ASK_AGAIN -> Unit
+                // Someone else's slice holds the scan: another phone, the
+                // server's own tool -- or this phone's last request, which the
+                // server carries on with after the worker that sent it was
+                // stopped. A slice lasts seconds; wait it out.
+                ThumbnailRules.Next.WAIT -> delay(ThumbnailRules.BUSY_WAIT_MILLIS)
+                ThumbnailRules.Next.DONE -> return Result.success(scan.toData())
+                // Out of time for this run, or someone else's scan for a good
+                // while: the place is kept on the server, and the next run
+                // carries on from it.
+                ThumbnailRules.Next.LATER -> return Result.retry()
+            }
+        }
+    }
+
+    /** Asked again later; until then Settings says why it stopped. */
+    private fun stopped(app: CloudHubApp, reason: String): Result {
+        app.settings.thumbnailScanError = reason
+        return Result.retry()
     }
 
     companion object {
@@ -75,7 +99,9 @@ class ThumbnailScanWorker(context: Context, params: WorkerParameters) : Coroutin
         /**
          * Make sure the scan is going. Kept when one is already queued or
          * running, so asking on every start costs nothing; [restart] -- the
-         * Settings button -- replaces it with one that begins again.
+         * Settings button -- replaces it with one that begins again, and runs
+         * on a low battery too: it was asked for, and the phone's part is only
+         * waiting on the server's answers.
          */
         fun enqueue(context: Context, restart: Boolean = false) {
             WorkManager.getInstance(context).enqueueUniqueWork(
@@ -86,7 +112,7 @@ class ThumbnailScanWorker(context: Context, params: WorkerParameters) : Coroutin
                     .setConstraints(
                         Constraints.Builder()
                             .setRequiredNetworkType(NetworkType.CONNECTED)
-                            .setRequiresBatteryNotLow(true)
+                            .setRequiresBatteryNotLow(!restart)
                             .build()
                     )
                     .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)

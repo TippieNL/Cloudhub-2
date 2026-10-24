@@ -395,7 +395,11 @@ $checks['and opens the original only in the viewer'] =
 $checks['the app keeps the scan going for an account that may run it'] =
     str_contains($kt('MainActivity.kt'), 'if (state.canWrite) ThumbnailScanWorker.enqueue(this@MainActivity)')
     && str_contains($kt('work/Thumbnails.kt'), 'ExistingWorkPolicy.KEEP')
-    && str_contains($kt('work/Thumbnails.kt'), 'ThumbnailRules.shouldContinue(scan, SystemClock.elapsedRealtime() - began)');
+    && str_contains($kt('work/Thumbnails.kt'), 'ThumbnailRules.next(scan, SystemClock.elapsedRealtime() - began, busyInARow)')
+    // A busy answer is waited out, and a check asked for is asked for again
+    // until a slice has really run: giving up on busy lost "Check now".
+    && str_contains($kt('work/Thumbnails.kt'), 'ThumbnailRules.Next.WAIT -> delay(ThumbnailRules.BUSY_WAIT_MILLIS)')
+    && str_contains($kt('work/Thumbnails.kt'), 'if (scan.busy) busyInARow++ else { busyInARow = 0; restart = false }');
 
 /* --- tidy up ---------------------------------------------------------------------------- */
 
