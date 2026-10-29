@@ -32,6 +32,14 @@ use RuntimeException;
  * (`beach.jpg.webp.failed`, carrying the same modification time), so neither a
  * gallery nor the background scan decodes it again until the file changes.
  *
+ * Videos. Where the server has ffmpeg, a video's thumbnail is a frame made
+ * here, a little way in, on the same terms as a photo's: on upload, on first
+ * look and by the scan. Without it, the first browser or phone to show the
+ * video decodes a frame and sends it back (storeFrame()). ffmpeg is only ever
+ * run with an argument list, never a shell, allowed to read local files and
+ * only real video containers -- a "video" that is a playlist or a list of
+ * other files is refused -- and stopped when it overruns.
+ *
  * The one name that cannot be mirrored: a folder called `beach.jpg.webp` next
  * to `beach.jpg` wants the same place in the mirror as that photo's thumbnail.
  * Whichever arrives second is not kept -- its thumbnail is still made and
@@ -45,9 +53,22 @@ final class ThumbnailService
      *
      * Raised when the size or encoding changes, so a cache that holds a
      * thumbnail for a year -- the browser's, the app's -- asks again rather
-     * than showing the old one for the rest of that year. 1 was 300 px.
+     * than showing the old one for the rest of that year. 1 was 300 px; 2 was
+     * this size, before the video frames of FRAMES_EPOCH 2 were made again,
+     * which caches holding the wrong ones have to be told about too.
      */
-    public const FORMAT = 2;
+    public const FORMAT = 3;
+
+    /**
+     * Which generation of video frames is kept here.
+     *
+     * Raised when the frames already stored cannot be trusted: the next scan
+     * drops every one as it finds its video, to be made again. 2: the Android
+     * app before 5.2 decoded one video and sent that picture as the frame of
+     * every other video it showed, so a folder of videos could all carry the
+     * same thumbnail.
+     */
+    public const FRAMES_EPOCH = 2;
 
     /**
      * The longest side, in pixels.
@@ -79,7 +100,7 @@ final class ThumbnailService
     /** Images a thumbnail is made from here -- where this server's GD can read them. */
     public const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'];
 
-    /** Videos: the server has no decoder, so their frames come from clients. */
+    /** Videos: their frames are made here by ffmpeg, where there is one, or sent by clients. */
     public const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts'];
 
     public const VALID = 'valid';
@@ -94,6 +115,16 @@ final class ThumbnailService
 
     private const LOCK_SLOTS = 64;
 
+    /**
+     * The containers ffmpeg may open for a frame. Real video files only: not
+     * HLS or a concat list, whose entries can name any file on the server or
+     * any address it can reach, whatever a file calls itself.
+     */
+    private const FFMPEG_FORMATS = 'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpeg,mpegts,mpegvideo,ogg,flv';
+
+    /** The most a frame from ffmpeg may weigh: a 1024 px PNG is well under it. */
+    private const MAX_FRAME_PNG_BYTES = 16 * 1024 * 1024;
+
     private string $base;
     private string $tree;
     private string $legacy;
@@ -104,9 +135,15 @@ final class ThumbnailService
 
     /**
      * @param string $base the thumbnail directory, `storage/.thumbnails`
+     * @param string|null $ffmpeg the ffmpeg to make video frames with -- see findFfmpeg() -- or null for none
+     * @param float $ffmpegSeconds how long one video's frame may take before ffmpeg is stopped
      */
-    public function __construct(private FileService $fs, string $base)
-    {
+    public function __construct(
+        private FileService $fs,
+        string $base,
+        private ?string $ffmpeg = null,
+        private float $ffmpegSeconds = 20.0,
+    ) {
         $this->base = rtrim(str_replace('\\', '/', $base), '/');
         $this->tree = $this->base.'/files';
         // The first layout: one flat folder of md5(absolute path:mtime).webp.
@@ -117,6 +154,37 @@ final class ThumbnailService
     public function tree(): string { return $this->tree; }
 
     public function legacyDir(): string { return $this->legacy; }
+
+    /** Whether video thumbnails are made here, rather than only taken from clients. */
+    public function makesVideoFrames(): bool { return $this->ffmpeg !== null; }
+
+    /**
+     * The ffmpeg to make video frames with: $configured (FFMPEG_PATH) when it
+     * is set -- "off" for none -- and otherwise the first found on $searchPath
+     * or in the usual places, since php-fpm often starts its workers with no
+     * PATH at all. Null where there is none, or where PHP may not run one.
+     */
+    public static function findFfmpeg(?string $configured, ?string $searchPath = null): ?string
+    {
+        if (!function_exists('proc_open')
+            || in_array('proc_open', array_map('trim', explode(',', (string)ini_get('disable_functions'))), true)) {
+            return null;
+        }
+        $configured = trim((string)$configured);
+        if (in_array(strtolower($configured), ['off', 'none', 'no', 'false', '0'], true)) return null;
+        $candidates = [$configured];
+        if ($configured === '') {
+            $candidates = [];
+            foreach (explode(PATH_SEPARATOR, $searchPath ?? (string)getenv('PATH')) as $dir) {
+                if (trim($dir) !== '') $candidates[] = rtrim($dir, '/\\').'/ffmpeg';
+            }
+            array_push($candidates, '/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/opt/homebrew/bin/ffmpeg');
+        }
+        foreach ($candidates as $candidate) {
+            if (@is_file($candidate) && @is_executable($candidate)) return $candidate;
+        }
+        return null;
+    }
 
     /* ---- what is a thumbnail of what ------------------------------------ */
 
@@ -242,6 +310,54 @@ final class ThumbnailService
     }
 
     /**
+     * Whether a frame for this video would be made here when asked for: there
+     * is an ffmpeg, the name can be kept, and the video is not known to be
+     * unreadable. A client told so asks for the thumbnail instead of
+     * downloading and decoding the video itself.
+     */
+    public function mayMakeFrame(string $file): bool
+    {
+        return $this->ffmpeg !== null && self::isVideo($file) && $this->canKeep($file) && $this->knownFailure($file) === null;
+    }
+
+    /**
+     * The generation of video frames kept here (see FRAMES_EPOCH): 1 for a
+     * store that has never recorded one.
+     */
+    public function framesEpoch(): int
+    {
+        $raw = @file_get_contents($this->base.'/frames-epoch');
+        return $raw === false ? 1 : max(1, (int)trim($raw));
+    }
+
+    /** Record that the frames kept here are FRAMES_EPOCH's. */
+    public function markFramesEpoch(): void
+    {
+        if (!is_dir($this->base) && !@mkdir($this->base, 0775, true) && !is_dir($this->base)) return;
+        $file = $this->base.'/frames-epoch';
+        $tmp = self::temporary($file);
+        if (@file_put_contents($tmp, (string)self::FRAMES_EPOCH) === false || !@rename($tmp, $file)) @unlink($tmp);
+    }
+
+    /**
+     * Drop a video's frame, and its marker, to be made again. True when there
+     * was a frame. Holding the thumbnail's lock, as afterReply() does, so a
+     * frame being made at that moment is finished and then dropped.
+     */
+    public function dropFrame(string $file): bool
+    {
+        $thumb = $this->pathForFile($file);
+        if ($thumb === null || !self::isVideo($file)) return false;
+        return $this->locked($thumb, function () use ($thumb): bool {
+            $had = is_file($thumb);
+            @unlink($thumb);
+            @unlink($thumb.self::FAILED);
+            clearstatcache(true, $thumb);
+            return $had;
+        });
+    }
+
+    /**
      * Whether $file is a whole WebP: the signature, and a RIFF length that is
      * the file's own -- which a file cut short, or emptied by a crash before
      * its bytes reached the disk, does not have.
@@ -307,13 +423,16 @@ final class ThumbnailService
         if ($existing !== null) return ['status' => self::VALID, 'path' => $existing];
 
         $ext = self::extensionOf($file);
-        if (!in_array($ext, self::IMAGE_EXTENSIONS, true)) {
+        $video = self::isVideo($file);
+        // A video's frame is made here only by ffmpeg; without one, it comes
+        // from a client (storeFrame()).
+        if ($video ? $this->ffmpeg === null : !in_array($ext, self::IMAGE_EXTENSIONS, true)) {
             throw new RuntimeException('Not a supported thumbnail type', 400);
         }
         if (!extension_loaded('gd')) {
             throw new RuntimeException('GD extension is required for image thumbnails', 503);
         }
-        if (!self::canDecode($ext)) {
+        if (!$video && !self::canDecode($ext)) {
             throw new RuntimeException('This server cannot read .'.$ext.' images', 415);
         }
         $failure = $this->knownFailure($file);
@@ -324,17 +443,18 @@ final class ThumbnailService
 
         // One maker per thumbnail: a gallery, a second device and the scan can
         // all ask for the same new photo at once, and only one need decode it.
-        return $this->locked($thumb, function () use ($file, $thumb, $verify): array {
+        return $this->locked($thumb, function () use ($file, $thumb, $verify, $video): array {
             $existing = $this->current($file, $verify);
             if ($existing !== null) return ['status' => self::VALID, 'path' => $existing];
 
             clearstatcache(true, $file);
             $mtime = @filemtime($file);
             if ($mtime === false) throw new RuntimeException('File not found', 404);
-            $bytes = $this->render($file, function (int $status, string $message) use ($thumb, $mtime): never {
+            $refuse = function (int $status, string $message) use ($thumb, $mtime): never {
                 $this->remember($thumb, $mtime, $status, $message);
                 throw new RuntimeException($message, $status);
-            });
+            };
+            $bytes = $video ? $this->renderVideo($file, $refuse) : $this->render($file, $refuse);
             if (!$this->put($thumb, $bytes, $mtime)) {
                 throw new RuntimeException('Failed to store image thumbnail', 500);
             }
@@ -384,13 +504,24 @@ final class ThumbnailService
         // That is a fact about the file, not a server fault.
         if (!$source) $refuse(415, 'This file is not a readable image');
 
-        $w = imagesx($source);
-        $h = imagesy($source);
-        if ($w < 1 || $h < 1) {
+        if (imagesx($source) < 1 || imagesy($source) < 1) {
             imagedestroy($source);
             $refuse(415, 'This file is not a readable image');
         }
+        $orientation = ($ext === 'jpg' || $ext === 'jpeg') && function_exists('exif_read_data')
+            ? (int)(@exif_read_data($file)['Orientation'] ?? 1)
+            : 1;
+        return $this->shrink($source, $orientation);
+    }
 
+    /**
+     * Shrink a decoded picture into the thumbnail's box, turn it the way its
+     * EXIF orientation says, and encode it as WebP. Takes $source over.
+     */
+    private function shrink(\GdImage $source, int $orientation = 1): string
+    {
+        $w = imagesx($source);
+        $h = imagesy($source);
         // Shrunk to fit, never enlarged: a small image is its own thumbnail.
         $scale = min(self::MAX_EDGE / $w, self::MAX_EDGE / $h, 1);
         $nw = max(1, (int)round($w * $scale));
@@ -405,9 +536,7 @@ final class ThumbnailService
         imagefill($im, 0, 0, imagecolorallocatealpha($im, 0, 0, 0, 127));
         imagecopyresampled($im, $source, 0, 0, 0, 0, $nw, $nh, $w, $h);
         imagedestroy($source);
-        if (($ext === 'jpg' || $ext === 'jpeg') && function_exists('exif_read_data')) {
-            $im = self::orient($im, (int)(@exif_read_data($file)['Orientation'] ?? 1));
-        }
+        if ($orientation !== 1) $im = self::orient($im, $orientation);
 
         ob_start();
         $ok = @imagewebp($im, null, self::QUALITY);
@@ -415,6 +544,121 @@ final class ThumbnailService
         imagedestroy($im);
         if (!$ok || $bytes === '') throw new RuntimeException('Failed to generate thumbnail', 500);
         return $bytes;
+    }
+
+    /**
+     * A video's thumbnail: a frame a little way in -- past an opening fade,
+     * inside even a short clip, where the web client takes its own -- shrunk
+     * and encoded like a photo's. ffmpeg turns a phone's portrait video
+     * upright as it decodes.
+     */
+    private function renderVideo(string $file, callable $refuse): string
+    {
+        $deadline = microtime(true) + $this->ffmpegSeconds;
+        $duration = $this->videoDuration($file, $deadline);
+        $at = $duration !== null && $duration > 0
+            ? min(max($duration * 0.08, 0.25), max(0.0, $duration - 0.05))
+            : 0.0;
+        $png = $this->videoFrame($file, $at, $deadline);
+        // A seek can land where nothing decodes -- a stream with no index, or
+        // whose first keyframe is later -- so the very first frame is next.
+        if ($png === '' && $at > 0) $png = $this->videoFrame($file, 0.0, $deadline);
+        // Out of time is not the file's fault: not remembered, tried again.
+        if ($png === null) throw new RuntimeException('Making this video\'s thumbnail took too long', 503);
+        $frame = $png === '' ? false : @imagecreatefromstring($png);
+        if ($frame === false) $refuse(415, 'This video could not be read');
+        return $this->shrink($frame);
+    }
+
+    /** A video's length in seconds, as ffmpeg reads it from the container; null when it cannot say. */
+    private function videoDuration(string $file, float $deadline): ?float
+    {
+        // Given an input and no output, ffmpeg describes the input and stops.
+        $run = $this->runFfmpeg(array_merge(['-nostdin', '-hide_banner'], self::ffmpegInput($file)), 0, $deadline);
+        if ($run === null || !preg_match('/Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/', $run['err'], $m)) return null;
+        return (int)$m[1] * 3600 + (int)$m[2] * 60 + (float)$m[3];
+    }
+
+    /** One frame at $at seconds, as PNG bytes: '' where there is none to be had, null when ffmpeg was stopped. */
+    private function videoFrame(string $file, float $at, float $deadline): ?string
+    {
+        $run = $this->runFfmpeg(array_merge(
+            ['-nostdin', '-hide_banner', '-loglevel', 'error', '-threads', '1', '-ss', sprintf('%.3F', $at)],
+            self::ffmpegInput($file),
+            [
+                '-frames:v', '1', '-an', '-sn', '-dn',
+                // Square pixels, and no larger than shrink() needs.
+                '-vf', "scale=w='min(1024,iw*sar)':h='min(1024,ih)':force_original_aspect_ratio=decrease,setsar=1",
+                '-pix_fmt', 'rgb24', '-f', 'image2pipe', '-c:v', 'png', 'pipe:1',
+            ],
+        ), self::MAX_FRAME_PNG_BYTES, $deadline);
+        return $run === null ? null : $run['out'];
+    }
+
+    /**
+     * ffmpeg's input: this file, read as a local file -- "file:" so that no
+     * name is taken for a protocol -- from which only local files may be
+     * opened and only video containers read.
+     *
+     * @return list<string>
+     */
+    private static function ffmpegInput(string $file): array
+    {
+        return ['-protocol_whitelist', 'file', '-format_whitelist', self::FFMPEG_FORMATS, '-i', 'file:'.$file];
+    }
+
+    /**
+     * Run ffmpeg -- never through a shell, so nothing in a file's name is read
+     * as a command -- and return its exit code, what it wrote (up to
+     * $maxBytes) and the start of what it reported. Null when it overran
+     * $deadline or $maxBytes and was stopped, or could not be started.
+     *
+     * @param list<string> $args
+     * @return array{code:int,out:string,err:string}|null
+     */
+    private function runFfmpeg(array $args, int $maxBytes, float $deadline): ?array
+    {
+        $proc = @proc_open(array_merge([(string)$this->ffmpeg], $args),
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        if (!is_resource($proc)) return null;
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $out = '';
+        $err = '';
+        $open = [1 => $pipes[1], 2 => $pipes[2]];
+        $stopped = false;
+        while ($open) {
+            $left = $deadline - microtime(true);
+            if ($left <= 0 || strlen($out) > $maxBytes) { $stopped = true; break; }
+            $read = array_values($open);
+            $write = $except = null;
+            if (@stream_select($read, $write, $except, 0, (int)min(250_000, $left * 1_000_000)) === false) {
+                $stopped = true;
+                break;
+            }
+            foreach ($read as $pipe) {
+                $key = $pipe === $pipes[1] ? 1 : 2;
+                $chunk = (string)@fread($pipe, 65536);
+                if ($key === 1) $out .= $chunk;
+                elseif (strlen($err) < 32768) $err .= $chunk;
+                if ($chunk === '' && feof($pipe)) unset($open[$key]);
+            }
+        }
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        // Both of its outputs closed: it has exited, or is about to.
+        for ($i = 0; !$stopped && $i < 100; $i++) {
+            $status = proc_get_status($proc);
+            if (!$status['running']) {
+                proc_close($proc);
+                return ['code' => (int)$status['exitcode'], 'out' => $out, 'err' => $err];
+            }
+            usleep(10_000);
+        }
+        @proc_terminate($proc, 9);
+        @proc_close($proc);
+        return null;
     }
 
     /** Whether an image of these dimensions may be decoded for a thumbnail. */
@@ -465,7 +709,12 @@ final class ThumbnailService
         $length = self::riffLength($webp);
         if ($thumb === null || $mtime === false || $length === null || $length > strlen($webp)) return false;
         $webp = substr($webp, 0, $length);
-        return $this->locked($thumb, fn(): bool => $this->put($thumb, $webp, $mtime));
+        return $this->locked($thumb, function () use ($thumb, $webp, $mtime): bool {
+            if (!$this->put($thumb, $webp, $mtime)) return false;
+            // A client read what ffmpeg here could not: no longer a failure.
+            @unlink($thumb.self::FAILED);
+            return true;
+        });
     }
 
     /**
@@ -587,7 +836,7 @@ final class ThumbnailService
                     clearstatcache(true, $thumb);
                 });
             }
-            if (self::isImage($file)) $this->queued[$file] = true;
+            if (self::isImage($file) || ($this->ffmpeg !== null && self::isVideo($file))) $this->queued[$file] = true;
         }
         if ($this->hooked || !$this->queued) return;
         $this->hooked = true;

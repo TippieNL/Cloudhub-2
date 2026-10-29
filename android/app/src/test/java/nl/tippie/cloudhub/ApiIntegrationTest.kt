@@ -14,6 +14,7 @@ import nl.tippie.cloudhub.ui.LoadState
 import okhttp3.RequestBody.Companion.toRequestBody
 import nl.tippie.cloudhub.ui.SearchRules
 import nl.tippie.cloudhub.ui.ThumbnailRules
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -508,6 +509,28 @@ class ApiIntegrationTest {
         }
         if (again.busy) return@runBlocking
         assertEquals(0, again.generated, "a second scan made thumbnails that were already there: $again")
+    }
+
+    @Test fun `23 a video frame from this app is kept, one from the app before 5_2 is not`() = runBlocking {
+        requireServer()
+        // Not a video any decoder can read, so no frame is made for it on the
+        // server however it is set up: what it gets is what a client sends.
+        put("$scratch/unreadable.mp4", ByteArray(20_000) { ((it * 7) % 253).toByte() })
+        val frame = java.util.Base64.getEncoder().encodeToString(png(320, 180))
+        val body = """{"path":"$scratch/unreadable.mp4","image":"$frame"}"""
+            .toRequestBody("application/json".toMediaType())
+
+        // OkHttp's own name, which is all the app before 5.2 sent.
+        val bare = okhttp3.OkHttpClient.Builder().cookieJar(http.okHttp.cookieJar).build()
+        val refused = bare.newCall(Request.Builder().url(api.url("/api/thumbnail/video")).post(body)
+            .header("X-CSRF-Token", http.csrfToken).build()).execute().use { it.code }
+        assertEquals(403, refused, "a frame from the old app was accepted")
+
+        assertTrue(api.contributeVideoThumbnail("$scratch/unreadable.mp4", frame).success)
+        val entry = api.list(scratch).first { it.name == "unreadable.mp4" }
+        assertTrue(entry.hasThumbnail, "the frame this app sent was not kept")
+        val served = http.okHttp.newCall(Request.Builder().url(api.thumbnailUrl(entry)).build()).execute().use { it.code }
+        assertEquals(200, served)
     }
 
     @Test fun `99 clean up`() = runBlocking {

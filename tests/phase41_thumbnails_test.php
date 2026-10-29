@@ -69,7 +69,8 @@ if (function_exists('exif_read_data')) {
         && (imagecolorat($upright, 10, 5) >> 16 & 0xFF) > 200 && (imagecolorat($upright, 10, 35) & 0xFF) > 200;
 }
 $checks['JPEG thumbnails are turned by their EXIF'] =
-    str_contains($service, "\$im = self::orient(\$im, (int)(@exif_read_data(\$file)['Orientation'] ?? 1));");
+    str_contains($service, "? (int)(@exif_read_data(\$file)['Orientation'] ?? 1)")
+    && str_contains($service, "if (\$orientation !== 1) \$im = self::orient(\$im, \$orientation);");
 $checks['the thumbnail canvas keeps transparency'] =
     str_contains($service, "imagesavealpha(\$im, true);") && str_contains($service, "imagefill(\$im, 0, 0, imagecolorallocatealpha(\$im, 0, 0, 0, 127));");
 

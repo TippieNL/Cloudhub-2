@@ -17,9 +17,10 @@ use RuntimeException;
  *  - walk: list every image and video, a folder at a time, into a file on
  *    disk -- so a store of a million photos costs a file of their names, not a
  *    million entries in memory;
- *  - make: read that list from where it got to and give every image a current
- *    thumbnail, skipping those that have one and those known to be
- *    unreadable, and bring video frames over from the first layout;
+ *  - make: read that list from where it got to and give every image -- and,
+ *    where the server has ffmpeg, every video -- a current thumbnail,
+ *    skipping those that have one and those known to be unreadable, and bring
+ *    video frames over from the first layout;
  *  - sweep: walk the mirror and remove what no longer belongs to anything --
  *    thumbnails of files deleted outside CloudHub, stale ones, half-written
  *    leftovers -- and finally the first layout's folder.
@@ -107,9 +108,17 @@ final class ThumbnailScan
         if (@file_put_contents($this->listFile, '') === false) {
             throw new RuntimeException('Unable to start the thumbnail scan', 500);
         }
+        // Frames stored before ThumbnailService::FRAMES_EPOCH cannot be
+        // trusted: each is dropped as the walk finds its video, and made again
+        // -- here, with ffmpeg, or by the next client to show it. The first
+        // layout's frames are of the same age, so they go now, unadopted.
+        $dropFrames = $this->thumbs->framesEpoch() < ThumbnailService::FRAMES_EPOCH;
+        $counts = self::COUNTS;
+        if ($dropFrames) $counts['removed'] += $this->removeLegacy();
         return [
-            'version' => 1,
+            'version' => 2,
             'phase' => 'walk',
+            'dropFrames' => $dropFrames,
             'startedAt' => gmdate('c'),
             'finishedAt' => null,
             'finishedTs' => 0,
@@ -118,7 +127,7 @@ final class ThumbnailScan
             'offset' => 0,
             'processed' => 0,
             'sweep' => [''],
-            'counts' => self::COUNTS,
+            'counts' => $counts,
         ];
     }
 
@@ -141,6 +150,9 @@ final class ThumbnailScan
                     if (is_dir($child)) {
                         $state['walk'][] = rawurlencode($rel);
                     } elseif (is_file($child) && (ThumbnailService::isImage($child) || ThumbnailService::isVideo($child))) {
+                        if ($state['dropFrames'] && ThumbnailService::isVideo($child) && $this->thumbs->dropFrame($child)) {
+                            $state['counts']['removed']++;
+                        }
                         fwrite($out, rawurlencode($rel)."\n");
                         $state['found']++;
                     }
@@ -149,7 +161,10 @@ final class ThumbnailScan
         } finally {
             fclose($out);
         }
-        if (!$state['walk']) $state['phase'] = 'make';
+        if (!$state['walk']) {
+            if ($state['dropFrames']) $this->thumbs->markFramesEpoch();
+            $state['phase'] = 'make';
+        }
         return $state;
     }
 
@@ -195,9 +210,11 @@ final class ThumbnailScan
         if (!is_file($file)) return 'skipped';
         if (ThumbnailService::isVideo($file)) {
             if ($this->thumbs->current($file, true) !== null) return 'valid';
-            return $this->thumbs->adoptFrame($file) ? 'adopted' : 'skipped';
-        }
-        if (!ThumbnailService::canDecode(ThumbnailService::extensionOf($file)) || !$this->thumbs->canKeep($file)) {
+            if ($this->thumbs->adoptFrame($file)) return 'adopted';
+            // Made here with ffmpeg; without one, the first client to show the
+            // video sends its frame.
+            if (!$this->thumbs->makesVideoFrames() || !$this->thumbs->canKeep($file)) return 'skipped';
+        } elseif (!ThumbnailService::canDecode(ThumbnailService::extensionOf($file)) || !$this->thumbs->canKeep($file)) {
             return 'skipped';
         }
         try {
@@ -285,13 +302,14 @@ final class ThumbnailScan
     {
         if (!is_file($this->stateFile)) return null;
         $state = json_decode((string)@file_get_contents($this->stateFile), true);
-        if (!is_array($state) || ($state['version'] ?? 0) !== 1
+        if (!is_array($state) || ($state['version'] ?? 0) !== 2
             || !in_array($state['phase'] ?? null, ['walk', 'make', 'sweep', 'done'], true)) {
             return null;
         }
         $state['counts'] = array_merge(self::COUNTS, array_map('intval', (array)($state['counts'] ?? [])));
         $state['walk'] = array_values(array_map('strval', (array)($state['walk'] ?? [])));
         $state['sweep'] = array_values(array_map('strval', (array)($state['sweep'] ?? [])));
+        $state['dropFrames'] = !empty($state['dropFrames']);
         foreach (['found', 'offset', 'processed', 'finishedTs'] as $key) $state[$key] = (int)($state[$key] ?? 0);
         return $state;
     }

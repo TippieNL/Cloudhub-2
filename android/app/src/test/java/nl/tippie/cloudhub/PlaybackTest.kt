@@ -1,5 +1,6 @@
 package nl.tippie.cloudhub
 
+import nl.tippie.cloudhub.net.thumbnailVersion
 import nl.tippie.cloudhub.ui.PlaybackTuning
 import nl.tippie.cloudhub.ui.VideoThumbnails
 import org.junit.Before
@@ -152,6 +153,32 @@ class PlaybackTest {
         assertTrue(VideoThumbnails.markContributed("/Videos/holiday.mp4"))
         assertFalse(VideoThumbnails.markContributed("/Videos/holiday.mp4"))
         assertTrue(VideoThumbnails.markContributed("/Videos/other.mp4"))
+    }
+
+    @Test
+    fun `every video's frame has a key of its own`() {
+        // Written with each dollar sign escaped, this was one string for every
+        // video: the first frame decoded was drawn on -- and sent to the
+        // server as -- the thumbnail of every video shown after it.
+        val version = thumbnailVersion("2026-10-24T21:14:19+00:00", 48_213_000)
+        val holiday = VideoThumbnails.frameKey("/Videos/holiday.mp4", version)
+        val party = VideoThumbnails.frameKey("/Videos/party.mp4", version)
+        assertNotEquals(holiday, party)
+        assertTrue("/Videos/holiday.mp4" in holiday && "{" !in holiday, holiday)
+        assertNotEquals(holiday, VideoThumbnails.frameKey("/Videos/holiday.mp4", thumbnailVersion("2026-10-24T21:14:19+00:00", 51_000_000)),
+            "a video replaced by another is a new frame")
+    }
+
+    @Test
+    fun `a frame is sent again once a new listing says the server has none`() {
+        val key = VideoThumbnails.frameKey("/Videos/holiday.mp4", "v1")
+        assertTrue(VideoThumbnails.markContributed(key))
+        assertFalse(VideoThumbnails.markContributed(key), "not twice while one listing is on screen")
+        // What listing a folder does: the server's thumbnails may have been
+        // cleared since, and remembering it for the life of the app meant the
+        // frame was never sent again.
+        VideoThumbnails.forgetContributions()
+        assertTrue(VideoThumbnails.markContributed(key))
     }
 
     @Test

@@ -1777,8 +1777,102 @@ scenario('the scan gives every photo a thumbnail, once', function () use ($base,
 
     $config = $client->get('/api/files/config');
     check('the server says it keeps thumbnails, and in which format',
-        ($config->json['thumbnailFormat'] ?? null) === 2 && ($config->json['thumbnailScanSeconds'] ?? 0) > 0,
+        ($config->json['thumbnailFormat'] ?? null) === 3 && ($config->json['thumbnailScanSeconds'] ?? 0) > 0,
         json_encode(['thumbnailFormat' => $config->json['thumbnailFormat'] ?? null]));
+});
+
+/*
+ * Videos. Where the server has ffmpeg it makes their thumbnails itself, like
+ * a photo's, and makes them again when they are deleted; either way, every
+ * video's thumbnail is its own -- the Android app before 5.2 filed one video's
+ * picture as the frame of every video it showed, and its frames are refused.
+ */
+scenario('every video gets a thumbnail of its own, and gets it back when it is deleted', function () use ($client, $scratch, $thumbOf, $soon, $size, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $config = $client->get('/api/files/config')->json ?? [];
+    $made = ($config['videoThumbnails'] ?? '') === 'server';
+    $ffmpeg = trim((string)@shell_exec('command -v ffmpeg 2>/dev/null'));
+    if (!$made) {
+        check('without ffmpeg the server says the clients make video frames', ($config['videoThumbnails'] ?? '') === 'clients',
+            json_encode($config['videoThumbnails'] ?? null));
+        return;
+    }
+    // The server found one; the test needs one on its own PATH to make videos.
+    if ($ffmpeg === '') { check('ffmpeg is on the PATH to make test videos with', true); return; }
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/videos']);
+    $work = sys_get_temp_dir().'/cloudhub-videos-'.bin2hex(random_bytes(4));
+    mkdir($work);
+    $sources = ['bars.mp4' => 'testsrc=duration=2:size=640x360:rate=10',
+                'blue.mkv' => 'color=c=blue:duration=2:size=640x360:rate=10',
+                'tall.mov' => 'testsrc2=duration=2:size=360x640:rate=10'];
+    foreach ($sources as $name => $source) {
+        $p = proc_open([$ffmpeg, '-nostdin', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', $source, '-pix_fmt', 'yuv420p', $work.'/'.$name],
+            [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        proc_close($p);
+        $bytes = (string)@file_get_contents($work.'/'.$name);
+        $init = $client->post('/api/uploads/init', ['targetPath' => $scratch.'/videos', 'name' => $name, 'size' => strlen($bytes),
+            'uploadId' => 'vid'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+        $client->putChunk((string)($init->json['id'] ?? ''), 0, $bytes);
+        $client->post('/api/uploads/complete', ['id' => (string)($init->json['id'] ?? '')]);
+        @unlink($work.'/'.$name);
+    }
+    @rmdir($work);
+
+    $paths = array_map(fn($name) => $scratch.'/videos/'.$name, array_keys($sources));
+    check('an uploaded video gets its thumbnail without anyone asking',
+        $soon(fn() => count(array_filter($paths, fn($p) => is_file($thumbOf($p)))) === 3, 10.0));
+    $listing = $client->get('/api/files/list', ['path' => $scratch.'/videos'])->json ?? [];
+    check('and the listing says so, so no client decodes one',
+        count(array_filter($listing, fn($e) => !empty($e['hasThumbnail']))) === 3, json_encode(array_column($listing, 'hasThumbnail', 'name')));
+
+    $fetch = fn(string $p) => $client->get('/api/thumbnail', ['path' => $p, 't' => 3]);
+    $first = [];
+    foreach ($paths as $p) $first[$p] = $fetch($p);
+    check('each is served as WebP', count(array_filter($first, fn($r) => $r->status === 200
+        && str_contains((string)$r->header('Content-Type'), 'image/webp'))) === 3);
+    check('and each is a picture of its own video, not one picture for all',
+        count(array_unique(array_map(fn($r) => md5($r->body), $first))) === 3);
+    $blue = @imagecreatefromstring($first[$scratch.'/videos/blue.mkv']->body);
+    check('the blue one is blue', $blue !== false && (imagecolorat($blue, 100, 100) & 0xFF) > 180);
+    check('the portrait one is portrait', $size($first[$scratch.'/videos/tall.mov']) === [288, 512]);
+
+    // Deleted from the thumbnail folder by hand.
+    foreach ($paths as $p) @unlink($thumbOf($p));
+    $again = [];
+    foreach ($paths as $p) $again[$p] = $fetch($p);
+    check('deleted, each is made again when it is next shown, the same as before',
+        count(array_filter($paths, fn($p) => $again[$p]->status === 200 && $again[$p]->body === $first[$p]->body)) === 3);
+
+    foreach ($paths as $p) @unlink($thumbOf($p));
+    $scan = $client->post('/api/thumbnails/scan', ['restart' => true])->json ?? [];
+    for ($i = 0; $i < 40 && !($scan['done'] ?? false); $i++) {
+        if ($scan['busy'] ?? false) usleep(500_000);
+        $scan = $client->post('/api/thumbnails/scan')->json ?? [];
+    }
+    clearstatcache();
+    check('and deleted again, the scan makes them all', ($scan['done'] ?? false)
+        && count(array_filter($paths, fn($p) => is_file($thumbOf($p)) && md5_file($thumbOf($p)) === md5($first[$p]->body))) === 3,
+        json_encode($scan));
+});
+
+scenario('a video frame from the app before 5.2 is refused', function () use ($client, $scratch, $photo, $canThumb) {
+    if (!$canThumb) { check('GD with JPEG and WebP is available', true); return; }
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/videos']);
+    // No decoder can read this, so its frame can only be one a client sends.
+    $bytes = random_bytes(20000);
+    $init = $client->post('/api/uploads/init', ['targetPath' => $scratch.'/videos', 'name' => 'unreadable.mp4', 'size' => strlen($bytes),
+        'uploadId' => 'vid'.bin2hex(random_bytes(6)), 'conflict' => 'overwrite']);
+    $client->putChunk((string)($init->json['id'] ?? ''), 0, $bytes);
+    $client->post('/api/uploads/complete', ['id' => (string)($init->json['id'] ?? '')]);
+    $frame = base64_encode($photo(320, 180));
+    $old = $client->post('/api/thumbnail/video', ['path' => $scratch.'/videos/unreadable.mp4', 'image' => $frame], [],
+        ['User-Agent: okhttp/4.12.0']);
+    check('from OkHttp\'s bare name, which is all the old app sent', $old->status === 403, $old->describe());
+    $new = $client->post('/api/thumbnail/video', ['path' => $scratch.'/videos/unreadable.mp4', 'image' => $frame], [],
+        ['User-Agent: CloudHub-Android/5.2']);
+    check('and kept from this app', $new->ok() && ($new->json['stored'] ?? false) === true, $new->describe());
+    $served = $client->get('/api/thumbnail', ['path' => $scratch.'/videos/unreadable.mp4']);
+    check('then served', $served->status === 200, $served->describe());
 });
 
 scenario('tidying the scratch folder', function () use ($client, $scratch) {

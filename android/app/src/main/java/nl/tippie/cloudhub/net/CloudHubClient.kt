@@ -17,6 +17,12 @@ import java.util.concurrent.TimeUnit
 class CloudHubClient(
     private val cookieStore: CookieStore,
     pins: PinnedCertificates,
+    /**
+     * Sent on every request. The app used to send only OkHttp's own name, and
+     * the server refuses video frames from that one: before 5.2 the app sent
+     * one video's frame as every video's.
+     */
+    private val userAgent: String = "CloudHub-Android",
 ) {
     /** Set after signing in; sent on every mutating request. */
     @Volatile var csrfToken: String = ""
@@ -31,6 +37,7 @@ class CloudHubClient(
             override fun loadForRequest(url: HttpUrl): List<Cookie> =
                 cookieStore.load(url.host)
         })
+        .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().header("User-Agent", userAgent).build()) }
         .sslSocketFactory(PinningTrustManager.sslSocketFactory(trustManager), trustManager)
         // Uploading a large video over a slow link must not time out mid-chunk.
         .connectTimeout(20, TimeUnit.SECONDS)

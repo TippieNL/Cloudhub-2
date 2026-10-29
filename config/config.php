@@ -35,6 +35,8 @@ return [
  'upload_chunk_mb'=>(int)env('UPLOAD_CHUNK_MB',8), 'upload_retry_count'=>(int)env('UPLOAD_RETRY_COUNT',3),
  'upload_abandon_hours'=>(int)env('UPLOAD_ABANDON_HOURS',24), 'upload_conflict'=>(string)env('UPLOAD_CONFLICT','rename'),
  'upload_staging_dir'=>(string)env('UPLOAD_STAGING_DIR',''),
+ // ffmpeg for video thumbnails: a path, "off", or empty to look on the PATH.
+ 'ffmpeg_path'=>(string)env('FFMPEG_PATH',''),
  // SMS two-step verification; see .env.example and SECURITY.md. With no
  // SMS_DRIVER nobody can turn it on, and nothing about signing in changes.
  'sms_driver'=>strtolower(trim((string)env('SMS_DRIVER',''))),

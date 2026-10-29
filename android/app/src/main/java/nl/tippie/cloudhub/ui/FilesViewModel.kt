@@ -193,6 +193,7 @@ class FilesViewModel(
             }
             try {
                 val entries = api.list(path)
+                VideoThumbnails.forgetContributions()
                 _state.update { it.copy(path = path, entries = entries, load = LoadState.READY) }
             } catch (e: ApiError) {
                 // A folder can be renamed or deleted between visits. Falling

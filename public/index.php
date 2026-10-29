@@ -343,8 +343,11 @@ function release_session_lock(): void {
  * the store, one `<name>.webp` beside where each file is. See ThumbnailService.
  */
 function thumbs(): ThumbnailService {
-    static $thumbs; global $fs;
-    return $thumbs ??= new ThumbnailService($fs, dirname(__DIR__).'/storage/.thumbnails');
+    static $thumbs; global $fs, $config;
+    // With an ffmpeg -- FFMPEG_PATH, or one on the PATH -- videos get their
+    // thumbnails here like photos; without, from the first client to show them.
+    return $thumbs ??= new ThumbnailService($fs, dirname(__DIR__).'/storage/.thumbnails',
+        ThumbnailService::findFfmpeg((string)($config['ffmpeg_path'] ?? '')));
 }
 
 /**
@@ -360,7 +363,10 @@ function thumbs(): ThumbnailService {
 function flag_video_thumbnail(array $entry, string $root): array {
     if (!empty($entry['isDirectory'])) return $entry;
     if (!ThumbnailService::isVideo((string)$entry['name'])) return $entry;
-    $entry['hasThumbnail'] = thumbs()->hasFrame($root.$entry['path']);
+    $file = $root.$entry['path'];
+    // Where this server makes video frames itself, one not made yet is asked
+    // for like a photo's rather than decoded on the client.
+    $entry['hasThumbnail'] = thumbs()->hasFrame($file) || thumbs()->mayMakeFrame($file);
     return $entry;
 }
 
@@ -970,6 +976,9 @@ if ($path === '/api/files/config') Http::json([
     // that this server keeps thumbnails and can make them ahead of time.
     'thumbnailFormat' => ThumbnailService::FORMAT,
     'thumbnailScanSeconds' => ThumbnailScan::SLICE_SECONDS,
+    // Who makes a video's thumbnail: this server, with ffmpeg, or the first
+    // client to show the video.
+    'videoThumbnails' => thumbs()->makesVideoFrames() ? 'server' : 'clients',
 ]);
 if ($path === '/api/files/list' && $method === 'GET') api_try(function()use($fs) {
     release_session_lock();
@@ -2071,6 +2080,9 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             // A frame contributed before thumbnails were kept in a mirror of
             // the store is brought across the first time it is asked for.
             if ($thumbs->adoptFrame($f) && ($cache = $thumbs->current($f, true)) !== null)send_thumbnail($cache);
+            // Made here, the way a photo's is, where this server has ffmpeg --
+            // or refused with why, and the client decodes one instead.
+            if ($thumbs->makesVideoFrames() && $thumbs->canKeep($f))send_thumbnail($thumbs->ensure($f, true)['path']);
             // Nothing has contributed a frame for this video yet. That is an
             // ordinary state, not a broken request: the file listing carries a
             // hasThumbnail flag so the client knows to decode one instead of
@@ -2089,9 +2101,11 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
     /**
      * Store a video thumbnail decoded by the browser.
      *
-     * The server has no video decoder, so a frame can only come from a client.
-     * Without somewhere to keep it, every visitor re-fetched and re-decoded the
-     * video on every single page load; caching it makes that a one-off.
+     * Without ffmpeg the server has no video decoder, so a frame can only come
+     * from a client -- and with it, a client still sends one for a video
+     * ffmpeg could not read. Without somewhere to keep it, every visitor
+     * re-fetched and re-decoded the video on every single page load; caching
+     * it makes that a one-off.
      *
      * The payload is a derived image for a file the caller can already watch,
      * so any signed-in user may contribute one, but it is validated as a real
@@ -2105,6 +2119,12 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         if (!is_file($f))throw new RuntimeException('File not found', 404);
         if (!ThumbnailService::isVideo($f)) {
             throw new RuntimeException('Only video files take a browser-generated thumbnail', 400);
+        }
+        // The Android app before 5.2 sent one video's frame as the frame of
+        // every video it showed (see ThumbnailService::FRAMES_EPOCH). It named
+        // itself only by OkHttp's default; 5.2 sends its own name.
+        if (preg_match('#^okhttp/#i', (string)($_SERVER['HTTP_USER_AGENT'] ?? ''))) {
+            throw new RuntimeException('Video frames from CloudHub for Android before 5.2 are not kept: update the app', 403);
         }
         if (thumbs()->current($f, true) !== null)return ['success' => true, 'stored' => false];
 

@@ -867,6 +867,14 @@ async function captureVideoFrame(button) {
         image.src = cached;
         image.removeAttribute('hidden');
         button.querySelector('.video-thumb-status')?.remove();
+        // Decoded here before, and the server has no frame now -- its
+        // thumbnails were cleared, or the first send never arrived: send it
+        // again rather than leave the server without one until a reload.
+        if (button.dataset.hasThumb !== '1') {
+            fetch(cached).then(response => response.blob())
+                .then(blob => persistVideoThumbnail(decodeURIComponent(button.dataset.thumbPath || ''), blob))
+                .catch(() => {});
+        }
         return;
     }
 
@@ -1061,9 +1069,10 @@ function initVideoThumbnails() {
  * The thumbnail format, ThumbnailService::FORMAT on the server, in every
  * thumbnail URL: the server sends them cacheable for a year, so a URL that
  * stayed the same would keep the browser showing the old size for that year
- * after the server began making them larger.
+ * after the server began making them larger -- or the wrong frame for a video
+ * after the server had made it again.
  */
-const THUMBNAIL_FORMAT = 2;
+const THUMBNAIL_FORMAT = 3;
 
 const CARD_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif']);
 const CARD_VIDEO_EXT = new Set(['mp4', 'webm', 'ogv', 'ogg', 'mov', 'm4v', 'avi', 'mkv', 'mpeg', 'mpg', '3gp', '3g2', 'ts', 'm2ts', 'mts']);

@@ -52,6 +52,7 @@ import kotlinx.coroutines.withContext
 import nl.tippie.cloudhub.CloudHubApp
 import nl.tippie.cloudhub.net.CloudHubApi
 import nl.tippie.cloudhub.net.FileEntry
+import nl.tippie.cloudhub.net.thumbnailVersion
 
 /* -------------------------------------------------------------------------
  * Dimensions the card and its skeleton must agree on.
@@ -385,11 +386,18 @@ private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
         )
 
         FileEntry.Kind.VIDEO -> Box(modifier, contentAlignment = Alignment.Center) {
-            if (entry.hasThumbnail) {
+            // The server's frame where it has one or makes them itself, and
+            // one decoded here where it has none -- or where its own could not
+            // be had, for a video its ffmpeg could not read.
+            var decodeHere by remember(entry.path, entry.modified, entry.hasThumbnail) {
+                mutableStateOf(!entry.hasThumbnail)
+            }
+            if (!decodeHere) {
                 ThumbnailImage(
                     url = api.thumbnailUrl(entry).toString(),
                     description = entry.name,
                     modifier = Modifier.fillMaxSize(),
+                    onError = { decodeHere = true },
                 )
             } else {
                 VideoFrameThumbnail(api, entry, Modifier.fillMaxSize())
@@ -421,7 +429,7 @@ private fun Preview(api: CloudHubApi, entry: FileEntry, modifier: Modifier) {
  * disk cache opening full-size photos cannot push it out of.
  */
 @Composable
-private fun ThumbnailImage(url: String, description: String, modifier: Modifier) {
+private fun ThumbnailImage(url: String, description: String, modifier: Modifier, onError: (() -> Unit)? = null) {
     val context = LocalContext.current
     val progress = rememberShimmer()
     SubcomposeAsyncImage(
@@ -434,11 +442,14 @@ private fun ThumbnailImage(url: String, description: String, modifier: Modifier)
         when (painter.state) {
             is AsyncImagePainter.State.Loading ->
                 SkeletonBlock(progress, Modifier.fillMaxSize(), corner = 0.dp)
-            is AsyncImagePainter.State.Error -> Icon(
-                Icons.Default.InsertDriveFile, null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(28.dp),
-            )
+            is AsyncImagePainter.State.Error -> {
+                if (onError != null) LaunchedEffect(url) { onError() }
+                Icon(
+                    Icons.Default.InsertDriveFile, null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
             else -> SubcomposeAsyncImageContent()
         }
     }
@@ -464,7 +475,8 @@ private fun VideoFrameThumbnail(api: CloudHubApi, entry: FileEntry, modifier: Mo
     var wholeFile by remember(entry.path) { mutableStateOf(false) }
     val range = if (wholeFile) null else VideoThumbnails.rangeHeader(entry.size)
 
-    val request = remember(entry.path, entry.modified, range) {
+    val key = VideoThumbnails.frameKey(entry.path, thumbnailVersion(entry.modified, entry.size))
+    val request = remember(key, range) {
         ImageRequest.Builder(context)
             .data(api.streamUrl(entry.path).toString())
             .crossfade(true)
@@ -475,7 +487,7 @@ private fun VideoFrameThumbnail(api: CloudHubApi, entry: FileEntry, modifier: Mo
                     // the next reader of that entry would get a truncated
                     // video and no way to know it.
                     diskCachePolicy(CachePolicy.DISABLED)
-                    memoryCacheKey("frame:${'$'}{entry.path}|${'$'}{entry.modified}")
+                    memoryCacheKey(key)
                 }
             }
             .build()
@@ -506,8 +518,8 @@ private fun VideoFrameThumbnail(api: CloudHubApi, entry: FileEntry, modifier: Mo
 
             is AsyncImagePainter.State.Success -> {
                 SubcomposeAsyncImageContent()
-                LaunchedEffect(entry.path, entry.modified) {
-                    contributeFrame(api, entry, state)
+                LaunchedEffect(key) {
+                    contributeFrame(api, entry, key, state)
                 }
             }
 
@@ -523,8 +535,8 @@ private fun VideoFrameThumbnail(api: CloudHubApi, entry: FileEntry, modifier: Mo
  * an error, and the tile on screen is already drawn. The server keeps the
  * first one it is given, so a race between two devices costs one wasted POST.
  */
-private suspend fun contributeFrame(api: CloudHubApi, entry: FileEntry, state: AsyncImagePainter.State.Success) {
-    if (!VideoThumbnails.markContributed(entry.path)) return
+private suspend fun contributeFrame(api: CloudHubApi, entry: FileEntry, key: String, state: AsyncImagePainter.State.Success) {
+    if (!VideoThumbnails.markContributed(key)) return
     runCatching {
         val encoded = withContext(Dispatchers.IO) {
             val frame = state.result.drawable.toBitmap()

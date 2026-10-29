@@ -4,7 +4,7 @@ This project is a Node-free PHP 8.2+ migration of the supplied React/Express/Typ
 
 ## Install
 
-For Android/KSWEB video thumbnails, no FFmpeg installation is required; compatible videos are decoded by the browser.
+Video thumbnails need no FFmpeg: without it, the first browser or phone to show a video decodes a frame and sends it back. With FFmpeg installed (`apt install ffmpeg`, or `FFMPEG_PATH` in `.env`), the server makes every video's thumbnail itself, the way it does a photo's — see **Thumbnails**.
 
 1. Point the web server document root at `public/`, and route unknown paths to
    `public/index.php`. Apache needs `mod_rewrite`; for nginx, adapt
@@ -146,7 +146,8 @@ so a 285 KB PNG declaring 10000x10000 pixels took one request to 704 MB, and
 - **When first shown.** `GET /api/thumbnail` makes a missing, stale or damaged
   one, keeps it and serves it. One lock per thumbnail means a gallery, a second
   phone and the scan asking at once decode the photo once.
-- **By the scan**, for photos that were there before — see below.
+- **By the scan**, for photos that were there before — see below. Videos are
+  made the same three ways where the server has FFmpeg (see **Formats**).
 
 Renaming, moving and copying carry thumbnails along — a copy is the same
 picture, so it gets its original's thumbnail without a decode. Deleting or
@@ -211,20 +212,52 @@ portrait phone photo stands upright in the grid as it does when opened, and
 transparent PNG and GIF thumbnails stay transparent. SVG and HEIC have no
 thumbnail — GD reads neither — and show their icon.
 
-The server has no video decoder. A video's frame is decoded by the first
-browser that sees it and posted back to `POST /api/thumbnail/video`, then kept
-in the same mirror — so a video is decoded once for everyone, rather than
-re-fetched and re-decoded by every visitor on every load. Contributed frames
-are validated as real WebP/JPEG/PNG images, bounded to 256 KB and 1280px, and
-re-encoded to WebP before being stored. `GET /api/files/list` reports
-`hasThumbnail` for each video, so the browser knows whether to fetch a cached
-frame or decode one, without having to ask and treat the failure as an answer.
-Requesting a video thumbnail that has not been generated yet returns `404`.
+**Videos, with FFmpeg on the server.** A video's thumbnail is a frame a little
+way in (8% of its length — past an opening fade, inside even a short clip),
+made here and kept in the same mirror: on upload, when first shown, and by the
+scan. So clearing the thumbnail folder brings videos back exactly as it brings
+photos back. `FFMPEG_PATH` in `.env` names the binary; empty looks on the PATH
+and in `/usr/bin` and `/usr/local/bin` (php-fpm workers often have no PATH);
+`off` turns it off. `GET /api/files/config` says which applies:
+`"videoThumbnails": "server"` or `"clients"`. Every container in the video list
+works — MP4, MOV, MKV, WebM, AVI, MPEG, TS, 3GP, OGV — including HEVC phone
+videos browsers cannot decode, and a portrait phone video comes out upright.
+FFmpeg is run with an argument list, never a shell; it may open local files
+only (`-protocol_whitelist file`) and real video containers only
+(`-format_whitelist`), so a "video" that is really an HLS playlist or a concat
+list naming other files — or other servers — is refused, not followed. It is
+stopped after 20 seconds, which is not held against the video (it is tried
+again); a video it cannot read is remembered like an unreadable photo.
+
+**Videos, without FFmpeg.** A video's frame is decoded by the first browser or
+phone that shows it and posted back to `POST /api/thumbnail/video` — so a
+video is decoded once for everyone, rather than re-fetched and re-decoded by
+every visitor on every load. Contributed frames are validated as real
+WebP/JPEG/PNG images, bounded to 256 KB and 1280px, and re-encoded to WebP
+before being stored. A client still sends one for a video the server's FFmpeg
+could not read. `GET /api/files/list` reports `hasThumbnail` for each video —
+true where a frame is kept, or the server will make one — so a client knows
+whether to fetch it or decode one itself, without having to ask and treat the
+failure as an answer. Requesting a video thumbnail that has not been
+generated, and cannot be made here, returns `404`.
+
+**Frames from the Android app before 5.2 are not trusted.** That app keyed the
+frames it decoded with a string that was the same for every video: the first
+frame it decoded was drawn on every video tile after it, and sent to the
+server as each one's thumbnail — so a folder of videos could all carry the
+same picture, and deleting the thumbnails only had the app send the same
+picture again. The server now refuses frames from it (it named itself only as
+`okhttp/…`; 5.2 sends `CloudHub-Android/5.2`), and the first scan after
+updating drops every video frame stored until then (`FRAMES_EPOCH` in
+`ThumbnailService`, recorded in `storage/.thumbnails/frames-epoch`) to be made
+again — by FFmpeg, or by the next client to show the video. The thumbnail
+format went to 3 with it, so browsers and phones fetch every thumbnail once
+more instead of showing a wrong frame they had cached for a year.
 
 ### Caching
 
 Thumbnail URLs carry the photo's time and size and the thumbnail format
-(`&t=2`), so they are immutable: served
+(`&t=3`), so they are immutable: served
 `Cache-Control: private,max-age=31536000,immutable` with an `ETag` for the
 reload case. A new format — the size went from 300 to 512 px with this one — is
 a new URL, so a cache holding the old one for a year asks again. Images use
@@ -246,8 +279,11 @@ largest cost in loading a folder of images.
 ### Starting over
 
 Delete `storage/.thumbnails/files` and `storage/.cache/thumbnail-scan.json`:
-every thumbnail is made again when it is next shown, or by the next scan. Video
-frames are contributed again by the next browser or phone that plays them.
+every thumbnail is made again when it is next shown, or by the next scan —
+videos too, where the server has FFmpeg. Without it, a video's frame is sent
+again by the next browser or phone that shows it: each listing of a folder lets
+the app send its frames again, and a web page that decoded one earlier sends it
+again rather than waiting for a reload.
 
 ### Testing it
 
@@ -263,9 +299,16 @@ replaced within one second, a WebDAV client's empty file filled a moment later,
 a thumbnail cut short), keeps them in step through
 rename, move, copy and delete, runs a scan of 250 photos in many short slices,
 runs it again to make nothing, and ends by checking that no original was
-changed by any of it. The second does the same through the real routes:
-an uploaded photo's thumbnail is on disk before anyone asks for it, at 512 px
-and the photo's shape, and the photo downloads byte for byte as it was sent.
+changed by any of it. Where FFmpeg is installed it also makes videos in
+several containers and checks each gets a frame of its own (the blue test clip's
+thumbnail is blue), that frames deleted by hand are made again by the scan,
+that a playlist or file list dressed as a video is not followed, that an FFmpeg
+that hangs is stopped without blaming the video, and that the frames stored
+before `FRAMES_EPOCH` are dropped once. The second does the same through the
+real routes: an uploaded photo's thumbnail is on disk before anyone asks for
+it, at 512 px and the photo's shape, and the photo downloads byte for byte as
+it was sent; three uploaded videos get three different thumbnails, made again
+when deleted; and a frame sent as the Android app before 5.2 is refused.
 
 By hand, on a server that already holds photos: open **Settings → Photo
 thumbnails** in the app (or run `php tools/thumbnails.php`) and watch it count

@@ -62,8 +62,18 @@ object VideoThumbnails {
     }
 
     /**
-     * Frames already sent this session, so a tile scrolling back into view
-     * does not re-upload one the server has.
+     * The key a video's frame is kept under in memory, and remembered as sent
+     * by: one per file and version ([nl.tippie.cloudhub.net.thumbnailVersion]).
+     *
+     * It was once written with each dollar sign escaped, which made it the
+     * same text for every video: the first frame decoded was drawn on every
+     * video tile after it, and sent to the server as each one's thumbnail.
+     */
+    fun frameKey(path: String, version: String): String = "frame:$path|$version"
+
+    /**
+     * Frames already sent since the folder was listed, so a tile scrolling
+     * back into view does not send one again.
      *
      * Bounded, because a long browse should not accumulate paths forever; the
      * server's own "already have one" answer is the real guard, this only
@@ -72,13 +82,20 @@ object VideoThumbnails {
     private const val REMEMBERED = 256
     private val contributed = LinkedHashSet<String>()
 
+    /** True the first time [key] is sent since the last [forgetContributions]. */
     @Synchronized
-    fun markContributed(path: String): Boolean {
-        if (!contributed.add(path)) return false
+    fun markContributed(key: String): Boolean {
+        if (!contributed.add(key)) return false
         while (contributed.size > REMEMBERED) contributed.remove(contributed.first())
         return true
     }
 
+    /**
+     * Called as a folder is listed. A video that listing says the server has
+     * no frame for is one to send again -- the server's thumbnails may have
+     * been cleared since it was last sent -- where remembering it for the
+     * life of the app meant it never was.
+     */
     @Synchronized
     fun forgetContributions() = contributed.clear()
 }

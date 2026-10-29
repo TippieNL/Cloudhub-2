@@ -149,7 +149,9 @@ $checks['a file too big to fetch whole gets the icon instead'] =
 // frame, every time, forever.
 $checks['the decoded frame is handed back to the server'] =
     str_contains($cards, 'api.contributeVideoThumbnail(entry.path, encoded)')
-    && str_contains($cards, 'VideoThumbnails.markContributed(entry.path)');
+    // Remembered by the frame's own key -- path and version -- and only
+    // until the folder is listed again.
+    && str_contains($cards, 'VideoThumbnails.markContributed(key)');
 $checks['a thumbnail that could not be stored is not an error'] =
     str_contains($cards, 'runCatching {');
 $checks['the frame is scaled to something the server accepts'] =

@@ -32,7 +32,8 @@ class CloudHubApp : Application(), ImageLoaderFactory {
         super.onCreate()
         settings = Settings(this)
         pins = CertificatePins(settings)
-        client = CloudHubClient(PersistentCookieStore(settings), pins)
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "unknown"
+        client = CloudHubClient(PersistentCookieStore(settings), pins, userAgent = "CloudHub-Android/$version")
         api = CloudHubApi(settings.serverUrl.orEmpty(), client)
         api.thumbnailFormat = settings.thumbnailFormat
         api.onThumbnailFormat = { settings.thumbnailFormat = it }

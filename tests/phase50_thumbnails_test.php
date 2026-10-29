@@ -305,6 +305,9 @@ $thumbs->ensure($orphan);
 unlink($orphan);
 unset($fingerprints[$orphan]);
 
+// A store already at this generation of video frames: its first layout's
+// frames are brought across. (One from before is the next section.)
+$thumbs->markFramesEpoch();
 $scan = new ThumbnailScan($fs, $thumbs, $base.'/cache');
 $slices = 0;
 $memoryBefore = memory_get_usage();
@@ -338,6 +341,144 @@ flock($lock, LOCK_UN);
 fclose($lock);
 $checks['one scan at a time: a second caller is told it is busy'] = $busy['busy'] && $busy['done'];
 $checks['and anyone may read how far it got'] = $scan->progress()['found'] === $restarted['found'];
+
+/* --- video frames from before FRAMES_EPOCH ------------------------------------------------ */
+
+// A store from before 5.2, whose app could file one video's picture as the
+// frame of many (see ThumbnailService::FRAMES_EPOCH).
+$rmTree = function (string $dir) use (&$rmTree): void {
+    foreach (scandir($dir) ?: [] as $name) {
+        if ($name === '.' || $name === '..') continue;
+        $full = $dir.'/'.$name;
+        if (is_dir($full) && !is_link($full)) $rmTree($full); else @unlink($full);
+    }
+    @rmdir($dir);
+};
+mkdir($base.'/old/store/Videos', 0775, true);
+$oldFs = new FileService(['root_dir' => $base.'/old/store', 'max_upload_bytes' => 1 << 30]);
+$old = new ThumbnailService($oldFs, $base.'/old/thumbnails');
+$wrong = (string)file_get_contents($made['path']);
+$oldClips = [];
+foreach (['a.mp4', 'b.mov'] as $i => $name) {
+    $oldClips[$i] = $oldFs->root().'/Videos/'.$name;
+    file_put_contents($oldClips[$i], str_repeat(chr($i + 1), 4096));
+    touch($oldClips[$i], 1_700_000_000 + $i);
+    $old->storeFrame($oldClips[$i], $wrong);
+}
+mkdir($old->legacyDir(), 0775, true);
+copy($made['path'], $old->legacyPathFor($oldClips[1], 1_700_000_001));
+$checks['a store from before 5.2 is of the first generation of frames'] = $old->framesEpoch() === 1;
+$oldScan = new ThumbnailScan($oldFs, $old, $base.'/old/cache');
+$first = $oldScan->run(30.0, true);
+$checks['its first scan drops every video frame it finds'] =
+    $first['done'] && $old->current($oldClips[0]) === null && $old->current($oldClips[1]) === null;
+$checks['and the first layout\'s, rather than bring them across'] = $first['adopted'] === 0 && !is_dir($old->legacyDir());
+$checks['and records the new generation'] =
+    $old->framesEpoch() === ThumbnailService::FRAMES_EPOCH && $first['removed'] >= 3;
+$old->storeFrame($oldClips[0], $wrong);
+$later = $oldScan->run(30.0, true);
+$checks['a frame sent after that is kept by every later scan'] = $later['done'] && $old->current($oldClips[0]) !== null;
+
+/* --- video frames made here, with ffmpeg --------------------------------------------------- */
+
+$checks['ffmpeg can be turned off, and a path that is not one is not taken'] =
+    ThumbnailService::findFfmpeg('off') === null && ThumbnailService::findFfmpeg('/no/such/ffmpeg') === null;
+$ffmpeg = ThumbnailService::findFfmpeg(null);
+$checks['without one, frames are left to the clients'] =
+    !$thumbs->makesVideoFrames() && !$thumbs->mayMakeFrame($video);
+if ($ffmpeg === null) {
+    echo "  (no ffmpeg here, so the frames it makes are not tried)\n";
+} else {
+    mkdir($base.'/video/store/Clips', 0775, true);
+    $vFs = new FileService(['root_dir' => $base.'/video/store', 'max_upload_bytes' => 1 << 30]);
+    $videos = new ThumbnailService($vFs, $base.'/video/thumbnails', $ffmpeg);
+    $vTree = $videos->tree();
+    $clip = function (string $name, string $source) use ($ffmpeg, $vFs, $fingerprint): string {
+        $file = $vFs->root().'/Clips/'.$name;
+        $p = proc_open([$ffmpeg, '-nostdin', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', $source, '-pix_fmt', 'yuv420p', $file],
+            [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        proc_close($p);
+        touch($file, 1_700_000_000);
+        clearstatcache(true, $file);
+        $fingerprint($file);
+        return $file;
+    };
+    $bars = $clip('bars.mp4', 'testsrc=duration=2:size=640x360:rate=10');
+    $blue = $clip('blue.mkv', 'color=c=blue:duration=2:size=640x360:rate=10');
+    $tall = $clip('tall.mov', 'testsrc2=duration=2:size=360x640:rate=10');
+    $checks['with ffmpeg, a video not yet made is one the server will make'] =
+        $videos->makesVideoFrames() && $videos->mayMakeFrame($bars);
+
+    $frames = [];
+    foreach (['bars' => $bars, 'blue' => $blue, 'tall' => $tall] as $key => $file) {
+        $out = $videos->ensure($file);
+        $frames[$key] = ['status' => $out['status'], 'size' => $size($out['path']), 'md5' => md5_file($out['path']), 'path' => $out['path']];
+    }
+    $checks['each video gets a frame of its own, made here'] =
+        $frames['bars']['status'] === ThumbnailService::GENERATED && $frames['bars']['path'] === $vTree.'/Clips/bars.mp4.webp'
+        && count(array_unique(array_column($frames, 'md5'))) === 3;
+    $checks['as a WebP fitted into 512 px, the shape of the video'] =
+        $frames['bars']['size'] === [512, 288, 'image/webp'] && $frames['tall']['size'] === [288, 512, 'image/webp'];
+    $blueFrame = imagecreatefromwebp($frames['blue']['path']);
+    $rgb = imagecolorat($blueFrame, 256, 144);
+    $checks['and of that video: the blue one is blue'] = ($rgb & 0xFF) > 180 && ($rgb >> 16 & 0xFF) < 60;
+    $checks['carrying the video\'s modification time'] = filemtime($frames['bars']['path']) === filemtime($bars);
+    $checks['asking again makes nothing'] = $videos->ensure($bars)['status'] === ThumbnailService::VALID;
+
+    // Deleted from the thumbnail folder, the way it is cleared by hand: made
+    // again, each its own, by the scan.
+    $rmTree($vTree);
+    $videos->markFramesEpoch();
+    $vScan = new ThumbnailScan($vFs, $videos, $base.'/video/cache');
+    $remade = $vScan->run(30.0, true);
+    $checks['frames deleted by hand are made again by the scan'] =
+        $remade['done'] && $remade['generated'] === 3 && $remade['skipped'] === 0
+        && md5_file($vTree.'/Clips/bars.mp4.webp') === $frames['bars']['md5']
+        && md5_file($vTree.'/Clips/blue.mkv.webp') === $frames['blue']['md5'];
+
+    $fresh = $clip('fresh.webm', 'testsrc=duration=2:size=320x240:rate=10');
+    $videos->afterReply([$fresh]);
+    $checks['and an uploaded video gets one once the reply has gone'] =
+        $videos->makeQueued(10.0, 5) === 1 && $videos->current($fresh) !== null
+        && $size((string)$videos->current($fresh)) === [320, 240, 'image/webp'];
+
+    // What ffmpeg cannot read is remembered like an unreadable photo -- and a
+    // client that can read it still gets its frame kept.
+    $noise = $vFs->root().'/Clips/noise.mp4';
+    file_put_contents($noise, random_bytes(20000));
+    $code = 0;
+    try { $videos->ensure($noise); } catch (RuntimeException $e) { $code = $e->getCode(); }
+    $checks['a video that cannot be read is refused, and remembered'] =
+        $code === 415 && $videos->knownFailure($noise) !== null && !$videos->mayMakeFrame($noise);
+    $checks['a frame a client sends for it is kept, and the failure forgotten'] =
+        $videos->storeFrame($noise, $wrong) && $videos->current($noise, true) !== null && $videos->knownFailure($noise) === null;
+
+    // A "video" that is a playlist, or a list of other files, names whatever
+    // it likes: ffmpeg is never let follow it.
+    $secret = $vFs->root().'/Clips/secret.txt';
+    file_put_contents($secret, 'not for thumbnails');
+    $refused = true;
+    foreach (['hls.mp4' => "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfile:$secret\n#EXT-X-ENDLIST\n",
+              'list.mkv' => "ffconcat version 1.0\nfile $bars\n"] as $name => $body) {
+        $file = $vFs->root().'/Clips/'.$name;
+        file_put_contents($file, $body);
+        $code = 0;
+        try { $videos->ensure($file); } catch (RuntimeException $e) { $code = $e->getCode(); }
+        $refused = $refused && $code === 415 && $videos->current($file) === null;
+    }
+    $checks['a playlist or a file list dressed as a video is not followed'] = $refused;
+
+    // An ffmpeg that never finishes is stopped, and the video is not blamed.
+    $slowBin = $base.'/slow-ffmpeg';
+    file_put_contents($slowBin, "#!/bin/sh\nsleep 30\n");
+    chmod($slowBin, 0755);
+    $slow = new ThumbnailService($vFs, $base.'/video/slow-thumbnails', $slowBin, 1.0);
+    $began = microtime(true);
+    $code = 0;
+    try { $slow->ensure($blue); } catch (RuntimeException $e) { $code = $e->getCode(); }
+    $checks['an ffmpeg that overruns is stopped, and the video not blamed'] =
+        $code === 503 && microtime(true) - $began < 5 && $slow->knownFailure($blue) === null;
+}
 
 /* --- and the originals ------------------------------------------------------------------- */
 
@@ -392,6 +533,21 @@ $checks['the app draws thumbnails through a cache of their own'] =
 $checks['and opens the original only in the viewer'] =
     str_contains($kt('ui/PhotoPage.kt'), 'api.previewUrl(entry.path, entry.modified)')
     && !str_contains($kt('ui/FileCards.kt'), 'previewUrl(');
+$checks['videos are asked for, made and scanned here where there is ffmpeg'] =
+    str_contains($index, "\$entry['hasThumbnail'] = thumbs()->hasFrame(\$file) || thumbs()->mayMakeFrame(\$file);")
+    && str_contains($index, "if (\$thumbs->makesVideoFrames() && \$thumbs->canKeep(\$f))send_thumbnail(\$thumbs->ensure(\$f, true)['path']);")
+    && str_contains($index, "ThumbnailService::findFfmpeg((string)(\$config['ffmpeg_path'] ?? ''))")
+    && str_contains($index, "'videoThumbnails' => thumbs()->makesVideoFrames() ? 'server' : 'clients',")
+    && str_contains($read('src/Services/ThumbnailScan.php'), "if (!\$this->thumbs->makesVideoFrames() || !\$this->thumbs->canKeep(\$file)) return 'skipped';");
+$checks['the app keys each video frame by its own path, and names itself'] =
+    str_contains($kt('ui/FileCards.kt'), 'memoryCacheKey(key)')
+    && str_contains($kt('ui/FileCards.kt'), 'val key = VideoThumbnails.frameKey(entry.path, thumbnailVersion(entry.modified, entry.size))')
+    // Every dollar sign escaped made one key for every video: see FRAMES_EPOCH.
+    && !str_contains($kt('ui/FileCards.kt'), "\${'\$'}")
+    && str_contains($kt('ui/FilesViewModel.kt'), 'VideoThumbnails.forgetContributions()')
+    && str_contains($kt('App.kt'), 'userAgent = "CloudHub-Android/$version"');
+$checks['frames from the app before 5.2 are refused'] =
+    str_contains($index, "if (preg_match('#^okhttp/#i', (string)(\$_SERVER['HTTP_USER_AGENT'] ?? ''))) {");
 $checks['the app keeps the scan going for an account that may run it'] =
     str_contains($kt('MainActivity.kt'), 'if (state.canWrite) ThumbnailScanWorker.enqueue(this@MainActivity)')
     && str_contains($kt('work/Thumbnails.kt'), 'ExistingWorkPolicy.KEEP')

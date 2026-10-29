@@ -73,7 +73,7 @@ $checks['the client tries the server cache first'] = str_contains($app, 'functio
 // to answer 415, so every uncached video logged a failed request and a console
 // error on first load. The listing now says which videos have one.
 $checks['the listing reports which videos have a cached frame'] =
-    str_contains($index, "\$entry['hasThumbnail'] = thumbs()->hasFrame(\$root.\$entry['path']);");
+    str_contains($index, "\$entry['hasThumbnail'] = thumbs()->hasFrame(\$file) || thumbs()->mayMakeFrame(\$file);");
 $checks['the client only asks when a frame exists'] =
     str_contains($app, "button.dataset.hasThumb === '1'") && str_contains($app, 'data-has-thumb=');
 $checks['an uncached video reports 404, not 415'] =
