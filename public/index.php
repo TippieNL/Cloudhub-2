@@ -2080,22 +2080,32 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             // A frame contributed before thumbnails were kept in a mirror of
             // the store is brought across the first time it is asked for.
             if ($thumbs->adoptFrame($f) && ($cache = $thumbs->current($f, true)) !== null)send_thumbnail($cache);
-            // Made here, the way a photo's is, where this server has ffmpeg --
-            // or refused with why, and the client decodes one instead.
-            if ($thumbs->makesVideoFrames() && $thumbs->canKeep($f))send_thumbnail($thumbs->ensure($f, true)['path']);
-            // Nothing has contributed a frame for this video yet. That is an
-            // ordinary state, not a broken request: the file listing carries a
-            // hasThumbnail flag so the client knows to decode one instead of
-            // asking for it, and only reaches here if the cache entry vanished
-            // in between.
-            throw new RuntimeException('No thumbnail has been generated for this video yet', 404);
+            // Without ffmpeg here, nothing has contributed a frame for this
+            // video yet. That is an ordinary state, not a broken request: the
+            // file listing carries a hasThumbnail flag so the client knows to
+            // decode one instead of asking for it, and only reaches here if
+            // the cache entry vanished in between.
+            if (!$thumbs->makesVideoFrames())throw new RuntimeException('No thumbnail has been generated for this video yet', 404);
+            // With it, a video's is made below exactly as a photo's is -- or
+            // refused with why, and the client decodes one instead.
         }
 
         // Made, kept and sent -- or, for the one name the mirror cannot hold,
         // made and sent. ensure() measures the header before it decodes, and
         // answers a file it already knows is unreadable without reading it.
-        if (ThumbnailService::isImage($f) && !$thumbs->canKeep($f))send_thumbnail_bytes($thumbs->renderUncached($f));
-        send_thumbnail($thumbs->ensure($f, true)['path']);
+        if ((ThumbnailService::isImage($f) || ThumbnailService::isVideo($f)) && !$thumbs->canKeep($f))send_thumbnail_bytes($thumbs->renderUncached($f));
+        try {
+            $kept = $thumbs->ensure($f, true)['path'];
+        } catch (RuntimeException $e) {
+            // Made but not kept: a full disk, nowhere to write, or storage that
+            // will not take a file's time -- which is how a kept thumbnail is
+            // matched to its photo. The gallery is answered all the same, with
+            // one made afresh, rather than with an error; the scan says why.
+            if ($e->getCode() !== ThumbnailService::CANNOT_KEEP)throw $e;
+            error_log('['.Http::requestId().'] [thumbnails] '.$fs->relative($f).' was not kept: '.$e->getMessage());
+            send_thumbnail_bytes($thumbs->renderUncached($f));
+        }
+        send_thumbnail($kept);
     });
 
     /**

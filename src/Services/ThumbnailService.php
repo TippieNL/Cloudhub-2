@@ -107,6 +107,12 @@ final class ThumbnailService
     public const GENERATED = 'generated';
     public const ADOPTED = 'adopted';
 
+    /**
+     * The status of a thumbnail made but not kept: the server's storage, not
+     * the photo -- see put(). 507, whose message the API passes through.
+     */
+    public const CANNOT_KEEP = 507;
+
     /** The suffix of the marker that says a thumbnail could not be made. */
     private const FAILED = '.failed';
 
@@ -301,12 +307,23 @@ final class ThumbnailService
         return $thumb;
     }
 
-    /** Whether a frame is waiting for this video, here or in the first layout. */
-    public function hasFrame(string $file): bool
+    /**
+     * Whether a frame is waiting for this video, here or in the first layout.
+     *
+     * $mtime is the video's time when the caller already has it: a listing
+     * row says when the file changed, and asking the disk again cost a stat
+     * per video, which on FUSE storage is what a cached listing saves.
+     */
+    public function hasFrame(string $file, ?int $mtime = null): bool
     {
-        if ($this->current($file) !== null) return true;
-        $mtime = @filemtime($file);
-        return $mtime !== false && is_file($this->legacyPathFor($file, $mtime));
+        $mtime ??= @filemtime($file);
+        if ($mtime === false) return false;
+        $thumb = $this->pathForFile($file);
+        if ($thumb !== null) {
+            clearstatcache(true, $thumb);
+            if (is_file($thumb) && @filemtime($thumb) === $mtime) return true;
+        }
+        return is_file($this->legacyPathFor($file, $mtime));
     }
 
     /**
@@ -414,6 +431,7 @@ final class ThumbnailService
      * the failures that are the file's own (not an image, too large to decode)
      * so the next caller is answered without decoding it again. Failures that
      * are the server's (no GD, a full disk) are not recorded: they can pass.
+     * One made but not kept is CANNOT_KEEP, saying why (see put()).
      *
      * @return array{status:string,path:string}
      */
@@ -455,23 +473,24 @@ final class ThumbnailService
                 throw new RuntimeException($message, $status);
             };
             $bytes = $video ? $this->renderVideo($file, $refuse) : $this->render($file, $refuse);
-            if (!$this->put($thumb, $bytes, $mtime)) {
-                throw new RuntimeException('Failed to store image thumbnail', 500);
-            }
+            $why = $this->put($thumb, $bytes, $mtime);
+            if ($why !== null) throw new RuntimeException($why, self::CANNOT_KEEP);
             @unlink($thumb.self::FAILED);
             return ['status' => self::GENERATED, 'path' => $thumb];
         });
     }
 
     /**
-     * The thumbnail of an image as WebP bytes, made without keeping it -- for
-     * the one name that cannot be mirrored (see the class comment).
+     * The thumbnail of an image -- or of a video, where there is ffmpeg -- as
+     * WebP bytes, made without keeping it: for the one name that cannot be
+     * mirrored (see the class comment), and for storage that will not keep it.
      */
     public function renderUncached(string $file): string
     {
-        return $this->render($file, function (int $status, string $message): never {
+        $refuse = function (int $status, string $message): never {
             throw new RuntimeException($message, $status);
-        });
+        };
+        return $this->ffmpeg !== null && self::isVideo($file) ? $this->renderVideo($file, $refuse) : $this->render($file, $refuse);
     }
 
     /**
@@ -696,8 +715,9 @@ final class ThumbnailService
     }
 
     /**
-     * Keep a video's frame, decoded and sent by a client: the server has no
-     * video decoder of its own. False when this name cannot be mirrored.
+     * Keep a video's frame, decoded and sent by a client -- for a server with
+     * no ffmpeg, or a video its ffmpeg could not read. False when it cannot be
+     * kept.
      */
     public function storeFrame(string $file, string $webp): bool
     {
@@ -710,7 +730,7 @@ final class ThumbnailService
         if ($thumb === null || $mtime === false || $length === null || $length > strlen($webp)) return false;
         $webp = substr($webp, 0, $length);
         return $this->locked($thumb, function () use ($thumb, $webp, $mtime): bool {
-            if (!$this->put($thumb, $webp, $mtime)) return false;
+            if ($this->put($thumb, $webp, $mtime) !== null) return false;
             // A client read what ffmpeg here could not: no longer a failure.
             @unlink($thumb.self::FAILED);
             return true;
@@ -748,7 +768,7 @@ final class ThumbnailService
     {
         $from = $this->pathFor($fromRelative);
         $to = $this->pathFor($toRelative);
-        if ($from === null) return;
+        if ($from === null || $from === $to) return;
         $fromDir = substr($from, 0, -5);
         $toDir = $to === null ? null : substr($to, 0, -5);
 
@@ -760,8 +780,10 @@ final class ThumbnailService
         if (is_dir($fromDir)) {
             // Nothing should be at the folder's new place in the mirror -- a
             // move never lands on something that is already there -- so what
-            // is found there is left over and makes way.
-            if ($toDir !== null && file_exists($toDir)) $this->removeTree($toDir);
+            // is found there is left over and makes way. Unless it is this
+            // folder: renamed only in case on case-insensitive storage, such
+            // as a phone's, "Album" is "album", and clearing it lost them all.
+            if ($toDir !== null && file_exists($toDir) && !self::sameDir($fromDir, $toDir)) $this->removeTree($toDir);
             if ($toDir === null || !$this->prepareDir(dirname($toDir)) || !@rename($fromDir, $toDir)) {
                 $this->removeTree($fromDir);
             }
@@ -772,12 +794,16 @@ final class ThumbnailService
      * Files copied within the store: each copy gets its original's thumbnail,
      * restamped with the copy's own modification time -- the copy is new bytes
      * on disk, but the same picture.
+     *
+     * @param callable(): void|null $tick called per file, so a background copy
+     *        of a large folder keeps reporting in while this runs
      */
-    public function copied(string $fromRelative, string $toRelative): void
+    public function copied(string $fromRelative, string $toRelative, ?callable $tick = null): void
     {
         $root = $this->fs->root();
         $target = $root.($toRelative === '/' ? '' : $toRelative);
         foreach ($this->fs->copiedFiles($target) as $copy) {
+            if ($tick !== null) $tick();
             if (!self::isImage($copy) && !self::isVideo($copy)) continue;
             $suffix = substr($copy, strlen($target));
             $original = $root.($fromRelative === '/' ? '' : $fromRelative).$suffix;
@@ -787,7 +813,7 @@ final class ThumbnailService
             if ($thumb === null || $mtime === false || $dest === null) continue;
             $this->locked($dest, function () use ($thumb, $dest, $mtime): bool {
                 $bytes = @file_get_contents($thumb);
-                return is_string($bytes) && $this->put($dest, $bytes, $mtime);
+                return is_string($bytes) && $this->put($dest, $bytes, $mtime) === null;
             });
         }
     }
@@ -814,11 +840,11 @@ final class ThumbnailService
      * old bytes at that moment is finished, and then dropped, rather than
      * stored after this and taken for the new one's.
      *
-     * Under php-fpm the reply is finished first and the work bounded only
-     * loosely. Elsewhere (mod_php, `php -S`) the client is still waiting, so
-     * only a handful are made in a couple of seconds; the scan and the first
-     * look at the folder make the rest. A failure is logged and nothing else:
-     * the file is stored whatever happens to its thumbnail.
+     * Under php-fpm (and LiteSpeed) the reply is finished first and the work
+     * bounded only loosely. Elsewhere (mod_php, `php -S`) the client is still
+     * waiting, so only a handful are made in a couple of seconds; the scan and
+     * the first look at the folder make the rest. A failure is logged and
+     * nothing else: the file is stored whatever happens to its thumbnail.
      *
      * @param list<string> $files absolute paths in the store
      */
@@ -845,6 +871,9 @@ final class ThumbnailService
             if (function_exists('fastcgi_finish_request')) {
                 ignore_user_abort(true);
                 $detached = @fastcgi_finish_request();
+            } elseif (function_exists('litespeed_finish_request')) {
+                ignore_user_abort(true);
+                $detached = @litespeed_finish_request();
             }
             $this->makeQueued($detached ? 30.0 : 2.0, $detached ? 500 : 5);
         });
@@ -887,18 +916,28 @@ final class ThumbnailService
      * Write through a temporary file stamped with the original's time, then
      * rename: a reader sees the old thumbnail or the new one, never half of
      * one, and never a new one with the old time.
+     *
+     * Returns null once it is in place, or why it could not be kept -- in
+     * words for whoever reads the scan's report, since each is the server's
+     * storage rather than the photo: nowhere to write, no room, or storage
+     * that will not set a file's time, which is how a thumbnail is matched to
+     * its photo (see current()).
      */
-    private function put(string $thumb, string $bytes, int $mtime): bool
+    private function put(string $thumb, string $bytes, int $mtime): ?string
     {
-        if (!$this->prepareDir(dirname($thumb))) return false;
-        if (is_dir($thumb)) return false;
+        $unwritable = 'Thumbnails cannot be written where this server keeps them';
+        if (!$this->prepareDir(dirname($thumb))) return $unwritable;
+        if (is_dir($thumb)) return 'A folder stands where this photo\'s thumbnail belongs';
         $tmp = self::temporary($thumb);
-        if (@file_put_contents($tmp, $bytes) !== strlen($bytes) || !@touch($tmp, $mtime) || !@rename($tmp, $thumb)) {
-            @unlink($tmp);
-            return false;
-        }
+        $written = @file_put_contents($tmp, $bytes);
+        if ($written === false) $why = $unwritable;
+        elseif ($written !== strlen($bytes)) $why = 'There is no room left to keep thumbnails';
+        elseif (!@touch($tmp, $mtime)) $why = 'This server\'s storage cannot set a file\'s modification time, which a kept thumbnail needs';
+        elseif (!@rename($tmp, $thumb)) $why = $unwritable;
+        else $why = null;
+        if ($why !== null) @unlink($tmp);
         clearstatcache(true, $thumb);
-        return true;
+        return $why;
     }
 
     /** A name beside $path to write it under first. See TEMP_SUFFIX_LENGTH. */
@@ -929,6 +968,14 @@ final class ThumbnailService
         return @mkdir($dir, 0775, true) || is_dir($dir);
     }
 
+    /** Whether two spellings reach one directory -- the same device and inode. */
+    private static function sameDir(string $a, string $b): bool
+    {
+        $x = @stat($a);
+        $y = @stat($b);
+        return $x !== false && $y !== false && (int)$x['ino'] !== 0 && $x['dev'] === $y['dev'] && $x['ino'] === $y['ino'];
+    }
+
     /** Delete a folder of the mirror, never anything outside it. */
     private function removeTree(string $dir): void
     {
@@ -945,6 +992,13 @@ final class ThumbnailService
      * Run $work holding the lock for one thumbnail. Locks are a fixed set of
      * files picked by hash, rather than one per thumbnail, so there is nothing
      * to clean up and no lock file can be deleted while someone waits on it.
+     *
+     * Best effort, as UploadService's: where the filesystem has no advisory
+     * locks -- Android's shared storage -- flock() fails at once and the work
+     * runs unlocked. Each thumbnail is still written whole and renamed into
+     * place; what is lost there is a second decode when two ask at once, and
+     * the one race afterReply() closes with it -- a photo replaced within the
+     * second its old thumbnail was being made can keep that one.
      */
     private function locked(string $thumb, callable $work): mixed
     {
@@ -953,10 +1007,10 @@ final class ThumbnailService
         $h = @fopen($dir.'/'.(crc32($thumb) % self::LOCK_SLOTS).'.lock', 'c');
         if ($h === false) return $work();
         try {
-            flock($h, LOCK_EX);
+            @flock($h, LOCK_EX);
             return $work();
         } finally {
-            flock($h, LOCK_UN);
+            @flock($h, LOCK_UN);
             fclose($h);
         }
     }

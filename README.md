@@ -134,6 +134,11 @@ GD holds a decoded image at up to four bytes a pixel whatever the file's size,
 so a 285 KB PNG declaring 10000x10000 pixels took one request to 704 MB, and
 `memory_limit` does not see the system libgd's allocations.)
 
+Where a thumbnail is made but cannot be kept — no room, nowhere to write, or
+storage that will not set a file's time, which some Android storage refuses —
+the gallery is still answered with one made afresh rather than with an error,
+and the scan stops with the reason (see below).
+
 ### When they are made
 
 - **On upload.** Every way a file arrives — chunked upload, multipart, WebDAV
@@ -151,7 +156,10 @@ so a 285 KB PNG declaring 10000x10000 pixels took one request to 704 MB, and
 
 Renaming, moving and copying carry thumbnails along — a copy is the same
 picture, so it gets its original's thumbnail without a decode. Deleting or
-trashing a photo removes its thumbnail; restoring it makes a new one.
+trashing a photo removes its thumbnail; restoring it makes a new one. A folder
+renamed only in case on case-insensitive storage — a phone's shared storage —
+keeps its thumbnails: "Album" is "album" there, and they used to be cleared as
+though something else stood where they go.
 
 ### Photos already in the store: the scan
 
@@ -169,8 +177,17 @@ It runs in slices of about eight seconds, its place kept in
 `storage/.cache/thumbnail-scan.json`, so it needs no long-running process and
 no request runs long. Memory does not grow with the collection: the work list
 is read from disk, not held. One slice runs at a time; another caller is told
-the scan is busy. A finished scan stands for a day, and asking again within it
-costs nothing. Begun again, a scan makes nothing that is already current, so it
+the scan is busy. The slice holds the scan with an advisory lock where the
+filesystem has one; on Android's shared storage, which has none (`flock()`
+fails at once, every time), it holds it with a claim file instead, which lapses
+two minutes after its slice should have ended if that slice dies. Taking the
+missing lock for someone else's used to make every slice answer busy there, so
+the scan never ran and the app's **Check now** came to nothing. A photo whose
+thumbnail cannot be kept at all — no room, nowhere to write, or storage that
+will not set a file's time — stops the slice with the reason (`507`), which the
+app shows as "Stopped: … · tries again later"; it used to count every photo as
+unreadable, which blamed the photos for the server's storage. A finished scan
+stands for a day, and asking again within it costs nothing. Begun again, a scan makes nothing that is already current, so it
 is safe to run as often as you like.
 
 Three ways to run it:
