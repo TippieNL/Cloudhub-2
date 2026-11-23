@@ -1721,6 +1721,24 @@ scenario('a storage server\'s credentials stay with the administrator', function
     }
 });
 
+scenario('an administrator is told why texts are off, and nobody else is', function () use ($client, $base) {
+    // A refused gateway was named only in PHP's error log; the Security panel
+    // said "no text-message service is set up" to an administrator who had set
+    // one up. This server's .env decides whether texts work at all.
+    $admin = $client->get('/api/users/me/two-factor');
+    check('the overview answers', $admin->ok(), $admin->describe());
+    if (($admin->json['smsAvailable'] ?? true) === true) {
+        check('a working gateway needs no explanation', !array_key_exists('smsProblem', $admin->json ?? []), $admin->body);
+        return;
+    }
+    $problem = (string)($admin->json['smsProblem'] ?? '');
+    check('an administrator is told which setting is at fault', str_contains($problem, 'SMS_'), $admin->body);
+    $viewer = new Client($base);
+    $viewer->signIn(getenv('CLOUDHUB_VIEWER_USER') ?: 'viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+    $theirs = $viewer->get('/api/users/me/two-factor');
+    check('anyone else is not', $theirs->ok() && !array_key_exists('smsProblem', $theirs->json ?? []), $theirs->body);
+});
+
 scenario('tidying the scratch folder', function () use ($client, $scratch) {
     $client->delete('/api/files/delete', ['path' => $scratch]);
     $trash = $client->get('/api/trash');

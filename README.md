@@ -397,7 +397,10 @@ app — are signed out within a minute; the session that turned it on carries on
    with an optional `Authorization: Bearer <SMS_WEBHOOK_TOKEN>`, and answers
    2xx when it accepted the message (400/422: the number was refused; anything
    else: unavailable). That fronts a provider there is no driver for. Plain
-   `http://` is accepted only for this machine or a private network address.
+   `http://` is accepted only for this machine, a private network address, or
+   your Tailscale network — a `100.64.0.0/10` address or a full `*.ts.net`
+   MagicDNS name (a bare short name like `http://pixel:8082/` is not enough);
+   `.local` and `.home.arpa` names count as local too.
 
    **An Android phone with a SIM** sends the texts for free with an SMS
    gateway app — on the phone CloudHub runs on, if it has a SIM, or any phone
@@ -410,7 +413,9 @@ app — are signed out within a minute; the session that turned it on carries on
    | SMS Gateway for Android ([sms-gate.app](https://sms-gate.app)) | start the Local Server; note the address (port 8080) and the username and password | `SMS_DRIVER=webhook`<br>`SMS_WEBHOOK_FORMAT=smsgate`<br>`SMS_WEBHOOK_URL=http://<phone-ip>:8080/message`<br>`SMS_WEBHOOK_TOKEN=<username>:<password>` |
 
    Use `127.0.0.1` as `<phone-ip>` when the app runs on the same phone as
-   CloudHub; otherwise give that phone a fixed address on the network. Let the
+   CloudHub; otherwise give that phone a fixed address on the network. If the
+   phones are on Tailscale, the gateway phone's Tailscale address is the easy
+   fixed address: it stays the same on any Wi-Fi or mobile data. Let the
    app run in the background (exempt it from battery optimisation), and mind
    that the texts are paid for by that SIM's plan. Both formats are built to
    the apps' published APIs and tested against stand-ins as strict as the
@@ -424,7 +429,9 @@ app — are signed out within a minute; the session that turned it on carries on
    production, a plain-HTTP webhook to the internet, a gateway app's format
    without its key — is logged once to PHP's error log, as `[sms] …` naming
    the setting at fault, and treated as no gateway: the app and the web page
-   then say *"no text-message service is set up on this server"*. That never opens a way round
+   then say *"no text-message service is set up on this server"*, and an
+   administrator's **Security** panel in the web app names the setting at
+   fault too (never its value). That never opens a way round
    the code: accounts that have it on can then only finish signing in with a
    recovery code. The same holds when the gateway is down or slow; the person
    is told the text could not be sent and can try again or use a recovery code.

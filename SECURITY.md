@@ -165,6 +165,12 @@ and is covered by `tests/http/run.php` and `tests/phase50_audit_regressions_test
   from an old share) made the folder's listing and any search reaching it
   answer 500 for everyone. Such names can no longer be created, and existing
   ones are listed with U+FFFD and remain reachable over WebDAV.
+- **A gateway phone reached over Tailscale turned texts off.** Its `100.x`
+  address and `*.ts.net` name were not counted as local for a plain-HTTP
+  webhook, so the gateway was refused, logged once, and every account with
+  two-step verification could sign in only with a recovery code. They are
+  accepted now, and an administrator's Security panel names the refused
+  setting instead of saying no service is set up.
 - Smaller: a WebDAV PUT whose body ends before its `Content-Length` is refused
   rather than replacing the file with a fragment; `tools/create-admin.php`
   trims passwords as the API does (an account made with surrounding spaces could
@@ -298,9 +304,12 @@ method), `auth.two_factor` failures, `two_factor.sms`, `two_factor.enable`,
 Credentials live in `.env` only and never reach a browser. Requests verify TLS,
 never follow redirects (which would carry the credentials and the code
 elsewhere) and give up after `SMS_TIMEOUT_SECONDS`. A webhook over plain HTTP
-is refused unless it is on this machine or a private network — which is where
-an SMS gateway app on an Android phone sits (`SMS_WEBHOOK_FORMAT=traccar` or
-`smsgate`). Such a phone sees every code it sends, as any SMS provider does;
+is refused unless it is on this machine, a private network, or a Tailscale
+network (`100.64.0.0/10`, `*.ts.net`; WireGuard-encrypted between devices) —
+which is where an SMS gateway app on an Android phone sits
+(`SMS_WEBHOOK_FORMAT=traccar` or `smsgate`). `100.64.0.0/10` is also the
+carrier-grade NAT range inside some ISPs; it is accepted because a gateway is
+only ever there when the operator wrote that address into `.env`. Such a phone sees every code it sends, as any SMS provider does;
 keep it on a network you control, and its API key or password in `.env`
 only. The development
 outbox (`SMS_DRIVER=log`) writes working codes to `logs/sms-outbox.log` and is

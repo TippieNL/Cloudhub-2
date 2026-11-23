@@ -273,6 +273,17 @@ $checks['but allowed to this machine or the LAN, and over https anywhere'] =
     Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'http://127.0.0.1:8080/m'], $scratch) instanceof WebhookSms
     && Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'http://192.168.1.20:8080/m'], $scratch) instanceof WebhookSms
     && Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'https://sms.example.com/x'], $scratch) instanceof WebhookSms;
+// A gateway phone given its Tailscale address -- stable when DHCP is not --
+// was refused, which turned texts off for everyone with no word but a log line.
+$hook = static fn(string $url) => Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => $url], $scratch);
+$checks['and to the same Tailscale network, by address or MagicDNS name'] =
+    $hook('http://100.90.78.46:8082/') instanceof WebhookSms && $hook('http://100.64.0.1:8082/') instanceof WebhookSms
+    && $hook('http://100.127.255.254:8082/') instanceof WebhookSms && $hook('http://[fd7a:115c:a1e0::1]:8082/') instanceof WebhookSms
+    && $hook('http://pixel.tail1234.ts.net:8082/') instanceof WebhookSms && $hook('http://phone.local:8082/') instanceof WebhookSms;
+$checks['but not just outside that range, nor to names that only look alike'] =
+    $hook('http://100.63.255.255:8082/') === null && $hook('http://100.128.0.1:8082/') === null
+    && $hook('http://evil-ts.net/') === null && $hook('http://ts.net.attacker.example/') === null
+    && $hook('http://[2001:db8::1]/') === null;
 $checks['an unknown driver is no gateway'] = Sms::fromConfig(['sms_driver' => 'pigeon'], $scratch) === null;
 
 // --- the repository's compare-and-set ------------------------------------------------

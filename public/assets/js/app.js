@@ -2753,10 +2753,16 @@ function renderSecurity() {
     } else if (!o.schemaReady) {
         summary = 'Not available yet: the server’s database needs updating (php database/migrate.php).';
     } else if (!o.smsAvailable) {
-        summary = 'Not available: no text-message service is set up on this server. An administrator can configure one.';
+        // An administrator is told why below, so this does not claim that
+        // nothing is set up when a gateway is set up and refused.
+        summary = o.smsProblem
+            ? 'Not available: this server cannot send text messages.'
+            : 'Not available: no text-message service is set up on this server. An administrator can configure one.';
     } else {
         summary = 'Off. Turn it on to be asked, after your password, for a code texted to your phone.';
     }
+    // Administrators are told which .env setting is at fault (never its value).
+    if (!o.smsAvailable && o.smsProblem) summary += ` Server setting: ${o.smsProblem}.`;
     $('#tf-summary').textContent = summary;
     $('#tf-enable').hidden = !!o.enabled || !o.available;
     $('#tf-change').hidden = !o.enabled;

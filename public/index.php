@@ -2346,9 +2346,20 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
      * recovery code), with resend and cancel in between. The guard above has
      * verified CSRF for the POSTs; see TwoFactor for what each change asks.
      */
-    if ($path === '/api/users/me/two-factor' && $method === 'GET') two_factor_try(function() {
+    if ($path === '/api/users/me/two-factor' && $method === 'GET') two_factor_try(function() use ($config) {
         Authorization::requireRead();
-        return two_factor()->overview((int)Auth::user()['id']);
+        $overview = two_factor()->overview((int)Auth::user()['id']);
+        /*
+         * Why texts are off, for whoever can fix it. A gateway that is set up
+         * but refused was named only in PHP's error log -- hard to find on a
+         * phone running the server -- while this panel said "no text-message
+         * service is set up", which an administrator who had set one up could
+         * not act on. Setting names only, never their values (Sms::problem()).
+         */
+        if (Authorization::isAdmin() && !$overview['smsAvailable']) {
+            $overview['smsProblem'] = Sms::problem($config) ?? 'SMS_DRIVER is not set in .env; text messages are off';
+        }
+        return $overview;
     });
     if (str_starts_with($path, '/api/users/me/two-factor/') && $method === 'POST') two_factor_try(function() use ($path) {
         Authorization::requireRead();

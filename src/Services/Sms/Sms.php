@@ -72,7 +72,7 @@ final class Sms
                 return 'SMS_WEBHOOK_URL must be an http(s) URL; text messages are off';
             }
             if ($scheme === 'http' && !self::isLocalHost((string)$parts['host'])) {
-                return 'SMS_WEBHOOK_URL may use plain http:// only for a gateway on this machine or the local network; text messages are off';
+                return 'SMS_WEBHOOK_URL may use plain http:// only for a gateway on this machine, the local network or your Tailscale network; text messages are off';
             }
             $format = self::webhookFormat($config);
             $token = (string)($config['sms_webhook_token'] ?? '');
@@ -97,16 +97,42 @@ final class Sms
     }
 
     /**
-     * Loopback or a private address, where a code crossing the network in
-     * clear stays on hardware the operator controls -- an SMS gateway app on
-     * the phone CloudHub runs on, or one beside it on the LAN.
+     * Names that, by standard, never resolve on the public internet: loopback
+     * (RFC 6761), mDNS (RFC 6762), home networks (RFC 8375), ICANN's
+     * private-use TLD, and Tailscale's MagicDNS names.
+     */
+    private const LOCAL_NAME_SUFFIXES = ['localhost', 'local', 'home.arpa', 'internal', 'ts.net'];
+
+    /**
+     * Loopback, a private address or a private overlay network, where a code
+     * crossing the network in clear stays on hardware the operator controls --
+     * an SMS gateway app on the phone CloudHub runs on, one beside it on the
+     * LAN, or one on the same Tailscale network.
+     *
+     * Tailscale numbers devices from 100.64.0.0/10 (RFC 6598 shared address
+     * space) and names them under ts.net, and carries their traffic over
+     * WireGuard, encrypted end to end. Neither was counted as local, so a
+     * gateway phone given its Tailscale address -- the stable "fixed address"
+     * the README asks for, and the obvious one for a server reached over
+     * Tailscale -- was refused, texts silently went off, and every account with
+     * two-step verification could sign in only with a recovery code. The same
+     * range is also used for carrier-grade NAT inside an ISP; a gateway is only
+     * ever there because the operator typed that address into .env.
      */
     private static function isLocalHost(string $host): bool
     {
-        $host = strtolower(trim($host, '[]'));
+        $host = rtrim(strtolower(trim($host, '[]')), '.');
         if ($host === 'localhost') return true;
+        foreach (self::LOCAL_NAME_SUFFIXES as $suffix) {
+            if (str_ends_with($host, '.'.$suffix)) return true;
+        }
         if (filter_var($host, FILTER_VALIDATE_IP) === false) return false;
         if (str_starts_with($host, '127.') || $host === '::1') return true;
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
+            // 100.64.0.0/10: first octet 100, top two bits of the second 01.
+            $octets = array_map('intval', explode('.', $host));
+            if ($octets[0] === 100 && ($octets[1] & 0xC0) === 0x40) return true;
+        }
         return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) === false;
     }
 }
