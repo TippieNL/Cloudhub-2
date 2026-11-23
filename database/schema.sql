@@ -10,10 +10,12 @@ CREATE TABLE IF NOT EXISTS users (
  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
  last_login_at TIMESTAMP NULL DEFAULT NULL,
- -- SMS two-step verification. NULL two_factor_enabled_at means off, which
- -- every account is until its owner turns it on. The number is E.164.
+ -- Two-step verification. NULL two_factor_enabled_at means off, which
+ -- every account is until its owner turns it on. Codes go to the number
+ -- (E.164) or to the email address, whichever its owner proved; never both.
  two_factor_phone VARCHAR(20) NULL,
- two_factor_enabled_at DATETIME NULL
+ two_factor_enabled_at DATETIME NULL,
+ two_factor_email VARCHAR(254) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 

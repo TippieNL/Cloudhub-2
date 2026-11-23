@@ -47,6 +47,17 @@ return [
  'sms_webhook_url'=>trim((string)env('SMS_WEBHOOK_URL','')),
  'sms_webhook_token'=>trim((string)env('SMS_WEBHOOK_TOKEN','')),
  'sms_webhook_format'=>strtolower(trim((string)env('SMS_WEBHOOK_FORMAT','cloudhub'))),
+ // Email for two-step verification codes, instead of or beside SMS; see
+ // .env.example. With no MAIL_DRIVER nobody can choose email.
+ 'mail_driver'=>strtolower(trim((string)env('MAIL_DRIVER',''))),
+ 'mail_host'=>trim((string)env('MAIL_HOST','')),
+ 'mail_port'=>(int)env('MAIL_PORT',0),
+ 'mail_encryption'=>strtolower(trim((string)env('MAIL_ENCRYPTION',''))),
+ 'mail_username'=>trim((string)env('MAIL_USERNAME','')),
+ 'mail_password'=>(string)env('MAIL_PASSWORD',''),
+ 'mail_from'=>trim((string)env('MAIL_FROM','')),
+ 'mail_from_name'=>trim((string)env('MAIL_FROM_NAME','')),
+ 'mail_timeout_seconds'=>(int)env('MAIL_TIMEOUT_SECONDS',10),
  'two_factor_secret'=>(string)env('TWO_FACTOR_SECRET',''),
  'two_factor_code_ttl_seconds'=>(int)env('TWO_FACTOR_CODE_TTL_SECONDS',300),
  'two_factor_max_attempts'=>(int)env('TWO_FACTOR_MAX_ATTEMPTS',5),

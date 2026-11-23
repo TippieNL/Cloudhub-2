@@ -727,7 +727,7 @@ private fun CodeForm(
         }
         if (step.smsAvailable) {
             CodeLink(
-                text = if (step.recovery) "Use a texted code instead" else "Use a recovery code instead",
+                text = if (step.recovery) "Use ${step.codeKind} instead" else "Use a recovery code instead",
                 enabled = !step.verifying,
                 onClick = onSwitch,
             )

@@ -18,6 +18,7 @@ use CloudHub\Services\AuditLog;
 use CloudHub\Services\TwoFactor;
 use CloudHub\Services\TwoFactorError;
 use CloudHub\Services\Sms\Sms;
+use CloudHub\Services\Mail\Mail;
 use CloudHub\Repositories\TwoFactorRepository;
 
 $fs = new FileService($config); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
@@ -600,13 +601,14 @@ function db(): PDO {
     return \CloudHub\Helpers\Db::connection();
 }
 /**
-* SMS two-step verification, built on first use: only its own routes and a
-* sign-in that needs it pay for the SMS gateway's configuration.
+* Two-step verification, built on first use: only its own routes and a
+* sign-in that needs it pay for the SMS gateway's and mail server's
+* configuration.
 */
 function two_factor(): TwoFactor {
     static $service = null; global $config;
     return $service ??= new TwoFactor(db(), new TwoFactorRepository(db()), new LoginRateLimiter(db(), $config),
-        Sms::fromConfig($config, dirname(__DIR__)), $config);
+        Sms::fromConfig($config, dirname(__DIR__)), $config, null, Mail::fromConfig($config, dirname(__DIR__)));
 }
 /**
 * api_try() for the two-step routes. Their refusals carry a stable code of
@@ -892,7 +894,7 @@ if ($path === '/api/auth/login' && $method === 'POST') api_try(function()use($co
             AuditLog::write(db(), 'auth.login', 'second_factor', [], ['id' => (int)$pending['user'], 'username' => (string)$pending['username']]);
             Http::json(['success' => false,
                 'error' => ['code' => 'TWO_FACTOR_REQUIRED',
-                    'message' => 'This account uses two-step verification. Enter the code sent to your phone; if this app cannot ask for it, sign in from the web app.'],
+                    'message' => 'This account uses two-step verification. Enter the code we sent you; if this app cannot ask for it, sign in from the web app.'],
                 'requestId' => Http::requestId(),
                 'twoFactor' => $twoFactor,
                 'csrfToken' => $_SESSION['csrf']], 401);
@@ -2350,14 +2352,22 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         Authorization::requireRead();
         $overview = two_factor()->overview((int)Auth::user()['id']);
         /*
-         * Why texts are off, for whoever can fix it. A gateway that is set up
-         * but refused was named only in PHP's error log -- hard to find on a
-         * phone running the server -- while this panel said "no text-message
-         * service is set up", which an administrator who had set one up could
-         * not act on. Setting names only, never their values (Sms::problem()).
+         * Why codes cannot be sent, for whoever can fix it. A gateway or mail
+         * server that is set up but refused was named only in PHP's error log
+         * -- hard to find on a phone running the server -- while this panel
+         * said nothing was set up, which an administrator who had set one up
+         * could not act on. Setting names only, never their values.
          */
-        if (Authorization::isAdmin() && !$overview['smsAvailable']) {
-            $overview['smsProblem'] = Sms::problem($config) ?? 'SMS_DRIVER is not set in .env; text messages are off';
+        if (Authorization::isAdmin()) {
+            $smsProblem = Sms::problem($config);
+            $mailProblem = Mail::problem($config);
+            if ($smsProblem !== null) $overview['smsProblem'] = $smsProblem;
+            if ($mailProblem !== null) $overview['mailProblem'] = $mailProblem;
+            if (!$overview['smsAvailable'] && !$overview['emailAvailable'] && $smsProblem === null && $mailProblem === null) {
+                $overview['smsProblem'] = ($config['mail_driver'] ?? '') !== '' && $overview['schemaReady']
+                    ? 'users.two_factor_email is missing: run php database/migrate.php; emails are off'
+                    : 'Neither SMS_DRIVER nor MAIL_DRIVER is set in .env, so no codes can be sent';
+            }
         }
         return $overview;
     });
@@ -2370,8 +2380,10 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             $action = Http::string($b, 'action', 1, 20);
             $password = Http::string($b, 'currentPassword', 1, 4096);
             $phone = array_key_exists('phone', $b) ? Http::string($b, 'phone', 1, 40) : null;
+            $email = array_key_exists('email', $b) ? Http::string($b, 'email', 1, 254) : null;
             $how = array_key_exists('method', $b) ? Http::string($b, 'method', 1, 20) : 'sms';
-            return two_factor()->startAction($id, (string)$user['username'], $action, $password, $phone, $how);
+            // The new number for 'phone', the new address for 'email'.
+            return two_factor()->startAction($id, (string)$user['username'], $action, $password, $action === 'email' ? $email : $phone, $how);
         }
         if ($path === '/api/users/me/two-factor/resend') return two_factor()->resendAction($id);
         if ($path === '/api/users/me/two-factor/cancel') { two_factor()->cancelAction($id); return ['success' => true]; }
@@ -2408,7 +2420,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         $b = Http::body(16384);
         $password = Http::string($b, 'currentPassword', 1, 4096);
         $reset = two_factor()->adminReset((int)$self['id'], (string)$self['username'], $password, $id);
-        AuditLog::write(db(), 'two_factor.admin_reset', 'success', ['target' => $target['username'], 'phoneEnding' => $reset['phoneEnding']]);
+        AuditLog::write(db(), 'two_factor.admin_reset', 'success', ['target' => $target['username'], 'channel' => $reset['channel'], 'phoneEnding' => $reset['phoneEnding']]);
         return ['success' => true, 'message' => 'Two-step verification is off for '.$target['username']];
     });
 

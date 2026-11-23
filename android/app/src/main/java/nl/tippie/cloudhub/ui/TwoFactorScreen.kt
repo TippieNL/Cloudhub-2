@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Sms
@@ -112,8 +113,8 @@ fun TwoFactorScreen(
             }
 
             Text(
-                "Codes come by text message. That protects your account from a stolen password, but not from " +
-                    "someone who takes over your phone number, so keep your recovery codes somewhere safe.",
+                "Codes come by text message or email. That protects your account from a stolen password, but not from " +
+                    "someone who takes over your phone number or your mailbox, so keep your recovery codes somewhere safe.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 28.dp, vertical = 16.dp),
@@ -144,7 +145,7 @@ private fun StatusCard(ui: TwoFactorUi) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Code by text message", style = MaterialTheme.typography.bodyLarge)
+                Text(if (o?.channel == "email") "Code by email" else "Code by text message", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(2.dp))
                 Text(
                     when {
@@ -197,27 +198,54 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
     if (!o.enabled && !o.available) return
     if (!o.enabled) {
         SettingsGroup("Change") {
-            SettingsRow(
-                icon = Icons.Default.Sms,
-                title = "Turn on",
-                supporting = "We text a code to your phone to check the number",
-                enabled = !busy,
-                onClick = { onBegin(TwoFactorAction.TURN_ON) },
-                trailing = { Chevron() },
-            )
+            if (o.emailAvailable) {
+                SettingsRow(
+                    icon = Icons.Default.Email,
+                    title = if (o.smsAvailable) "Turn on with email" else "Turn on",
+                    supporting = "We email a code to your address to check it",
+                    enabled = !busy,
+                    onClick = { onBegin(TwoFactorAction.TURN_ON_EMAIL) },
+                    trailing = { Chevron() },
+                )
+                if (o.smsAvailable) SettingsDivider()
+            }
+            if (o.smsAvailable) {
+                SettingsRow(
+                    icon = Icons.Default.Sms,
+                    title = if (o.emailAvailable) "Turn on with text messages" else "Turn on",
+                    supporting = "We text a code to your phone to check the number",
+                    enabled = !busy,
+                    onClick = { onBegin(TwoFactorAction.TURN_ON) },
+                    trailing = { Chevron() },
+                )
+            }
         }
         return
     }
+    val byEmail = o.channel == "email"
     SettingsGroup("Change") {
-        SettingsRow(
-            icon = Icons.Default.PhoneAndroid,
-            title = "Change number",
-            supporting = if (o.smsAvailable) "Codes go to a different phone" else "Needs text messages, which this server cannot send now",
-            enabled = !busy && o.smsAvailable,
-            onClick = { onBegin(TwoFactorAction.CHANGE_PHONE) },
-            trailing = { Chevron() },
-        )
-        SettingsDivider()
+        if (o.smsAvailable || !byEmail) {
+            SettingsRow(
+                icon = Icons.Default.PhoneAndroid,
+                title = if (byEmail) "Use text messages instead" else "Change number",
+                supporting = if (o.smsAvailable) "Codes go to a different phone" else "Needs text messages, which this server cannot send now",
+                enabled = !busy && o.smsAvailable,
+                onClick = { onBegin(TwoFactorAction.CHANGE_PHONE) },
+                trailing = { Chevron() },
+            )
+            SettingsDivider()
+        }
+        if (o.emailAvailable) {
+            SettingsRow(
+                icon = Icons.Default.Email,
+                title = if (byEmail) "Change email address" else "Use email instead",
+                supporting = "Codes go to an email address",
+                enabled = !busy,
+                onClick = { onBegin(TwoFactorAction.CHANGE_EMAIL) },
+                trailing = { Chevron() },
+            )
+            SettingsDivider()
+        }
         SettingsRow(
             icon = Icons.Default.Key,
             title = "New recovery codes",
@@ -243,7 +271,8 @@ private fun Actions(o: TwoFactorOverview, busy: Boolean, onBegin: (TwoFactorActi
 private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFactorModel) {
     var phone by remember(step) { mutableStateOf("") }
     var password by remember(step) { mutableStateOf("") }
-    val wantsPhone = step.action.wire == "phone"
+    val wantsEmail = step.action.wire == "email"
+    val wantsPhone = step.action.wire == "phone" || wantsEmail
     val first = remember { FocusRequester() }
     LaunchedEffect(step) { runCatching { first.requestFocus() } }
 
@@ -253,12 +282,13 @@ private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFact
         if (wantsPhone) {
             OutlinedTextField(
                 value = phone,
-                onValueChange = { phone = it.take(40) },
-                label = { Text("Mobile number, with country code") },
-                placeholder = { Text("+31 6 12345678") },
+                onValueChange = { phone = it.take(if (wantsEmail) 254 else 40) },
+                label = { Text(if (wantsEmail) "Email address" else "Mobile number, with country code") },
+                placeholder = { Text(if (wantsEmail) "name@example.com" else "+31 6 12345678") },
                 singleLine = true,
                 enabled = !ui.busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Next),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = if (wantsEmail) KeyboardType.Email else KeyboardType.Phone, imeAction = ImeAction.Next),
                 modifier = Modifier.fillMaxWidth().focusRequester(first),
             )
             Spacer(Modifier.height(10.dp))
@@ -296,7 +326,7 @@ private fun StartForm(step: TwoFactorStep.Start, ui: TwoFactorUi, model: TwoFact
                 onClick = { model.submitStart(password, phone, useRecoveryCode = true) },
                 enabled = !ui.busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-            ) { Text("No access to your phone? Use a recovery code") }
+            ) { Text("No access to your phone or email? Use a recovery code") }
         }
     }
 }
@@ -372,7 +402,7 @@ private fun CodeStepForm(step: TwoFactorStep.Code, busy: Boolean, model: TwoFact
                 onClick = model::switchMethod,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-            ) { Text(if (step.recovery) "Use a texted code instead" else "Use a recovery code instead") }
+            ) { Text(if (step.recovery) "Use ${if (step.byEmail) "an emailed" else "a texted"} code instead" else "Use a recovery code instead") }
         }
     }
 }

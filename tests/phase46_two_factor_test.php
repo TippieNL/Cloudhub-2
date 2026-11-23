@@ -313,7 +313,7 @@ $checks['a recovery code is spent once'] = $repo->useRecoveryCode(1, 'h1') && !$
 $checks["and only by its own account"] = !$repo->useRecoveryCode(2, 'h2') && $repo->recoveryCodesLeft(1) === 1;
 $repo->replaceRecoveryCodes(1, ['h3']);
 $checks['replacing them retires the old ones'] = !$repo->useRecoveryCode(1, 'h2') && $repo->recoveryCodesLeft(1) === 1;
-$checks['every account starts with it off'] = $repo->state(1) === ['enabled' => false, 'phone' => null, 'enabledAt' => null]
+$checks['every account starts with it off'] = $repo->state(1) === ['enabled' => false, 'phone' => null, 'email' => null, 'enabledAt' => null]
     && !$repo->requiredFor(2) && $repo->state(999) === null;
 $checks['turning it on reports that it did, once'] = $repo->enable(1, '+31612345678') && !$repo->enable(1, '+31687654321')
     && $repo->state(1)['phone'] === '+31687654321';
@@ -325,7 +325,7 @@ $bare = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMOD
 $bare->exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, is_active INTEGER, role TEXT)");
 $bare->exec("INSERT INTO users VALUES (1, 'legacy', '', 1, 'viewer')");
 $legacy = new TwoFactorRepository($bare);
-$checks['a database not yet migrated reads as off, for everyone'] = $legacy->state(1) === ['enabled' => false, 'phone' => null, 'enabledAt' => null]
+$checks['a database not yet migrated reads as off, for everyone'] = $legacy->state(1) === ['enabled' => false, 'phone' => null, 'email' => null, 'enabledAt' => null]
     && !$legacy->schemaReady() && $legacy->enabledUserIds() === [];
 $checks['and so does the session check'] = (new CloudHub\Repositories\UserRepository($bare))->status(1)['twoFactor'] === false;
 $down = new class('sqlite::memory:') extends PDO {
@@ -522,7 +522,7 @@ $checks['moving to the number already in use is refused'] = refusal(fn() => $tf-
 $now += TwoFactor::RECENT_SECONDS + 61; $sms->sent = [];
 $later = $tf->startAction(2, 'bob', 'phone', 'bob-pass-12345', '+31633333333');
 $checks['without a recent proof, the current phone is asked for first'] = $later['stage'] === 'current' && $sms->sent[0]['to'] === '+31622222222'
-    && str_contains($sms->sent[0]['message'], 'to change your two-step verification number') && $later['recoveryAllowed'] === true;
+    && str_contains($sms->sent[0]['message'], 'to change where your two-step verification codes go') && $later['recoveryAllowed'] === true;
 $next = $tf->confirmAction(2, $sms->lastCode(), null);
 $checks['then the new number\'s code'] = $next['done'] === false && $next['stage'] === 'new' && end($sms->sent)['to'] === '+31633333333';
 $tf->confirmAction(2, $sms->lastCode(), null);

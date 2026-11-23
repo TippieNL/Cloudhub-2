@@ -52,6 +52,10 @@ sealed interface SignInUiState {
 data class CodeStep(
     /** The last two digits of the number the code goes to. */
     val phoneEnding: String? = null,
+    /** "email" when the code goes by email; null or "sms" for a text. */
+    val channel: String? = null,
+    /** Where it goes, as the server shows it: a masked address for email. */
+    val destination: String? = null,
     val codeLength: Int = 6,
     /** False when the server cannot text this account: a recovery code is the only way in. */
     val smsAvailable: Boolean = true,
@@ -75,12 +79,18 @@ data class CodeStep(
     fun canResend(now: Long): Boolean =
         smsAvailable && !recovery && !sending && !verifying && resendWait(now) == 0
 
+    val byEmail: Boolean get() = channel == "email"
+
     /** What the step asks for, in a sentence. */
     val prompt: String get() = when {
         recovery -> "Enter one of the recovery codes you saved when you turned on two-step verification. Each one works once."
+        byEmail -> "Enter the $codeLength-digit code we sent to ${destination ?: "your email address"}. If it does not arrive, look in your spam folder."
         phoneEnding != null -> "Enter the $codeLength-digit code we sent to your phone number ending in $phoneEnding."
-        else -> "Enter the $codeLength-digit code we sent to your phone."
+        else -> "Enter the $codeLength-digit code we sent you."
     }
+
+    /** The switch away from a recovery code names what it switches to. */
+    val codeKind: String get() = if (byEmail) "an emailed code" else "a texted code"
 }
 
 /**
@@ -286,13 +296,15 @@ class SignInViewModel(
     private fun codeStep(info: SecondStep): SignInUiState.Code {
         val step = CodeStep(
             phoneEnding = info.phoneEnding,
+            channel = info.channel,
+            destination = info.destination,
             codeLength = info.codeLength,
             smsAvailable = info.smsAvailable,
             recovery = !info.smsAvailable,
         )
         return when {
             !info.smsAvailable -> SignInUiState.Code(step.copy(
-                notice = "This server cannot send text messages right now. Use one of your recovery codes, or ask your administrator."))
+                notice = "This server cannot send ${if (step.byEmail) "email" else "text messages"} right now. Use one of your recovery codes, or ask your administrator."))
             info.codeSent -> SignInUiState.Code(step.copy(
                 notice = "A code was already sent, and still works.",
                 resendAt = clock() + info.resendIn * 1000L))
@@ -323,6 +335,8 @@ class SignInViewModel(
                 _state.value = SignInUiState.Code(step.copy(
                     sending = false,
                     phoneEnding = sent.phoneEnding ?: step.phoneEnding,
+                    channel = sent.channel ?: step.channel,
+                    destination = sent.destination ?: step.destination,
                     notice = "Code sent. It works for $minutes minute${if (minutes == 1) "" else "s"}.",
                     error = null,
                     resendAt = now + sent.resendIn * 1000L,
@@ -350,7 +364,7 @@ class SignInViewModel(
         val code = CodeInput.clean(typed.trim(), step.recovery, step.codeLength)
         if (code.isBlank()) {
             _state.value = SignInUiState.Code(step.copy(
-                error = if (step.recovery) "Enter a recovery code." else "Enter the code from the text message."))
+                error = if (step.recovery) "Enter a recovery code." else "Enter the code from the ${if (step.byEmail) "email" else "text message"}."))
             return
         }
         _state.value = SignInUiState.Code(step.copy(verifying = true, error = null))

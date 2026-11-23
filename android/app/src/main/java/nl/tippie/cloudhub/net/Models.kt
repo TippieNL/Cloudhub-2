@@ -81,7 +81,11 @@ data class LoginResult(
 @Serializable
 data class SecondStep(
     val method: String = "sms",
-    /** The last two digits of the number the code goes to, e.g. "78". */
+    /** "sms" or "email": how the code reaches this account. Absent from servers without email. */
+    val channel: String? = null,
+    /** Where it goes, as shown: "••78", or a masked address such as "k•••@example.com". */
+    val destination: String? = null,
+    /** The last two digits of the number the code goes to, e.g. "78"; null for an email address. */
     val phoneEnding: String? = null,
     val codeLength: Int = 6,
     /** False when the server cannot text this account: a recovery code is the only way in. */
@@ -97,6 +101,8 @@ data class SecondStep(
 @Serializable
 data class CodeSent(
     val sent: Boolean = false,
+    val channel: String? = null,
+    val destination: String? = null,
     val phoneEnding: String? = null,
     val expiresIn: Int? = null,
     val resendIn: Int = 0,
@@ -110,7 +116,14 @@ data class TwoFactorOverview(
     val available: Boolean = false,
     val schemaReady: Boolean = true,
     val smsAvailable: Boolean = false,
+    /** The server can send codes by email. */
+    val emailAvailable: Boolean = false,
     val enabled: Boolean = false,
+    /** A code can reach this account's phone or address now. Null from servers without email. */
+    val codeAvailable: Boolean? = null,
+    /** "sms" or "email" while it is on. */
+    val channel: String? = null,
+    val destination: String? = null,
     val phoneEnding: String? = null,
     val enabledAt: String? = null,
     val recoveryCodesLeft: Int = 0,
@@ -129,10 +142,13 @@ data class TwoFactorOverview(
 @Serializable
 data class TwoFactorStage(
     val done: Boolean = false,
-    /** phone, disable or recovery. */
+    /** phone, email, disable or recovery. */
     val action: String = "",
-    /** current: the phone codes go to now; new: the number being moved to. */
+    /** current: where codes go now; new: the number or address being moved to. */
     val stage: String = "",
+    /** "sms" or "email": how this stage's code was sent. */
+    val channel: String? = null,
+    val destination: String? = null,
     val phoneEnding: String? = null,
     val codeLength: Int = 6,
     /** The current phone may be answered with a recovery code instead. Never a new number. */

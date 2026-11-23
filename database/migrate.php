@@ -161,6 +161,10 @@ if (!$hadRole) {
 // nullable and appended, which MySQL and MariaDB add without rewriting rows.
 addColumn($pdo, 'users', 'two_factor_phone', 'VARCHAR(20) NULL');
 addColumn($pdo, 'users', 'two_factor_enabled_at', 'DATETIME NULL');
+// Email codes: where they go for an account that chose email over SMS.
+// Nullable and appended, like the two above. Until it exists, email cannot be
+// chosen; nothing else about two-step verification changes.
+addColumn($pdo, 'users', 'two_factor_email', 'VARCHAR(254) NULL');
 
 /*
  * Two-step verification throttles codes checked and text messages sent in

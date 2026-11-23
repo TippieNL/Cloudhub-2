@@ -29,6 +29,7 @@ final class TwoFactorRepository
     /** @var \Closure(): int */
     private \Closure $clock;
     private ?bool $ready = null;
+    private ?bool $emailReady = null;
 
     public function __construct(private readonly PDO $db, ?\Closure $clock = null)
     {
@@ -83,7 +84,7 @@ final class TwoFactorRepository
     /**
      * An account's two-step state, or null when the account does not exist.
      *
-     * @return array{enabled: bool, phone: ?string, enabledAt: ?int}|null
+     * @return array{enabled: bool, phone: ?string, email: ?string, enabledAt: ?int}|null
      */
     public function state(int $userId): ?array
     {
@@ -101,6 +102,7 @@ final class TwoFactorRepository
         return [
             'enabled' => $row['two_factor_enabled_at'] !== null,
             'phone' => is_string($phone) && $phone !== '' ? $phone : null,
+            'email' => $this->email($userId),
             'enabledAt' => self::time($row['two_factor_enabled_at']),
         ];
     }
@@ -135,17 +137,66 @@ final class TwoFactorRepository
     {
         $stmt = $this->db->prepare('UPDATE users SET two_factor_phone = ?, two_factor_enabled_at = ? WHERE id = ? AND two_factor_enabled_at IS NULL');
         $stmt->execute([$phone, $this->stamp($this->now()), $userId]);
+        $turnedOn = $stmt->rowCount() === 1;
+        if (!$turnedOn) $this->db->prepare('UPDATE users SET two_factor_phone = ? WHERE id = ?')->execute([$phone, $userId]);
+        // Codes go to one place: moving to a phone forgets an email address.
+        if ($this->emailReady()) $this->db->prepare('UPDATE users SET two_factor_email = NULL WHERE id = ?')->execute([$userId]);
+        return $turnedOn;
+    }
+
+    /**
+     * Point the account's two-step verification at an email address instead,
+     * turning it on if it was off; the number, if any, is forgotten. Returns
+     * whether this call turned it on -- the same compare-and-set as enable().
+     */
+    public function enableEmail(int $userId, string $email): bool
+    {
+        $stmt = $this->db->prepare('UPDATE users SET two_factor_email = ?, two_factor_phone = NULL, two_factor_enabled_at = ? WHERE id = ? AND two_factor_enabled_at IS NULL');
+        $stmt->execute([$email, $this->stamp($this->now()), $userId]);
         if ($stmt->rowCount() === 1) return true;
-        $this->db->prepare('UPDATE users SET two_factor_phone = ? WHERE id = ?')->execute([$phone, $userId]);
+        $this->db->prepare('UPDATE users SET two_factor_email = ?, two_factor_phone = NULL WHERE id = ?')->execute([$email, $userId]);
         return false;
     }
 
-    /** Turn it off: the number, its recovery codes and any code in flight all go. */
+    /**
+     * Whether users.two_factor_email exists. Codes by email need it; until
+     * migrate.php has added it nobody can choose email, and everything else
+     * works as before.
+     */
+    public function emailReady(): bool
+    {
+        if ($this->emailReady !== null) return $this->emailReady;
+        try {
+            $this->db->query('SELECT two_factor_email FROM users WHERE 1 = 0');
+            return $this->emailReady = true;
+        } catch (PDOException $e) {
+            if (!self::missingSchema($e)) throw $e;
+            return $this->emailReady = false;
+        }
+    }
+
+    /**
+     * The email address codes go to, read on its own: a database not yet
+     * given the column must read as "no address", never as "two-step
+     * verification is off" -- which state() would conclude if this were part
+     * of its query and the column missing.
+     */
+    private function email(int $userId): ?string
+    {
+        if (!$this->emailReady()) return null;
+        $stmt = $this->db->prepare('SELECT two_factor_email FROM users WHERE id = ?');
+        $stmt->execute([$userId]);
+        $email = $stmt->fetchColumn();
+        return is_string($email) && $email !== '' ? $email : null;
+    }
+
+    /** Turn it off: the number or address, its recovery codes and any code in flight all go. */
     public function disable(int $userId): void
     {
         $this->db->beginTransaction();
         try {
             $this->db->prepare('UPDATE users SET two_factor_phone = NULL, two_factor_enabled_at = NULL WHERE id = ?')->execute([$userId]);
+            if ($this->emailReady()) $this->db->prepare('UPDATE users SET two_factor_email = NULL WHERE id = ?')->execute([$userId]);
             $this->db->prepare('DELETE FROM two_factor_recovery_codes WHERE user_id = ?')->execute([$userId]);
             $this->db->prepare('DELETE FROM two_factor_challenges WHERE user_id = ?')->execute([$userId]);
             $this->db->commit();

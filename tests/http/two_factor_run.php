@@ -33,6 +33,7 @@ use CloudHub\Tests\Http\Response;
 $root = dirname(__DIR__, 2);
 $work = sys_get_temp_dir().'/cloudhub-2fa-http-'.bin2hex(random_bytes(4));
 mkdir($work.'/gateway', 0775, true);
+mkdir($work.'/mail', 0775, true);
 mkdir($work.'/sessions', 0775, true);
 
 /* ---- accounts of our own -------------------------------------------------- */
@@ -53,6 +54,9 @@ $accounts = [
     'second' => [$tag.'_se', 'second-pass-12345', 'editor'],
     'traccar' => [$tag.'_tr', 'traccar-pass-1234', 'viewer'],
     'smsgate' => [$tag.'_sg', 'smsgate-pass-1234', 'viewer'],
+    // Codes by email.
+    'mail' => [$tag.'_ma', 'mail-pass-1234567', 'editor'],
+    'mover' => [$tag.'_mv', 'mover-pass-123456', 'viewer'],
 ];
 $ids = [];
 foreach ($accounts as $key => [$name, $password, $role]) $ids[$key] = $repo->create($name, $password, $role)['id'];
@@ -114,6 +118,19 @@ $serve([PHP_BINARY, '-S', '127.0.0.1:'.$smsgatePort, '-t', 'public', 'router.php
     'SMS_WEBHOOK_URL' => 'http://127.0.0.1:'.$gatewayPort.'/message', 'SMS_WEBHOOK_TOKEN' => 'gw-user:gw-pass',
 ], $work.'/smsgate.log');
 
+// A stand-in mail server that insists on signing in, and a CloudHub that can
+// send codes by email and not by text -- as a server whose SMS gateway is gone.
+$smtpPort = $freePort();
+$serve([PHP_BINARY, __DIR__.'/smtp_server.php', (string)$smtpPort, $work.'/mail'],
+    ['SMTP_TEST_USER' => 'cloudhub@mail.test', 'SMTP_TEST_PASS' => 'smtp-test-pass'], $work.'/smtp.log');
+$mailOnlyPort = $freePort();
+$serve([PHP_BINARY, '-S', '127.0.0.1:'.$mailOnlyPort, '-t', 'public', 'router.php'], $common + [
+    'SMS_DRIVER' => '', 'MAIL_DRIVER' => 'smtp', 'MAIL_HOST' => '127.0.0.1', 'MAIL_PORT' => (string)$smtpPort,
+    // Plain SMTP is allowed here only because the server is on this machine.
+    'MAIL_ENCRYPTION' => 'none', 'MAIL_USERNAME' => 'cloudhub@mail.test', 'MAIL_PASSWORD' => 'smtp-test-pass',
+    'MAIL_FROM_NAME' => 'CloudHub Test',
+], $work.'/mailonly.log');
+
 register_shutdown_function(static function () use (&$processes, $db, $ids, $work): void {
     foreach ($processes as $process) { if (is_resource($process)) { proc_terminate($process); proc_close($process); } }
     foreach ($ids as $id) {
@@ -129,7 +146,8 @@ $base = 'http://127.0.0.1:'.$appPort;
 $quiet = 'http://127.0.0.1:'.$quietPort;
 $outbox = 'http://127.0.0.1:'.$outboxPort;
 $gatewayApps = ['traccar' => 'http://127.0.0.1:'.$traccarPort, 'smsgate' => 'http://127.0.0.1:'.$smsgatePort];
-foreach ([$base, $quiet, $outbox, ...array_values($gatewayApps), 'http://127.0.0.1:'.$gatewayPort] as $server) {
+$mailOnly = 'http://127.0.0.1:'.$mailOnlyPort;
+foreach ([$base, $quiet, $outbox, $mailOnly, ...array_values($gatewayApps), 'http://127.0.0.1:'.$gatewayPort] as $server) {
     $probe = str_ends_with($server, (string)$gatewayPort) ? $server.'/' : $server.'/?route='.rawurlencode('/api/auth/status');
     if (!$up($probe)) { fwrite(STDERR, "$server never answered.\n"); exit(1); }
 }
@@ -197,6 +215,33 @@ function recheck_now(Client $client): void
     file_put_contents($file, preg_replace('/account_checked_at\|i:\d+;/', 'account_checked_at|i:1;', $data));
 }
 
+function mailbox(string $mode): void
+{
+    global $work;
+    file_put_contents($work.'/mail/mode', $mode);
+}
+
+/** @return list<array> every message the stand-in mail server accepted, oldest first */
+function emails(): array
+{
+    global $work;
+    $lines = @file($work.'/mail/received.jsonl', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+    return array_map(static fn(string $l): array => json_decode($l, true) ?: [], $lines);
+}
+
+/** The code in the newest email to $to, read from its subject as a person would. */
+function emailed_code(string $to): string
+{
+    foreach (array_reverse(emails()) as $email) {
+        if (!in_array($to, $email['to'] ?? [], true)) continue;
+        if (preg_match('/^Subject: (\d{6}) /m', (string)($email['data'] ?? ''), $m)) {
+            $GLOBALS['allCodes'][] = $m[1];
+            return $m[1];
+        }
+    }
+    return '';
+}
+
 /** Sign in to an account with two-step verification on, all the way. */
 function sign_in_with_code(Client $client, string $user, string $password): Response
 {
@@ -204,6 +249,15 @@ function sign_in_with_code(Client $client, string $user, string $password): Resp
     if ($login->errorCode() !== 'TWO_FACTOR_REQUIRED') return $login;
     $client->post('/api/auth/two-factor/send');
     return $client->post('/api/auth/two-factor/verify', ['code' => code_of(last_text())]);
+}
+
+/** Sign in to an account whose codes go by email, all the way. */
+function sign_in_with_email(Client $client, string $user, string $password, string $address): Response
+{
+    $login = $client->signIn($user, $password);
+    if ($login->errorCode() !== 'TWO_FACTOR_REQUIRED') return $login;
+    $client->post('/api/auth/two-factor/send');
+    return $client->post('/api/auth/two-factor/verify', ['code' => emailed_code($address)]);
 }
 
 /** Turn it on for a signed-in client, through the API. @return array the confirm answer */
@@ -680,13 +734,105 @@ scenario('a phone running an SMS gateway app is spoken to in its own format', fu
     gateway('ok');
 });
 
+/* ---- codes by email ---------------------------------------------------------- */
+
+$mailUser = $accounts['mail'];
+$mailAddress = $tag.'.mail@example.test';
+scenario('turning it on by email', function () use ($mailOnly, $mailUser, $mailAddress) {
+    [$name, $password] = $mailUser;
+    $c = new Client($mailOnly);
+    check('the password signs in while it is off', ($c->signIn($name, $password)->json['success'] ?? false) === true);
+    $overview = $c->get('/api/users/me/two-factor');
+    check('the server offers email, not texts', ($overview->json['emailAvailable'] ?? false) === true && ($overview->json['smsAvailable'] ?? true) === false
+        && ($overview->json['available'] ?? false) === true, $overview->describe());
+    $phone = $c->post('/api/users/me/two-factor/start', ['action' => 'phone', 'currentPassword' => $password, 'phone' => '+31612345678']);
+    check('a number cannot be chosen without a text gateway', $phone->errorCode() === 'SMS_NOT_CONFIGURED', $phone->describe());
+    $bad = $c->post('/api/users/me/two-factor/start', ['action' => 'email', 'currentPassword' => $password, 'email' => "a@b.test\r\nBcc: x@evil.test"]);
+    check('an address with a line break in it is refused', $bad->status === 422, $bad->describe());
+    $start = $c->post('/api/users/me/two-factor/start', ['action' => 'email', 'currentPassword' => $password, 'email' => strtoupper($mailAddress)]);
+    check('a code is emailed to the new address', $start->ok() && ($start->json['sent'] ?? false) === true && ($start->json['channel'] ?? '') === 'email',
+        $start->describe());
+    check('the answer shows the address masked, never whole', ($start->json['destination'] ?? '') === substr($mailAddress, 0, 1).'•••@example.test'
+        && !str_contains($start->body, $mailAddress), $start->body);
+    $email = emails()[count(emails()) - 1] ?? [];
+    check('the mail server was signed in to, and got one recipient', ($email['auth'] ?? '') === 'cloudhub@mail.test' && ($email['to'] ?? []) === [$mailAddress]);
+    check('the message is from CloudHub, to the address', str_contains((string)($email['data'] ?? ''), 'From: "CloudHub Test" <cloudhub@mail.test>')
+        && str_contains((string)($email['data'] ?? ''), 'To: <'.$mailAddress.'>'));
+    $done = $c->post('/api/users/me/two-factor/confirm', ['code' => emailed_code($mailAddress)]);
+    check('its code turns it on, with recovery codes', $done->ok() && ($done->json['enabled'] ?? false) === true
+        && count($done->json['recoveryCodes'] ?? []) === 10 && ($done->json['channel'] ?? '') === 'email', $done->describe());
+    $after = $c->get('/api/users/me/two-factor');
+    check('the overview now says email', ($after->json['channel'] ?? '') === 'email' && ($after->json['codeAvailable'] ?? false) === true);
+});
+
+scenario('signing in with an emailed code', function () use ($mailOnly, $mailUser, $mailAddress) {
+    [$name, $password] = $mailUser;
+    $c = new Client($mailOnly);
+    $login = $c->signIn($name, $password);
+    $info = $login->json['twoFactor'] ?? [];
+    check('the password asks for a code', $login->status === 401 && $login->errorCode() === 'TWO_FACTOR_REQUIRED', $login->describe());
+    check('the code step says where it goes', ($info['channel'] ?? '') === 'email' && ($info['destination'] ?? '') !== '');
+    // What an app written before email reads: a code can be sent, and no
+    // number to name -- so it asks for "the code we sent", and it works.
+    check('and stays readable by apps that predate email', ($info['smsAvailable'] ?? false) === true
+        && array_key_exists('phoneEnding', $info) && $info['phoneEnding'] === null
+        && ($info['codeSent'] ?? true) === false && ($info['codeLength'] ?? 0) === 6);
+    $before = count(emails());
+    $send = $c->post('/api/auth/two-factor/send');
+    check('asking for it emails it', $send->ok() && count(emails()) === $before + 1, $send->describe());
+    $wrong = $c->post('/api/auth/two-factor/verify', ['code' => '000000' === emailed_code($mailAddress) ? '111111' : '000000']);
+    check('a wrong code is refused', $wrong->errorCode() === 'TWO_FACTOR_CODE_INVALID', $wrong->describe());
+    $verify = $c->post('/api/auth/two-factor/verify', ['code' => emailed_code($mailAddress)]);
+    check('the emailed code signs in', $verify->ok() && ($verify->json['user']['username'] ?? '') === $name, $verify->describe());
+    check('and the session is signed in', ($c->get('/api/auth/status')->json['authenticated'] ?? false) === true);
+});
+
+scenario('a mail server that refuses or is down never lets anyone in', function () use ($mailOnly, $mailUser) {
+    [$name, $password] = $mailUser;
+    foreach (['refuse' => ['EMAIL_REJECTED', 422], 'down' => ['EMAIL_UNAVAILABLE', 503]] as $mode => [$code, $status]) {
+        mailbox($mode);
+        $c = new Client($mailOnly);
+        $c->signIn($name, $password);
+        $send = $c->post('/api/auth/two-factor/send');
+        check("$mode: $code", $send->status === $status && $send->errorCode() === $code, $send->describe());
+        check("$mode: and not signed in", ($c->get('/api/auth/status')->json['authenticated'] ?? true) === false);
+    }
+    mailbox('ok');
+});
+
+scenario('a phone account whose texts stopped moves to email', function () use ($base, $mailOnly, $accounts, $tag, $phone) {
+    // Turned on with a phone where texts worked...
+    [$name, $password] = $accounts['mover'];
+    $c = new Client($base);
+    $c->signIn($name, $password);
+    $on = enable($c, $password, $phone());
+    check('it starts on a phone', ($on['enabled'] ?? false) === true && count($on['recoveryCodes'] ?? []) === 10);
+    // ...then signing in where no text can be sent: a recovery code is the way in.
+    $d = new Client($mailOnly);
+    $login = $d->signIn($name, $password);
+    check('where texts cannot be sent, only a recovery code is offered', ($login->json['twoFactor']['smsAvailable'] ?? true) === false
+        && ($login->json['twoFactor']['channel'] ?? '') === 'sms', $login->describe());
+    $in = $d->post('/api/auth/two-factor/verify', ['recoveryCode' => $on['recoveryCodes'][0] ?? '']);
+    check('which signs in', $in->ok(), $in->describe());
+    $address = $tag.'.mover@example.test';
+    $move = $d->post('/api/users/me/two-factor/start', ['action' => 'email', 'currentPassword' => $password, 'email' => $address]);
+    check('having just signed in, only the new address is asked for', $move->ok() && ($move->json['stage'] ?? '') === 'new'
+        && ($move->json['sent'] ?? false) === true, $move->describe());
+    $moved = $d->post('/api/users/me/two-factor/confirm', ['code' => emailed_code($address)]);
+    check('codes now go to email, recovery codes kept', $moved->ok() && ($moved->json['channel'] ?? '') === 'email'
+        && array_key_exists('recoveryCodes', $moved->json ?? []) && $moved->json['recoveryCodes'] === null, $moved->describe());
+    $e = new Client($mailOnly);
+    $again = sign_in_with_email($e, $name, $password, $address);
+    check('and the next sign-in takes an emailed code', $again->ok() && ($again->json['user']['username'] ?? '') === $name, $again->describe());
+});
+
 scenario('codes and numbers stay out of the logs and the trail', function () use ($root, $db, $editorPhone) {
     $codes = array_values(array_filter($GLOBALS['allCodes'] ?? []));
     // Every CloudHub's output, where PHP's error log goes on this server, and
     // logs/php-error.log in case an ini file sends it there instead. Not the
     // gateway's: it is handed the number and the code by design.
     $logs = '';
-    foreach (['app.log', 'quiet.log', 'outbox.log', 'traccar.log', 'smsgate.log'] as $name) $logs .= (string)@file_get_contents($GLOBALS['work'].'/'.$name);
+    foreach (['app.log', 'quiet.log', 'outbox.log', 'traccar.log', 'smsgate.log', 'mailonly.log'] as $name) $logs .= (string)@file_get_contents($GLOBALS['work'].'/'.$name);
     $logs .= (string)@file_get_contents($root.'/logs/php-error.log');
     $trail = json_encode($db->query("SELECT context_json FROM security_events WHERE event_type LIKE '%two_factor%' OR event_type LIKE 'auth.%' ORDER BY id DESC LIMIT 500")->fetchAll());
     check('there were codes to look for', count($codes) >= 10);
@@ -695,11 +841,12 @@ scenario('codes and numbers stay out of the logs and the trail', function () use
     check('no code in the error log', array_filter($codes, static fn(string $c): bool => (bool)preg_match('/(?<![0-9A-Za-z])'.$c.'(?![0-9A-Za-z])/', $logs)) === []);
     check('no code in the audit trail', array_filter($codes, static fn(string $c): bool => str_contains((string)$trail, '"'.$c.'"')) === []);
     check('no number in the audit trail', !str_contains((string)$trail, substr($editorPhone, 3)));
+    check('no email address in the error log or the audit trail', !str_contains($logs, '@example.test') && !str_contains((string)$trail, '@example.test'));
 });
 
 /* ---- report ----------------------------------------------------------------- */
 
 $texts = count(texts());
-echo PHP_EOL.$passed.' checks passed, '.count($failures).' failed ('.$texts.' text messages through the stand-in gateway).'.PHP_EOL;
+echo PHP_EOL.$passed.' checks passed, '.count($failures).' failed ('.$texts.' text messages through the stand-in gateway, '.count(emails()).' emails through the stand-in mail server).'.PHP_EOL;
 foreach ($failures as $failure) echo '  FAIL '.$failure.PHP_EOL;
 exit($failures ? 1 : 0);

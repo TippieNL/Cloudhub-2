@@ -119,7 +119,7 @@ final class Sms
      * range is also used for carrier-grade NAT inside an ISP; a gateway is only
      * ever there because the operator typed that address into .env.
      */
-    private static function isLocalHost(string $host): bool
+    public static function isLocalHost(string $host): bool
     {
         $host = rtrim(strtolower(trim($host, '[]')), '.');
         if ($host === 'localhost') return true;

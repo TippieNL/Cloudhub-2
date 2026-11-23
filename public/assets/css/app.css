@@ -301,6 +301,12 @@ html.dark .fav-button.on{color:#f2c14e}
 .tf-step>p{margin:0 0 4px}
 .tf-buttons{flex-wrap:wrap}
 .tf-note{margin-top:14px}
+/* Email or a text message, where the server can send both. */
+.tf-channel{border:0;margin:10px 0 2px;padding:0;display:flex;flex-wrap:wrap;align-items:center;gap:4px 18px}
+.tf-channel legend{float:left;margin-right:6px;padding:0;font-weight:600}
+.tf-channel label{display:inline-flex;width:auto;align-items:center;gap:6px;cursor:pointer;font-size:inherit;color:inherit}
+/* The form-wide input rule makes every input a full-width box; a radio is not one. */
+.tf-channel input[type=radio]{width:auto;min-height:0;margin:0;padding:0;flex:0 0 auto}
 .tf-links,.two-factor-links{display:flex;flex-wrap:wrap;gap:2px 16px;margin-top:10px}
 .link-button{border:0;background:transparent;padding:6px 0;color:var(--primary);text-decoration:underline;text-underline-offset:2px;text-align:left}
 .link-button:disabled{color:var(--muted);text-decoration:none;cursor:default}
@@ -316,4 +322,5 @@ html.dark .fav-button.on{color:#f2c14e}
   .security-dialog{width:100%;max-height:92vh;border-radius:16px 16px 0 0}
   .recovery-codes{grid-template-columns:1fr}
   .tf-actions button,.security-row>button{min-height:44px}
+  .tf-channel label{min-height:44px}
 }

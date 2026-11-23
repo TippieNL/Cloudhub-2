@@ -176,11 +176,14 @@ and is covered by `tests/http/run.php` and `tests/phase50_audit_regressions_test
   trims passwords as the API does (an account made with surrounding spaces could
   never sign in); `/play` shows a sign-in page rather than JSON when signed out.
 
-## SMS two-step verification
+## Two-step verification (SMS or email)
 
 An account can require, after its password, a six-digit code texted to its
-owner's phone. It is off until the owner turns it on; accounts that leave it
-off sign in exactly as before. README.md describes the feature and its setup.
+owner's phone -- or emailed to them, where the server can send email. It is off
+until the owner turns it on; accounts that leave it off sign in exactly as
+before. README.md describes the feature and its setup. What follows was
+written for texts; an email address is held to every rule a phone number is
+(see **Codes by email** for what differs).
 
 ### Where it is enforced
 
@@ -329,6 +332,34 @@ password-only one when two-step verification is turned on elsewhere — sends th
 app back to sign-in. Versions 4.2 and earlier cannot complete the step: they
 show the server's message and are never signed in.
 
+### Codes by email
+
+- **One place per account.** Codes go to the phone *or* the address its owner
+  proved with a code sent to it (`users.two_factor_email`); moving between
+  them follows the rules for changing the number, and the old place is told.
+- **Transport.** CloudHub speaks SMTP itself (`MAIL_DRIVER=smtp`): STARTTLS or
+  TLS from the first byte, TLS 1.2 or later, the certificate checked against
+  `MAIL_HOST`. Extra TLS options can add trust but never turn verification
+  off, and a server that does not offer STARTTLS when it was asked for is a
+  failure, not a quiet fall back to plain text. Plain SMTP is accepted only to
+  this machine, a private network or a Tailscale network.
+- **Injection.** Addresses are refused outright if they carry anything an SMTP
+  command or a header could be split on -- line breaks, brackets, commas,
+  quotes, spaces -- and the message body is dot-stuffed, so nothing a person
+  types can add a recipient, a header or a second message.
+- **Credentials** (`MAIL_USERNAME`, `MAIL_PASSWORD`) live in `.env` only. Use an
+  app password where the provider has them, never the mailbox's own password.
+- **Nothing identifying in logs.** Failures are logged by stage and SMTP reply
+  code only (servers quote the address in their error text, so it is dropped);
+  answers show an address masked (`k•••@example.com`); the audit trail records
+  `two_factor.email` and `two_factor.email_change` with no address at all.
+- **Limits.** Texts and emails share the hourly limits, per account, per
+  destination and per client address.
+- **Failing closed.** A mail server that refuses the address, is down or cannot
+  be configured sends nothing and signs nobody in: such an account then signs
+  in with a recovery code. A database `migrate.php` has not given the column
+  reads as "no address" -- never as "two-step verification is off".
+
 ### What SMS does not protect against
 
 SMS is the weakest common second factor. It stops someone who has only the
@@ -343,6 +374,12 @@ password. It does not stop:
 - **someone with the phone unlocked**, or a stolen session cookie (a second
   factor protects signing in, not a session that already exists);
 - an **administrator** or the server's operator, who can reset it.
+
+Email has its own weak spots, and is no stronger: whoever gets into the mailbox
+-- a reused or phished mailbox password, a session left signed in, the same
+phone with the mail app open -- receives the codes; a mailbox reached from the
+phone CloudHub is used on makes the two steps one device. Protect the mailbox
+with its own second factor.
 
 Keep recovery codes offline, and consider an authenticator app or passkeys in a
 future version for accounts that need more. SMS also costs money: the limits

@@ -211,7 +211,7 @@ restored, trash and restore, and a viewer being refused a write. This one does
 need a migrated database and an admin account, which the workflow sets up.
 
 The third does the same for two-step verification (see **Two-step verification
-(SMS)**): it starts its own CloudHub servers and a stand-in SMS gateway, reads
+(SMS or email)**): it starts its own CloudHub servers and a stand-in SMS gateway, reads
 the codes the gateway is handed, creates its own accounts and removes them when
 it is done.
 
@@ -307,13 +307,14 @@ the Android app's included. The session that made the change carries on.
 Wrong guesses at the current password there count against the same limits as
 signing in.
 
-## Two-step verification (SMS)
+## Two-step verification (SMS or email)
 
 Any account can add a second step to signing in: after the password, a
-six-digit code texted to the owner's phone. It is off for every account until
-its owner turns it on, and nothing about signing in changes for accounts that
-leave it off. SECURITY.md has the threat model and what SMS does not protect
-against.
+six-digit code texted to the owner's phone -- or emailed to them, on a server
+set up to send email (see **Codes by email** below). It is off for every
+account until its owner turns it on, and nothing about signing in changes for
+accounts that leave it off. SECURITY.md has the threat model and what SMS and
+email do not protect against.
 
 **For a person.** **Security** → **Two-step verification** → **Turn on**: enter
 a mobile number in international format (`+31 6 12345678`; `0031…` and the
@@ -365,6 +366,42 @@ someone signed out. Only the code signs it in, with another new ID. The wait
 lasts 15 minutes. When an account turns two-step verification on, its other
 sessions that only ever proved the password — another browser, or the Android
 app — are signed out within a minute; the session that turned it on carries on.
+
+**Codes by email.** Where `MAIL_DRIVER` is set, **Turn on** offers **Email**
+beside **Text message** (or alone, on a server with no SMS gateway): enter
+the address and your password, and type the code emailed to it. Everything
+else is as for a phone -- the code is proven before it counts, changes ask for
+the current address (or a recovery code), the old address is told when codes
+move, and answers show the address masked (`k•••@example.com`). An account's
+codes go to one place: its phone *or* its address. **Change where codes go**
+moves between them. Look in the spam folder if a code does not arrive.
+
+CloudHub speaks SMTP itself -- no sendmail, no Composer -- to your mail
+provider's submission server, over STARTTLS or TLS with the certificate
+checked. For Gmail:
+
+```
+MAIL_DRIVER=smtp
+MAIL_HOST=smtp.gmail.com
+MAIL_USERNAME=you@gmail.com
+MAIL_PASSWORD=abcdefghijklmnop   # an app password: Google Account > Security >
+                                 # 2-Step Verification > App passwords, no spaces
+```
+
+Port 587 with STARTTLS is the default; `MAIL_ENCRYPTION=ssl` uses 465.
+`MAIL_FROM` and `MAIL_FROM_NAME` set the sender (by default the account in
+`MAIL_USERNAME`, and `SMS_APP_NAME`). Plain SMTP (`MAIL_ENCRYPTION=none`) is
+accepted only to a mail server on this machine, the LAN or your Tailscale
+network. A setting that cannot work is logged once as `[mail] …` and named in
+an administrator's **Security** panel; until it is fixed, accounts that chose
+email sign in with a recovery code. Run `php database/migrate.php` (or
+`database/migrations/20261123_two_factor_email.sql`) first: email needs the
+`users.two_factor_email` column.
+
+*Moving an account from texts to email* -- say, when its SMS gateway is gone:
+sign in with a recovery code, then **Security** → **Change where codes go** →
+**Email**. Having just signed in, only the new address's code is asked for.
+Texts and emails share the hourly limits below.
 
 **What the server needs.**
 
@@ -440,13 +477,13 @@ app — are signed out within a minute; the session that turned it on carries on
 
 | Route | |
 |---|---|
-| `POST /api/auth/login` | unchanged for accounts without it. For one with it: `401` `TWO_FACTOR_REQUIRED`, with `twoFactor` (`phoneEnding`, `codeLength`, `smsAvailable`, `codeSent`, `resendIn`, `expiresIn`) and a fresh `csrfToken`. No text is sent yet |
+| `POST /api/auth/login` | unchanged for accounts without it. For one with it: `401` `TWO_FACTOR_REQUIRED`, with `twoFactor` (`channel` -- `sms` or `email` --, `destination` as shown, `phoneEnding` for a phone, `codeLength`, `smsAvailable` -- whether a code can be sent at all --, `codeSent`, `resendIn`, `expiresIn`) and a fresh `csrfToken`. Nothing is sent yet |
 | `POST /api/auth/two-factor/send` | text a code; `429` with `Retry-After` while waiting, `503` when no text can be sent |
 | `POST /api/auth/two-factor/verify` | `{"code"}` or `{"recoveryCode"}`; the usual sign-in answer on success |
 | `POST /api/auth/two-factor/cancel` | give up the sign-in |
 | `GET /api/auth/status` | also carries `twoFactor` while a sign-in waits for its code |
-| `GET /api/users/me/two-factor` | the caller's settings: `enabled`, `phoneEnding`, `recoveryCodesLeft`, `available`, … |
-| `POST /api/users/me/two-factor/start` | `{"action": "phone" \| "disable" \| "recovery", "currentPassword", "phone"?, "method"?: "recovery"}` |
+| `GET /api/users/me/two-factor` | the caller's settings: `enabled`, `channel`, `destination`, `phoneEnding`, `recoveryCodesLeft`, `available`, `smsAvailable`, `emailAvailable`, `codeAvailable`; for an administrator, `smsProblem` / `mailProblem` naming a refused setting |
+| `POST /api/users/me/two-factor/start` | `{"action": "phone" \| "email" \| "disable" \| "recovery", "currentPassword", "phone"?, "email"?, "method"?: "recovery"}` |
 | `POST /api/users/me/two-factor/confirm` | `{"code"}`, or `{"recoveryCode"}` for the current phone; a change of number may answer `"done": false` and ask for the new number's code next |
 | `POST /api/users/me/two-factor/resend`, `…/cancel` | |
 | `DELETE /api/users/{id}/two-factor` | administrator reset, `{"currentPassword"}` |
@@ -454,8 +491,9 @@ app — are signed out within a minute; the session that turned it on carries on
 The `/api/auth/two-factor/*` routes check CSRF themselves; the others sit behind
 the same guard as every other route. Refusals carry stable codes —
 `TWO_FACTOR_CODE_INVALID` (with `attemptsLeft`), `TWO_FACTOR_CODE_EXPIRED`,
-`TWO_FACTOR_LOCKED`, `TWO_FACTOR_RESEND_COOLDOWN`, `SMS_UNAVAILABLE`, … — and
-answers name at most a number's last two digits. The Users list
+`TWO_FACTOR_LOCKED`, `TWO_FACTOR_RESEND_COOLDOWN`, `SMS_UNAVAILABLE`,
+`EMAIL_REJECTED`, `EMAIL_UNAVAILABLE`, … — and answers name at most a number's
+last two digits, or an address masked. The Users list
 (`GET /api/users`) gains `twoFactorEnabled`, never a number.
 
 **The Android app** asks for the code too, from version 4.3: after a right
@@ -466,6 +504,11 @@ turns it on and off, changes the number and makes new recovery codes. See
 server's message — *"This account uses two-step verification…"* — instead of
 signing in, and cost no text message: an account that turns this on needs the
 web app or 4.3.
+
+Codes by email need no new app to sign in: 4.3 to 4.7 ask for "the code we
+sent" and take an emailed code like a texted one. Choosing email, and the
+email wording, are in the web app now and in the app's source for its next
+build.
 
 ## Installing as an app
 
@@ -627,7 +670,7 @@ verification turned on from another device — returns to this screen with
 ### Two-step verification
 
 For an account with SMS two-step verification (see **Two-step verification
-(SMS)**) a right password turns the card into the code step: the code is texted
+(SMS or email)**) a right password turns the card into the code step: the code is texted
 as it opens, the number pad comes up, and the sixth digit checks it — **Verify**
 is there for anyone who expects a button. **Send a new code** counts down the
 server's wait; **Use a recovery code instead** takes one of the saved codes;
