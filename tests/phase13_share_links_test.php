@@ -99,8 +99,21 @@ $checks['moving or renaming a file carries its links'] =
     && str_contains($index, 'shares_relocate($fs->relative($source), $fs->relative($target));');
 // MySQL's SUBSTR() counts characters on utf8mb4, so a byte length would miss
 // every link beneath an accented or emoji folder.
+// One matcher for both, so the two cannot drift apart again.
+$matcher = (string)strstr($index, 'function shares_matching(');
 $checks['link cleanup is prefix-matched by characters'] =
-    substr_count($index, 'mb_strlen($prefix), $prefix]);') >= 2;
+    str_contains($matcher, 'mb_strlen($prefix), $prefix]);')
+    && str_contains((string)strstr($index, 'function shares_forget('), 'shares_matching($relative)')
+    && str_contains((string)strstr($index, 'function shares_relocate('), 'shares_matching($from)');
+// The column's collation is case- and accent-insensitive, and "/Photos" and
+// "/photos" are different folders: moving one must not re-point the other's
+// public link at a file nobody shared.
+$checks['link cleanup keeps only exact path matches'] =
+    str_contains($matcher, '$path === $relative || str_starts_with($path, $prefix)');
+$checks['a link is reused only for exactly the same path'] =
+    str_contains($index, "if ((string)\$candidate['file_path'] === \$rel)");
+$checks['a token is honoured only as issued'] =
+    str_contains($index, "!hash_equals((string)\$row['token'], \$token)");
 
 $bad = false;
 foreach ($checks as $name => $ok) {

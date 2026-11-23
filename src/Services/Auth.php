@@ -117,6 +117,22 @@ final class Auth {
             $_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
             return;
         }
+        /*
+         * The password has changed since this session signed in -- its owner
+         * changed it on another device, or an administrator reset it. Whoever
+         * was using the old one is signed out, as a disabled account is. The
+         * session that made the change was given the new stamp and carries on
+         * (see refreshCredential()). A session from before stamps existed
+         * adopts the current one rather than being ended.
+         */
+        $stamp=(string)($status['credential']??'');
+        if(isset($_SESSION['credential'])&&$stamp!==''&&!hash_equals((string)$_SESSION['credential'],$stamp)){
+            self::destroySession();
+            session_start();
+            $_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
+            return;
+        }
+        if($stamp!=='')$_SESSION['credential']=$stamp;
 
         $_SESSION['role']=$status['role'];
         $_SESSION['account_checked_at']=$now;
@@ -183,6 +199,9 @@ final class Auth {
         // The password is proven either way, so its hash can be upgraded now.
         if(password_needs_rehash((string)$user['password_hash'],self::passwordAlgorithm())){
             $hash=self::hashPassword($password);$q=$pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?');$q->execute([$hash,(int)$user['id']]);
+            // This session is stamped with the hash now stored, or the next
+            // account re-check would take the upgrade for a password change.
+            $user['password_hash']=$hash;
         }
         /*
          * Half-way, for an account with two-step verification. The session is
@@ -233,7 +252,7 @@ final class Auth {
         $pending=self::pendingSecondFactor();
         if($pending===null)return null;
         unset($_SESSION['two_factor_login']);
-        $stmt=$pdo->prepare('SELECT id, username, is_active, role FROM users WHERE id = ?');
+        $stmt=$pdo->prepare('SELECT id, username, password_hash, is_active, role FROM users WHERE id = ?');
         $stmt->execute([(int)$pending['user']]);
         $user=$stmt->fetch(PDO::FETCH_ASSOC);
         if(!$user||!(bool)$user['is_active'])return null;
@@ -254,7 +273,30 @@ final class Auth {
         unset($_SESSION['two_factor_login'],$_SESSION['two_factor_action']);
         $_SESSION['user_id']=(int)$user['id'];$_SESSION['username']=(string)$user['username'];$_SESSION['role']=(string)($user['role']??'viewer');$_SESSION['created_at']=$now;$_SESSION['last_seen_at']=$now;$_SESSION['rotated_at']=$now;$_SESSION['account_checked_at']=$now;$_SESSION['csrf']=bin2hex(random_bytes(32));
         if($secondFactor)$_SESSION['two_factor_verified_at']=$now;else unset($_SESSION['two_factor_verified_at']);
+        if(isset($user['password_hash']))$_SESSION['credential']=\CloudHub\Repositories\UserRepository::credentialStamp((string)$user['password_hash']);
         $pdo->prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?')->execute([(int)$user['id']]);
+    }
+
+    /**
+     * Keep this session signed in across a password change it made itself.
+     *
+     * Every other session of the account ends at its next account re-check,
+     * because its stamp no longer matches (revalidateAccount()); this one is
+     * given the new stamp, so it is not among them. It also moves to a new ID,
+     * rotated the way startSession() rotates -- the old ID lasts the grace
+     * window for requests already in flight, then retires -- so a copy of this
+     * very cookie in someone else's hands does not survive the change either.
+     */
+    public static function refreshCredential(PDO $pdo): void {
+        if(!isset($_SESSION['user_id']))return;
+        $status=(new \CloudHub\Repositories\UserRepository($pdo))->status((int)$_SESSION['user_id']);
+        if($status===null)return;
+        $now=time();
+        $_SESSION['credential']=$status['credential'];
+        $_SESSION['obsolete_after']=$now+self::ROTATION_GRACE_SECONDS;
+        session_regenerate_id(false);
+        unset($_SESSION['obsolete_after']);
+        $_SESSION['rotated_at']=$now;
     }
     public static function logout(): void {self::destroySession();}
     private static function destroySession(): void {

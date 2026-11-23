@@ -298,6 +298,15 @@ same username to reset that password. A role can be passed as a second
 argument — `php tools/create-admin.php alice editor` — which is how non-admin
 accounts were created before the Users screen existed.
 
+Leading and trailing spaces are not part of a password: the sign-in form, the
+Users screen and the tool all remove them (the tool says so when it does).
+
+Changing a password — under **Security**, from the Users screen, or with this
+tool — signs out every other session that used the old one within a minute,
+the Android app's included. The session that made the change carries on.
+Wrong guesses at the current password there count against the same limits as
+signing in.
+
 ## Two-step verification (SMS)
 
 Any account can add a second step to signing in: after the password, a

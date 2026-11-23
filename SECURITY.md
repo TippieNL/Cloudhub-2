@@ -129,6 +129,47 @@ application internals plus common secret, backup, SQL, log and INI artefacts.
 For an internet-facing NAS, keep `storage/files` outside the web document root
 where practical and terminate traffic with HTTPS.
 
+## Audit fixes (November 2026)
+
+Each of these was reproduced against a running server before it was fixed,
+and is covered by `tests/http/run.php` and `tests/phase50_audit_regressions_test.php`.
+
+- **Share links matched paths case- and accent-insensitively.** `file_path`
+  columns use `utf8mb4_unicode_ci`, where `/Photos` equals `/photos`. Moving the
+  folder `/photos` re-pointed the public link for `/Photos/a.txt` at
+  `/photos/a.txt` — a file nobody shared — and served it; sharing `/Photos/a.txt`
+  could hand back the existing link of `/photos/a.txt`; deleting one folder
+  revoked the other's links. Share links and the upload ledger now keep only
+  byte-exact matches, as favorites already did, and a share token is honoured
+  only exactly as issued. No schema change is needed.
+- **CloudHub's own top-level names could be taken.** Uploads (chunked and
+  multipart), move and copy build their destination from a folder and a name
+  without the reserved-name check client paths get, so a file called `.trash`
+  on a fresh install broke every delete, invisibly and irremovably. They are
+  refused at the top level (403); below it they remain ordinary names.
+- **Changing a password left other sessions signed in.** Sessions now carry a
+  digest of the password hash they signed in with; the once-a-minute account
+  re-check ends any whose password has since changed, as it does for a
+  disabled account. The changing session gets the new digest and a rotated ID.
+- **The current-password check on `/api/users/me/password` was unthrottled**,
+  an unlimited password oracle for a borrowed session. It now uses the sign-in
+  limits. The sign-in throttle itself counted and then recorded, so parallel
+  guesses all got through (9–10 checks against a limit of 5 with 8 workers);
+  attempts now claim their slot before the password is checked.
+- **Storage-server configs reached every account.** `/api/servers/active`
+  returned each server's whole config (host, username, and any credential not
+  named `password`, `privateKey` or `apiKey`) to viewers. It now returns name and
+  type only; administrators see every credential-like key masked, and server
+  input is validated.
+- **One non-UTF-8 file name took down its folder.** A Latin-1 name (as copied
+  from an old share) made the folder's listing and any search reaching it
+  answer 500 for everyone. Such names can no longer be created, and existing
+  ones are listed with U+FFFD and remain reachable over WebDAV.
+- Smaller: a WebDAV PUT whose body ends before its `Content-Length` is refused
+  rather than replacing the file with a fragment; `tools/create-admin.php`
+  trims passwords as the API does (an account made with surrounding spaces could
+  never sign in); `/play` shows a sign-in page rather than JSON when signed out.
+
 ## SMS two-step verification
 
 An account can require, after its password, a six-digit code texted to its

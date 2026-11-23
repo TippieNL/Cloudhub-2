@@ -429,12 +429,14 @@ final class TwoFactor
      */
     private function reauthenticate(int $userId, string $username, string $password): void
     {
-        $this->limiter->assertAllowed($username);
+        // Slots taken before the check, so parallel guesses count each other;
+        // a wrong password keeps them (LoginRateLimiter::beginAttempt()).
+        $attempt = $this->limiter->beginAttempt($username);
         if (!(new UserRepository($this->db))->verifyPassword($userId, $password)) {
-            $this->limiter->recordFailure($username);
             AuditLog::write($this->db, 'two_factor.reauth', 'failure');
             throw TwoFactorError::wrongPassword();
         }
+        $this->limiter->succeeded($attempt);
     }
 
     /* ---- the codes ------------------------------------------------------------ */

@@ -68,7 +68,12 @@ function handle_webdav(FileService $fs,array $config,string $path,string $method
   $in=fopen('php://input','rb');$tmp=$full.'.upload-'.bin2hex(random_bytes(6));
   $out=@fopen($tmp,'xb');if(!$in||!$out){if(is_resource($in))fclose($in);http_response_code(500);exit;}
   $ok=stream_copy_to_stream($in,$out)!==false;fclose($out);fclose($in);
-  $size=(int)(@filesize($tmp)?:0);
+  clearstatcache(true,$tmp);$size=(int)(@filesize($tmp)?:0);
+  // A body that stopped short of its declared length is a cut-off upload, not
+  // a file: renamed into place it replaced the original with a fragment. A
+  // SAPI that streams the body to PHP as it arrives (Apache's mod_php) hands
+  // over exactly that when the client drops partway.
+  if($ok&&ctype_digit($declared)&&$size!==(int)$declared){@unlink($tmp);http_response_code(400);exit;}
   // A chunked body never said how large it was, so it is measured instead.
   if($ok&&$fits&&!ctype_digit($declared)){try{$fits($size);}catch(\RuntimeException $e){@unlink($tmp);$refuse($e);}}
   if($ok&&$exists&&$replacing){try{$replacing($full);}catch(\RuntimeException){@unlink($tmp);http_response_code(500);exit;}}

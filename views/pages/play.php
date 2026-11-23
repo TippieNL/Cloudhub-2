@@ -1,4 +1,3 @@
-
 <?php
 /**
  * Standalone Cloud File Hub media player page.
@@ -86,6 +85,12 @@ $assets = htmlspecialchars($assetBase, ENT_QUOTES, 'UTF-8');
 <body class="player-page">
     <?php if (isset($mediaFile)): ?>
         <?php include __DIR__ . '/player_component.php'; ?>
+    <?php elseif (!empty($signedOut)): ?>
+        <main style="padding:24px;max-width:720px;margin:0 auto;">
+            <h1>Sign in to play this</h1>
+            <p>Your session has ended. Sign in again, then open the file from your files.</p>
+            <p><a href="<?= $front ?>">Sign in</a></p>
+        </main>
     <?php else: ?>
         <main style="padding:24px;max-width:720px;margin:0 auto;">
             <h1>Media not available</h1>

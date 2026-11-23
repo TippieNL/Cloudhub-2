@@ -2481,7 +2481,7 @@ $('#selection-download').addEventListener('click', downloadSelected);
 
 async function servers() {
     const list = await (await api('/api/servers')).json();
-    $('#server-list').innerHTML = list.map(s => `<div class="server"><strong>${esc(s.name)}</strong> <small>${s.type}${s.isDefault ? ' · default' : ''}${s.isActive ? ' · active' : ' · inactive'}</small><div class="actions"><button data-toggle="${s.id}">Toggle</button><button data-default="${s.id}">Set default</button><button data-sdel="${s.id}">Delete</button></div></div>`).join('');
+    $('#server-list').innerHTML = list.map(s => `<div class="server"><strong>${esc(s.name)}</strong> <small>${esc(s.type)}${s.isDefault ? ' · default' : ''}${s.isActive ? ' · active' : ' · inactive'}</small><div class="actions"><button data-toggle="${s.id}">Toggle</button><button data-default="${s.id}">Set default</button><button data-sdel="${s.id}">Delete</button></div></div>`).join('');
     
     document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', async () => {
         await api(`/api/servers/${b.dataset.toggle}/toggle`, { method: 'POST' });
@@ -3351,7 +3351,7 @@ async function route() {
     } else if (p === '/browse') {
         $('#browse-page').hidden = false;
         const a = await (await api('/api/servers/active')).json();
-        $('#active-servers').innerHTML = a.map(s => `<div class="server">${esc(s.name)} · ${s.type}</div>`).join('');
+        $('#active-servers').innerHTML = a.map(s => `<div class="server">${esc(s.name)} · ${esc(s.type)}</div>`).join('');
     } else {
         S.page = '/';
         $('#files-page').hidden = false;
