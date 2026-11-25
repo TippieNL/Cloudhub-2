@@ -384,9 +384,16 @@ checked. For Gmail:
 MAIL_DRIVER=smtp
 MAIL_HOST=smtp.gmail.com
 MAIL_USERNAME=you@gmail.com
-MAIL_PASSWORD=abcdefghijklmnop   # an app password: Google Account > Security >
-                                 # 2-Step Verification > App passwords, no spaces
+# An app password (Google Account > Security > 2-Step Verification > App
+# passwords), typed without the spaces Google shows it with.
+MAIL_PASSWORD=abcdefghijklmnop
 ```
+
+A comment in `.env` goes on a line of its own: after a value it becomes part
+of the value, and a password with a comment in it is refused at sign-in.
+Check the settings with `php tools/test-mail.php you@gmail.com`, which sends
+one test email or says why it could not: the setting at fault, or the mail
+server's answer (`535` at `auth` is a wrong username or app password).
 
 Port 587 with STARTTLS is the default; `MAIL_ENCRYPTION=ssl` uses 465.
 `MAIL_FROM` and `MAIL_FROM_NAME` set the sender (by default the account in

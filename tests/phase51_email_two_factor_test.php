@@ -197,6 +197,29 @@ $mode('ok');
 $checks['so is one that is not there'] = refusal(fn() => $client(1, 'none')->send('k@example.test', 's', 'b')) === 'MAIL:unavailable';
 $checks['STARTTLS that is not offered is a failure, never plain text'] = refusal(fn() => $client($plain, 'starttls')->send('k@example.test', 's', 'b')) === 'MAIL:unavailable';
 
+// tools/test-mail.php, the operator's check of the settings: a child process
+// reading them from its environment, which .env never overrides.
+$testMail = static function (array $env) use ($root, $plain): array {
+    $env += ['MAIL_DRIVER' => 'smtp', 'MAIL_HOST' => '127.0.0.1', 'MAIL_PORT' => (string)$plain, 'MAIL_ENCRYPTION' => 'none',
+        'MAIL_USERNAME' => 'cloudhub@example.test', 'MAIL_PASSWORD' => 'p4ss word', 'MAIL_FROM' => '', 'MAIL_FROM_NAME' => '',
+        'MAIL_TIMEOUT_SECONDS' => '3', 'APP_ENV' => 'production'];
+    $proc = proc_open([PHP_BINARY, $root.'/tools/test-mail.php', 'Kevin@Example.test'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $root, $env + getenv());
+    $out = stream_get_contents($pipes[1]).stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [proc_close($proc), trim((string)$out)];
+};
+[$status, $said] = $testMail([]);
+$checks['tools/test-mail.php sends one test email with the .env settings'] = $status === 0 && str_starts_with($said, 'Sent.')
+    && $lastReceived()['to'] === ['kevin@example.test'] && str_contains((string)$lastReceived()['data'], 'Subject: CloudHub test email');
+[$status, $said] = $testMail(['MAIL_PASSWORD' => 'n0t-the-app-password']);
+$checks['and says the mail server refused the sign-in, without the password or the address'] = $status === 1
+    && str_contains($said, 'auth answered 535') && !str_contains($said, 'n0t-the-app-password') && !str_contains(strtolower($said), 'kevin@');
+[$status, $said] = $testMail(['MAIL_HOST' => '']);
+$checks['or names the setting at fault'] = $status === 1 && str_contains($said, 'MAIL_HOST is missing');
+[$status, $said] = $testMail(['MAIL_DRIVER' => '']);
+$checks['or that no mail driver is set'] = $status === 1 && str_contains($said, 'MAIL_DRIVER is not set');
+
 if (extension_loaded('openssl')) {
     // A certificate for this run, trusted only through the CA option the client is handed.
     $cnf = $scratch.'/openssl.cnf';
@@ -433,6 +456,11 @@ $config = (string)file_get_contents($root.'/config/config.php');
 preg_match_all("/env\\('(MAIL_[A-Z_]+)'/", $config, $keys);
 $checks['and every MAIL_ setting the server reads is in it'] = count($keys[1]) >= 9
     && array_filter($keys[1], static fn(string $k): bool => !preg_match('/^'.$k.'=/m', $env)) === [];
+// .env has no comments after a value: config/bootstrap.php keeps the comment
+// as part of it, so a copied example would carry it into a password.
+preg_match_all('/^[A-Z][A-Z0-9_]*=.*$/m', $env."\n".(string)file_get_contents($root.'/README.md'), $settings);
+$checks['no example setting has a comment after its value, which .env would read as part of it'] = count($settings[0]) > 20
+    && array_filter($settings[0], static fn(string $line): bool => (bool)preg_match('/\s#/', $line)) === [];
 
 } catch (Throwable $e) {
     $checks['the scenarios ran to the end ('.get_class($e).': '.$e->getMessage().' at line '.$e->getLine().')'] = false;
