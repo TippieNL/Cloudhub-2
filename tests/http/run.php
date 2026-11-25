@@ -1574,6 +1574,173 @@ scenario('the Favorites page is served', function () use ($client) {
     check('the page loads', $page->status === 200 && str_contains($page->body, 'id="favorites-page"'), (string)$page->status);
 });
 
+/* ---- audit regressions ----------------------------------------------------------- */
+
+scenario('CloudHub\'s own folder names cannot be taken at the top level', function () use ($client, $scratch) {
+    // A file called .trash uploaded to the root of a fresh install took the
+    // trash's place: every delete after it was a 500, and the file was hidden
+    // from every listing and refused by every route, so nobody could remove it.
+    foreach (['.trash', '.versions', '.thumbnails', '.TRASH', '.versions.'] as $name) {
+        $init = $client->post('/api/uploads/init', ['targetPath' => '/', 'name' => $name, 'size' => 3,
+            'uploadId' => 'rsv'.bin2hex(random_bytes(6))]);
+        check("a chunked upload named $name at the root is refused", $init->status === 403, $init->describe());
+    }
+    $multipart = $client->multipart('/api/files/upload', ['targetPath' => '/'], ['.trash' => 'zz']);
+    check('so is a multipart upload', $multipart->status === 403, $multipart->describe());
+
+    // Below the root the name is the user's own, and stays usable.
+    $nested = $client->post('/api/uploads/init', ['targetPath' => $scratch, 'name' => '.trash', 'size' => 3,
+        'uploadId' => 'rsv'.bin2hex(random_bytes(6))]);
+    check('a .trash in a folder of one\'s own is fine', $nested->ok(), $nested->describe());
+    if ($nested->ok()) $client->post('/api/uploads/cancel', ['id' => $nested->json['id']]);
+
+    $client->post('/api/files/mkdir', ['path' => $scratch.'/.versions']);
+    $copied = $client->post('/api/files/copy', ['paths' => [$scratch.'/.versions'], 'destination' => '/']);
+    check('a folder of one\'s own called .versions is not copied to the top', ($copied->json['completed'] ?? -1) === 0
+        && count($copied->json['failed'] ?? []) === 1, $copied->describe());
+    $moved = $client->post('/api/files/move', ['paths' => [$scratch.'/.versions'], 'destination' => '/']);
+    check('nor moved there', ($moved->json['completed'] ?? -1) === 0
+        && count($moved->json['failed'] ?? []) === 1, $moved->describe());
+});
+
+scenario('a name that is not UTF-8 cannot take a folder\'s listing down', function () use ($client, $root, $scratch) {
+    // As a NAS acquires one: a Latin-1 name, from an old share or a WebDAV client.
+    $put = $client->dav('PUT', '/webdav'.$scratch.'/caf%E9.txt', [], 'latin-1');
+    check('a new name that is not UTF-8 is refused', $put->status === 400, (string)$put->status);
+    $multipart = $client->multipart('/api/files/upload', ['targetPath' => $scratch], ["bad\xFFname.txt" => 'zz']);
+    check('over multipart too', $multipart->status === 400, $multipart->describe());
+
+    // One already on the disk, put there by something other than CloudHub.
+    $dir = realpath($root.'/'.(getenv('ROOT_DIR') ?: 'storage/files'));
+    if ($dir === false || !is_dir($dir.$scratch)) return;
+    file_put_contents($dir.$scratch."/legacy-caf\xE9.txt", 'legacy');
+    try {
+        $list = $client->get('/api/files/list', ['path' => $scratch]);
+        check('the folder still lists', $list->ok(), $list->describe());
+        check('the name arrives with a replacement character', in_array("legacy-caf\u{FFFD}.txt", array_column($list->json ?? [], 'name'), true));
+        $search = $client->get('/api/files/search', ['path' => $scratch, 'q' => 'legacy-caf']);
+        check('and search still answers', $search->ok()
+            && in_array("legacy-caf\u{FFFD}.txt", array_column($search->json['results'] ?? [], 'name'), true), $search->describe());
+        $dav = $client->dav('GET', '/webdav'.$scratch.'/legacy-caf%E9.txt');
+        check('the file is still served by its real name', $dav->status === 200 && $dav->body === 'legacy', (string)$dav->status);
+    } finally {
+        @unlink($dir.$scratch."/legacy-caf\xE9.txt");
+    }
+});
+
+scenario('/Photos and /photos are two folders to share links and the ledger', function () use ($client, $base, $scratch) {
+    // file_path compares case- and accent-insensitively in MySQL. Moving
+    // /photos used to re-point the public link of /Photos/a.txt at
+    // /photos/a.txt -- a file nobody shared -- which it then served.
+    $upload = function (string $dir, string $body) use ($client): void {
+        $init = $client->post('/api/uploads/init', ['targetPath' => $dir, 'name' => 'a.txt', 'size' => strlen($body),
+            'uploadId' => 'ci'.bin2hex(random_bytes(8)), 'conflict' => 'overwrite']);
+        $client->putChunk($init->json['id'] ?? '', 0, $body);
+        $client->post('/api/uploads/complete', ['id' => $init->json['id'] ?? '']);
+    };
+    $base2 = $scratch.'/case';
+    foreach ([$base2, "$base2/Photos", "$base2/photos", "$base2/old"] as $d) $client->post('/api/files/mkdir', ['path' => $d]);
+    $upload("$base2/photos", 'lowercase, shared first');
+    $upload("$base2/Photos", 'capital, shared on purpose');
+    $anon = new Client($base);
+
+    $lower = $client->post('/api/shares/create', ['filePath' => "$base2/photos/a.txt"]);
+    $upper = $client->post('/api/shares/create', ['filePath' => "$base2/Photos/a.txt"]);
+    check('each file gets its own link', ($lower->json['token'] ?? 'x') !== ($upper->json['token'] ?? 'x'), $upper->describe());
+    $url = (string)($upper->json['url'] ?? '');
+    check('the link serves the file it was made for', $anon->fetchUrl($url)->body === 'capital, shared on purpose');
+
+    $client->post('/api/files/move', ['paths' => ["$base2/photos"], 'destination' => "$base2/old"]);
+    $after = $anon->fetchUrl($url);
+    check('moving the other folder leaves the link alone', $after->status === 200 && $after->body === 'capital, shared on purpose',
+        $after->status.' '.substr($after->body, 0, 40));
+    $client->delete('/api/files/delete', ['path' => "$base2/old/photos"]);
+    check('deleting the other folder does not revoke it', $anon->fetchUrl($url)->status === 200);
+
+    $token = (string)($upper->json['token'] ?? '');
+    $flipped = strtoupper($token) !== $token ? strtoupper($token) : strtolower($token);
+    check('a token is only honoured as issued', $anon->fetchUrl($base.'/share/'.$flipped.'/raw')->status === 404);
+});
+
+scenario('changing a password cannot be used to guess the current one', function () use ($client, $base) {
+    // Unthrottled, this answered any number of guesses at the current password
+    // from a borrowed session -- the one place the sign-in limits missed. Its
+    // own account, so the throttle it trips locks nobody else's tests out.
+    $name = 'pwguess'.bin2hex(random_bytes(3));
+    $made = $client->post('/api/users', ['username' => $name, 'password' => 'guess-test-pass-123', 'role' => 'viewer']);
+    $id = (int)($made->json['id'] ?? 0);
+    check('a throwaway account', $id > 0, $made->describe());
+    if ($id <= 0) return;
+    try {
+        $borrowed = new Client($base);
+        $borrowed->signIn($name, 'guess-test-pass-123');
+        $answers = [];
+        for ($i = 0; $i < 6; $i++) {
+            $answers[] = $borrowed->post('/api/users/me/password',
+                ['currentPassword' => 'not-it-'.$i, 'newPassword' => 'taken-over-pass-123'])->status;
+        }
+        check('five wrong guesses are answered, then refused', $answers === [403, 403, 403, 403, 403, 429], implode(',', $answers));
+        $right = $borrowed->post('/api/users/me/password', ['currentPassword' => 'guess-test-pass-123', 'newPassword' => 'taken-over-pass-123']);
+        check('and while refused, even the right one is not checked', $right->status === 429, (string)$right->status);
+    } finally {
+        $client->delete('/api/users/'.$id);
+    }
+});
+
+scenario('a storage server\'s credentials stay with the administrator', function () use ($client, $base) {
+    $made = $client->post('/api/servers', ['name' => 'audit-nas', 'type' => 'sftp', 'isActive' => true,
+        'config' => ['host' => '10.0.0.5', 'username' => 'backup', 'password' => 'p4ss', 'passphrase' => 'key-phrase', 'token' => 'tok-123']]);
+    $id = (int)($made->json['id'] ?? 0);
+    check('an administrator adds one', $id > 0, $made->describe());
+    if ($id <= 0) return;
+    try {
+        $viewer = new Client($base);
+        $viewer->signIn(getenv('CLOUDHUB_VIEWER_USER') ?: 'viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+        $active = $viewer->get('/api/servers/active');
+        $mine = array_values(array_filter($active->json ?? [], static fn($s) => ($s['id'] ?? 0) === $id));
+        check('a viewer sees that it exists', $active->ok() && count($mine) === 1, $active->describe());
+        check('and nothing of its config', !array_key_exists('config', $mine[0] ?? []) && !str_contains($active->body, '10.0.0.5')
+            && !str_contains($active->body, 'key-phrase') && !str_contains($active->body, 'tok-123'), $active->body);
+
+        $admin = $client->get('/api/servers/'.$id);
+        check('an administrator sees every credential masked', !str_contains($admin->body, 'p4ss')
+            && !str_contains($admin->body, 'key-phrase') && !str_contains($admin->body, 'tok-123')
+            && ($admin->json['config']['host'] ?? '') === '10.0.0.5', $admin->body);
+
+        $put = $client->put('/api/servers/'.$id, (string)json_encode(['config' => $admin->json['config'] ?? []]), [],
+            ['Content-Type: application/json']);
+        check('saving the form back unchanged keeps the stored secrets', $put->ok(), $put->describe());
+
+        foreach ([['name' => ['a'], 'type' => 'ftp', 'config' => []], ['name' => 'x', 'type' => '<img src=x>', 'config' => []],
+                  ['name' => 'x', 'type' => 'ftp', 'config' => 'not-an-object']] as $bad) {
+            $r = $client->post('/api/servers', $bad);
+            check('a malformed server is refused, not stored: '.json_encode($bad), $r->status === 422, $r->describe());
+        }
+    } finally {
+        $client->delete('/api/servers/'.$id);
+    }
+});
+
+scenario('an administrator is told why codes cannot be sent, and nobody else is', function () use ($client, $base) {
+    // A refused gateway was named only in PHP's error log; the Security panel
+    // said "no text-message service is set up" to an administrator who had set
+    // one up. This server's .env decides whether codes can be sent at all.
+    $admin = $client->get('/api/users/me/two-factor');
+    check('the overview answers', $admin->ok(), $admin->describe());
+    if (($admin->json['smsAvailable'] ?? true) === true || ($admin->json['emailAvailable'] ?? true) === true) {
+        check('a working gateway or mail server needs no explanation', !array_key_exists('smsProblem', $admin->json ?? [])
+            || !array_key_exists('mailProblem', $admin->json ?? []), $admin->body);
+        return;
+    }
+    $problem = (string)($admin->json['smsProblem'] ?? $admin->json['mailProblem'] ?? '');
+    check('an administrator is told which setting is at fault', str_contains($problem, 'SMS_') || str_contains($problem, 'MAIL_'), $admin->body);
+    $viewer = new Client($base);
+    $viewer->signIn(getenv('CLOUDHUB_VIEWER_USER') ?: 'viewer', getenv('CLOUDHUB_VIEWER_PASS') ?: 'viewer-test-pass-123');
+    $theirs = $viewer->get('/api/users/me/two-factor');
+    check('anyone else is not', $theirs->ok() && !array_key_exists('smsProblem', $theirs->json ?? [])
+        && !array_key_exists('mailProblem', $theirs->json ?? []), $theirs->body);
+});
+
 scenario('tidying the scratch folder', function () use ($client, $scratch) {
     $client->delete('/api/files/delete', ['path' => $scratch]);
     $trash = $client->get('/api/trash');

@@ -16,7 +16,8 @@ import nl.tippie.cloudhub.net.TwoFactorOverview
 import nl.tippie.cloudhub.net.TwoFactorStage
 
 /**
- * The account's own SMS two-step verification, as Settings shows it.
+ * The account's own two-step verification -- codes by text message or by
+ * email -- as Settings shows it.
  *
  * Every change is the server's two calls -- start (the current password, and
  * for a number the number) and confirm (the texted code) -- so the screen is
@@ -27,7 +28,9 @@ import nl.tippie.cloudhub.net.TwoFactorStage
 /** What a change does. Turning it on and moving it are the same call on the server. */
 enum class TwoFactorAction(val wire: String) {
     TURN_ON("phone"),
+    TURN_ON_EMAIL("email"),
     CHANGE_PHONE("phone"),
+    CHANGE_EMAIL("email"),
     NEW_RECOVERY_CODES("recovery"),
     TURN_OFF("disable"),
 }
@@ -50,8 +53,12 @@ sealed interface TwoFactorStep {
     ) : TwoFactorStep {
         fun resendWait(now: Long): Int = if (resendAt <= now) 0 else ((resendAt - now + 999) / 1000).toInt()
 
+        val byEmail: Boolean get() = stage.channel == "email"
+
         val prompt: String get() = when {
-            recovery -> "Enter one of your recovery codes in place of a code from your current phone."
+            recovery -> "Enter one of your recovery codes in place of a code from your current phone or email."
+            byEmail && stage.stage == "current" -> "Enter the code we sent to ${stage.destination ?: "your email address"}, where codes go now."
+            byEmail -> "Enter the code we sent to ${stage.destination ?: "your email address"}. If it does not arrive, look in your spam folder."
             stage.stage == "current" -> "Enter the code we sent to your current phone number, ending in ${stage.phoneEnding ?: "••"}."
             else -> "Enter the code we sent to the number ending in ${stage.phoneEnding ?: "••"}."
         }
@@ -95,17 +102,37 @@ class ApiTwoFactorCalls(private val api: CloudHubApi) : TwoFactorCalls {
 /** Words for the screen, decided without one. */
 object TwoFactorText {
 
+    /** Where codes go, in words: a masked address, or a number's last two digits. */
+    fun where(channel: String?, destination: String?, phoneEnding: String?): String =
+        if (channel == "email") destination ?: "your email address" else "your phone number ending in ${phoneEnding ?: "••"}"
+
     /** The line under the On/Off badge. */
-    fun summary(o: TwoFactorOverview): String = when {
+    fun summary(o: TwoFactorOverview): String = status(o) +
+        // Administrators are told which .env setting is at fault, as in the web app.
+        listOfNotNull(o.smsProblem, o.mailProblem).filter { it.isNotBlank() }.joinToString("") { " Server setting: $it." }
+
+    private fun status(o: TwoFactorOverview): String = when {
         o.enabled -> buildString {
             val left = o.recoveryCodesLeft
-            append("Signing in asks for a code texted to your phone number ending in ${o.phoneEnding ?: "••"}. ")
+            val email = o.channel == "email"
+            if (email) append("Signing in asks for a code emailed to ${o.destination ?: "your email address"}. ")
+            else append("Signing in asks for a code texted to your phone number ending in ${o.phoneEnding ?: "••"}. ")
             append("$left recovery code${if (left == 1) "" else "s"} left.")
-            if (!o.smsAvailable) append(" This server cannot send text messages right now: sign in with a recovery code until it can.")
-            else if (left <= 2) append(" Create new ones soon.")
+            // codeAvailable comes from servers that also send email; older ones only say smsAvailable.
+            if (!(o.codeAvailable ?: o.smsAvailable)) {
+                append(" This server cannot send ${if (email) "email" else "text messages"} right now: sign in with a recovery code until it can.")
+            } else if (left <= 2) append(" Create new ones soon.")
         }
         !o.schemaReady -> "Not available yet: the server's database needs updating (php database/migrate.php)."
-        !o.smsAvailable -> "Not available: no text-message service is set up on this server. An administrator can configure one."
+        // Not "nothing is set up" when something is set up and refused: an
+        // administrator is told which setting below.
+        !o.smsAvailable && !o.emailAvailable -> if (!o.smsProblem.isNullOrBlank() || !o.mailProblem.isNullOrBlank()) {
+            "Not available: this server cannot send codes."
+        } else {
+            "Not available: this server has no text-message or email service set up. An administrator can configure one."
+        }
+        o.smsAvailable && o.emailAvailable -> "Off. Turn it on to be asked, after your password, for a code sent by email or text message."
+        o.emailAvailable -> "Off. Turn it on to be asked, after your password, for a code sent to your email."
         else -> "Off. Turn it on to be asked, after your password, for a code texted to your phone."
     }
 
@@ -115,19 +142,25 @@ object TwoFactorText {
         return when (action) {
             TwoFactorAction.TURN_ON ->
                 "Enter the mobile number to send codes to, and your password. We will text a code to that number to make sure it is yours."
+            TwoFactorAction.TURN_ON_EMAIL ->
+                "Enter the email address to send codes to, and your password. We will email a code to it to make sure it is yours."
             TwoFactorAction.CHANGE_PHONE ->
                 "Enter your new mobile number and your password. We will text a code to the new number, and first to your current one unless you have just used it."
+            TwoFactorAction.CHANGE_EMAIL ->
+                "Enter the email address to send codes to, and your password. We will email a code to it, and first send one to where codes go now unless you have just used it."
             TwoFactorAction.TURN_OFF ->
-                "Enter your password. We will text a code to your phone number ending in $ending to confirm it is you."
+                if (o?.channel == "email") "Enter your password. We will email a code to ${o?.destination ?: "your email address"} to confirm it is you."
+                else "Enter your password. We will text a code to your phone number ending in $ending to confirm it is you."
             TwoFactorAction.NEW_RECOVERY_CODES ->
-                "Enter your password. We will text a code to your phone number ending in $ending. Your current recovery codes then stop working."
+                if (o?.channel == "email") "Enter your password. We will email a code to ${o?.destination ?: "your email address"}. Your current recovery codes then stop working."
+                else "Enter your password. We will text a code to your phone number ending in $ending. Your current recovery codes then stop working."
         }
     }
 
     /** The recovery codes as a note to keep. */
     fun codesNote(codes: List<String>, username: String?, server: String): String = buildString {
         append("Recovery codes for ${username ?: "your account"} ($server)\n")
-        append("Each signs you in once in place of a texted code. Keep them somewhere safe.\n\n")
+        append("Each signs you in once in place of a code sent to your phone or email. Keep them somewhere safe.\n\n")
         codes.forEach { append(it).append('\n') }
     }
 }
@@ -171,17 +204,20 @@ class TwoFactorModel(
     }
 
     /**
-     * The password, and for a number the number. With [useRecoveryCode] the
-     * current phone will be answered with a recovery code, and nothing is
-     * texted to it -- the way through for someone whose phone is gone.
+     * The password, and for a number or an address that number or address
+     * (in [phone], whichever it is). With [useRecoveryCode] the current phone
+     * or address will be answered with a recovery code, and nothing is sent
+     * to it -- the way through for someone whose phone is gone.
      */
     fun submitStart(password: String, phone: String, useRecoveryCode: Boolean = false) {
         val ui = _state.value
         val start = ui.step as? TwoFactorStep.Start ?: return
         if (ui.busy) return
-        val wantsPhone = start.action.wire == "phone"
+        val wantsPhone = start.action.wire == "phone" || start.action.wire == "email"
         val number = phone.trim()
         when {
+            start.action.wire == "email" && number.isEmpty() ->
+                return update { it.copy(message = TwoFactorMessage("Enter the email address to send codes to.", true)) }
             wantsPhone && number.isEmpty() ->
                 return update { it.copy(message = TwoFactorMessage("Enter your mobile number, starting with + and the country code.", true)) }
             password.isEmpty() ->
@@ -231,7 +267,9 @@ class TwoFactorModel(
                         current.copy(
                             busy = false,
                             step = step.copy(stage = stage, resendAt = now + stage.resendIn * 1000L),
-                            message = TwoFactorMessage("A new code is on its way to the number ending in ${stage.phoneEnding ?: "••"}.", false),
+                            message = TwoFactorMessage(
+                                if (stage.channel == "email") "A new code is on its way to ${stage.destination ?: "your email address"}."
+                                else "A new code is on its way to the number ending in ${stage.phoneEnding ?: "••"}.", false),
                         )
                     },
                     onFailure = { e ->
@@ -257,7 +295,7 @@ class TwoFactorModel(
         val value = CodeInput.clean(typed.trim(), step.recovery, step.stage.codeLength)
         if (value.isBlank()) {
             return update { it.copy(message = TwoFactorMessage(
-                if (step.recovery) "Enter a recovery code." else "Enter the code from the text message.", true)) }
+                if (step.recovery) "Enter a recovery code." else "Enter the code from the ${if (step.byEmail) "email" else "text message"}.", true)) }
         }
         val wasOn = ui.overview?.enabled == true
         update { it.copy(busy = true, message = null) }
@@ -281,13 +319,16 @@ class TwoFactorModel(
                                     resendAt = now + 1000L * (if (stage.sent) stage.resendIn else stage.error?.retryAfter ?: 0),
                                 ),
                                 message = stage.error?.let { TwoFactorMessage(it.message, true) }
-                                    ?: TwoFactorMessage("Thanks. Now enter the code we sent to your new number ending in ${stage.phoneEnding ?: "••"}.", false),
+                                    ?: TwoFactorMessage(
+                                        if (stage.channel == "email") "Thanks. Now enter the code we sent to ${stage.destination ?: "the new address"}."
+                                        else "Thanks. Now enter the code we sent to your new number ending in ${stage.phoneEnding ?: "••"}.", false),
                             )
                             stage.recoveryCodes != null -> current.copy(
                                 busy = false,
                                 step = TwoFactorStep.Codes(stage.recoveryCodes),
                                 message = TwoFactorMessage(
                                     if (wasOn) "New recovery codes are ready. The old ones no longer work."
+                                    else if (stage.channel == "email") "Two-step verification is on. Signing in will now ask for a code emailed to ${stage.destination ?: "your email address"}."
                                     else "Two-step verification is on. Signing in will now ask for a code texted to your phone.",
                                     false,
                                 ),
@@ -296,7 +337,8 @@ class TwoFactorModel(
                                 busy = false,
                                 step = TwoFactorStep.Summary,
                                 message = TwoFactorMessage(
-                                    if (stage.enabled == true) "Done. Codes now go to your phone number ending in ${stage.phoneEnding ?: "••"}."
+                                    if (stage.enabled == true && stage.channel == "email") "Done. Codes now go to ${stage.destination ?: "your email address"}."
+                                    else if (stage.enabled == true) "Done. Codes now go to your phone number ending in ${stage.phoneEnding ?: "••"}."
                                     else "Two-step verification is off. Signing in takes your password only.",
                                     false,
                                 ),

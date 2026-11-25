@@ -36,11 +36,13 @@ foreach (['two_factor_phone', 'two_factor_enabled_at'] as $column) {
         && str_contains($sql, "'ALTER TABLE users ADD COLUMN $column $defined'");
 }
 
-// An installation whose login_attempts predates the new scopes gets them.
-$enum = preg_match("/MODIFY scope ENUM\\(([^)]*)\\) NOT NULL\"\\)/", $migrate, $m) ? $m[1] : null;
-$checks['the scope ENUM is extended to the same values'] = $enum !== null
-    && str_contains($sql, 'MODIFY scope ENUM('.str_replace("'", "''", $enum).') NOT NULL')
-    && str_contains($sql, "LOCATE('''sms_phone''', @type)=0");
+// An installation whose login_attempts predates the new scopes gets them: the
+// values migrate.php adds, in its order, and nothing done where they are there.
+$needed = preg_match("/SchemaEnum::withAdded\\(\\\$scopeType, \\[([^\\]]*)\\]\\)/", $migrate, $m)
+    ? array_map(static fn(string $v): string => trim($v, " '"), explode(',', $m[1])) : [];
+$checks['the scope ENUM is extended to the same values'] = count($needed) === 7
+    && str_contains($sql, 'MODIFY scope ENUM('.implode(',', array_map(static fn(string $v): string => "''$v''", $needed)).') NOT NULL')
+    && str_contains($sql, "IF(@type IS NULL OR LOCATE('''sms_phone''', @type)>0, 'SELECT 1'");
 
 // Runs as pasted, in either database, in either quoting mode. The comments
 // name what is avoided, so only the statements are read.

@@ -71,9 +71,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 
 SET @type := (SELECT COLUMN_TYPE FROM information_schema.COLUMNS
   WHERE TABLE_SCHEMA=@db AND TABLE_NAME='login_attempts' AND COLUMN_NAME='scope');
-SET @sql := IF(@type IS NOT NULL AND LOCATE('''sms_phone''', @type)=0,
-  'ALTER TABLE login_attempts MODIFY scope ENUM(''user'',''ip'',''verify_user'',''verify_ip'',''sms_user'',''sms_ip'',''sms_phone'') NOT NULL',
-  'SELECT 1');
+-- A database the email-only build of two-step verification migrated has
+-- email_user, email_ip and email_address instead of the sms_ values: those
+-- are kept, so its rows keep their meaning too.
+SET @sql := IF(@type IS NULL OR LOCATE('''sms_phone''', @type)>0, 'SELECT 1',
+  IF(LOCATE('''email_address''', @type)>0,
+    'ALTER TABLE login_attempts MODIFY scope ENUM(''user'',''ip'',''verify_user'',''verify_ip'',''email_user'',''email_ip'',''email_address'',''sms_user'',''sms_ip'',''sms_phone'') NOT NULL',
+    'ALTER TABLE login_attempts MODIFY scope ENUM(''user'',''ip'',''verify_user'',''verify_ip'',''sms_user'',''sms_ip'',''sms_phone'') NOT NULL'));
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

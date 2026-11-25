@@ -82,6 +82,8 @@ final class UploadService
         $safeName = $this->files->safeName($name);
         $targetDir = $this->files->existing($targetPath);
         if (!is_dir($targetDir)) throw new RuntimeException('Upload target is not a directory', 400);
+        // Refused before a byte is staged, rather than at complete().
+        $this->files->assertNotReserved($targetDir.'/'.$safeName);
 
         $id = preg_replace('/[^a-zA-Z0-9_-]/', '', $clientId);
         if ($id === '') $id = bin2hex(random_bytes(16));
@@ -299,6 +301,8 @@ final class UploadService
 
         $targetDir = $this->files->existing((string)$meta['targetPath']);
         $dest = $targetDir.'/'.$meta['name'];
+        // Again here: a session staged by an earlier build was never checked.
+        $this->files->assertNotReserved($dest);
         $policy = $this->normaliseConflict((string)$meta['conflict']);
 
         if (file_exists($dest)) {

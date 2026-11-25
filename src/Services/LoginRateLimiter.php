@@ -39,6 +39,40 @@ final class LoginRateLimiter {
   }
  }
 
+ /**
+  * Take a password attempt's slots -- one for the account, one for the client
+  * address -- before the password is checked.
+  *
+  * assertAllowed() counts the failures already recorded and recordFailure()
+  * adds one only after the hash has been checked, so requests sent together all
+  * saw the same few failures and all went ahead: with five allowed, a burst of
+  * parallel guesses at one account was a password check each. Here the slot is
+  * taken first, as claim() does for two-step verification, so attempts in
+  * flight count one another; at worst one is refused that need not have been.
+  *
+  * The slots of a wrong password are kept -- they are the record of the
+  * failure. Hand those of a right one to succeeded(). Refused: 429, with the
+  * slots already given back.
+  *
+  * @return list<int>
+  */
+ public function beginAttempt(string $username): array {
+  $this->cleanupOccasionally();
+  $window=max(60,(int)($this->config['login_rate_window_seconds']??900));
+  $userMax=max(1,(int)($this->config['login_rate_user_attempts']??5));
+  $ipMax=max($userMax,(int)($this->config['login_rate_ip_attempts']??20));
+  $user=$this->claim('user',$this->normaliseUser($username),$userMax,$window);
+  if($user===null)throw new \RuntimeException('Too many login attempts. Try again later.',429);
+  $ip=$this->claim('ip',$this->clientIp(),$ipMax,$window);
+  if($ip===null){$this->release($user);throw new \RuntimeException('Too many login attempts. Try again later.',429);}
+  return [$user,$ip];
+ }
+
+ /** The password was right: its slots were never a failure. @param list<int> $slots */
+ public function succeeded(array $slots): void {
+  foreach($slots as $slot)$this->release((int)$slot);
+ }
+
  public function recordFailure(string $username): void {
   $now=gmdate('Y-m-d H:i:s');
   $stmt=$this->pdo->prepare('INSERT INTO login_attempts (scope, attempt_key, attempted_at) VALUES (?,?,?)');

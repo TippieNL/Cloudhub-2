@@ -29,9 +29,14 @@ if (!in_array($role, [Authorization::VIEWER, Authorization::EDITOR, Authorizatio
 
 fwrite(STDOUT, 'Password: ');
 if (function_exists('shell_exec')) { @shell_exec('stty -echo 2>/dev/null'); }
-$password = rtrim((string)fgets(STDIN), "\r\n");
+$typed = rtrim((string)fgets(STDIN), "\r\n");
 if (function_exists('shell_exec')) { @shell_exec('stty echo 2>/dev/null'); }
 fwrite(STDOUT, PHP_EOL);
+// Trimmed as every API route trims it (Http::string()). Stored with its
+// surrounding spaces, the password matched neither what the sign-in form
+// sends -- trimmed -- nor anything else, and the account could never sign in.
+$password = trim($typed);
+if ($password !== $typed) fwrite(STDERR, "Note: leading and trailing spaces are not part of a password; they were removed.\n");
 
 if (strlen($password) < 12) { fwrite(STDERR, "Password must be at least 12 characters.\n"); exit(1); }
 

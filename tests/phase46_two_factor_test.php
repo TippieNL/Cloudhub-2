@@ -273,6 +273,17 @@ $checks['but allowed to this machine or the LAN, and over https anywhere'] =
     Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'http://127.0.0.1:8080/m'], $scratch) instanceof WebhookSms
     && Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'http://192.168.1.20:8080/m'], $scratch) instanceof WebhookSms
     && Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => 'https://sms.example.com/x'], $scratch) instanceof WebhookSms;
+// A gateway phone given its Tailscale address -- stable when DHCP is not --
+// was refused, which turned texts off for everyone with no word but a log line.
+$hook = static fn(string $url) => Sms::fromConfig(['sms_driver' => 'webhook', 'sms_webhook_url' => $url], $scratch);
+$checks['and to the same Tailscale network, by address or MagicDNS name'] =
+    $hook('http://100.90.78.46:8082/') instanceof WebhookSms && $hook('http://100.64.0.1:8082/') instanceof WebhookSms
+    && $hook('http://100.127.255.254:8082/') instanceof WebhookSms && $hook('http://[fd7a:115c:a1e0::1]:8082/') instanceof WebhookSms
+    && $hook('http://pixel.tail1234.ts.net:8082/') instanceof WebhookSms && $hook('http://phone.local:8082/') instanceof WebhookSms;
+$checks['but not just outside that range, nor to names that only look alike'] =
+    $hook('http://100.63.255.255:8082/') === null && $hook('http://100.128.0.1:8082/') === null
+    && $hook('http://evil-ts.net/') === null && $hook('http://ts.net.attacker.example/') === null
+    && $hook('http://[2001:db8::1]/') === null;
 $checks['an unknown driver is no gateway'] = Sms::fromConfig(['sms_driver' => 'pigeon'], $scratch) === null;
 
 // --- the repository's compare-and-set ------------------------------------------------
@@ -302,7 +313,7 @@ $checks['a recovery code is spent once'] = $repo->useRecoveryCode(1, 'h1') && !$
 $checks["and only by its own account"] = !$repo->useRecoveryCode(2, 'h2') && $repo->recoveryCodesLeft(1) === 1;
 $repo->replaceRecoveryCodes(1, ['h3']);
 $checks['replacing them retires the old ones'] = !$repo->useRecoveryCode(1, 'h2') && $repo->recoveryCodesLeft(1) === 1;
-$checks['every account starts with it off'] = $repo->state(1) === ['enabled' => false, 'phone' => null, 'enabledAt' => null]
+$checks['every account starts with it off'] = $repo->state(1) === ['enabled' => false, 'phone' => null, 'email' => null, 'enabledAt' => null]
     && !$repo->requiredFor(2) && $repo->state(999) === null;
 $checks['turning it on reports that it did, once'] = $repo->enable(1, '+31612345678') && !$repo->enable(1, '+31687654321')
     && $repo->state(1)['phone'] === '+31687654321';
@@ -314,7 +325,7 @@ $bare = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMOD
 $bare->exec("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, is_active INTEGER, role TEXT)");
 $bare->exec("INSERT INTO users VALUES (1, 'legacy', '', 1, 'viewer')");
 $legacy = new TwoFactorRepository($bare);
-$checks['a database not yet migrated reads as off, for everyone'] = $legacy->state(1) === ['enabled' => false, 'phone' => null, 'enabledAt' => null]
+$checks['a database not yet migrated reads as off, for everyone'] = $legacy->state(1) === ['enabled' => false, 'phone' => null, 'email' => null, 'enabledAt' => null]
     && !$legacy->schemaReady() && $legacy->enabledUserIds() === [];
 $checks['and so does the session check'] = (new CloudHub\Repositories\UserRepository($bare))->status(1)['twoFactor'] === false;
 $down = new class('sqlite::memory:') extends PDO {
@@ -511,7 +522,7 @@ $checks['moving to the number already in use is refused'] = refusal(fn() => $tf-
 $now += TwoFactor::RECENT_SECONDS + 61; $sms->sent = [];
 $later = $tf->startAction(2, 'bob', 'phone', 'bob-pass-12345', '+31633333333');
 $checks['without a recent proof, the current phone is asked for first'] = $later['stage'] === 'current' && $sms->sent[0]['to'] === '+31622222222'
-    && str_contains($sms->sent[0]['message'], 'to change your two-step verification number') && $later['recoveryAllowed'] === true;
+    && str_contains($sms->sent[0]['message'], 'to change where your two-step verification codes go') && $later['recoveryAllowed'] === true;
 $next = $tf->confirmAction(2, $sms->lastCode(), null);
 $checks['then the new number\'s code'] = $next['done'] === false && $next['stage'] === 'new' && end($sms->sent)['to'] === '+31633333333';
 $tf->confirmAction(2, $sms->lastCode(), null);

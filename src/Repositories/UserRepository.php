@@ -59,17 +59,37 @@ final class UserRepository
     public function status(int $id): ?array
     {
         try {
-            $stmt = $this->db->prepare('SELECT role, is_active, two_factor_enabled_at FROM users WHERE id = ?');
+            $stmt = $this->db->prepare('SELECT role, is_active, password_hash, two_factor_enabled_at FROM users WHERE id = ?');
             $stmt->execute([$id]);
         } catch (\PDOException $e) {
             if (!TwoFactorRepository::missingSchema($e)) throw $e;
-            $stmt = $this->db->prepare('SELECT role, is_active, NULL AS two_factor_enabled_at FROM users WHERE id = ?');
+            $stmt = $this->db->prepare('SELECT role, is_active, password_hash, NULL AS two_factor_enabled_at FROM users WHERE id = ?');
             $stmt->execute([$id]);
         }
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$row) return null;
         return ['role' => self::normaliseRole((string)$row['role']), 'isActive' => (bool)$row['is_active'],
-            'twoFactor' => $row['two_factor_enabled_at'] !== null];
+            'twoFactor' => $row['two_factor_enabled_at'] !== null,
+            'credential' => self::credentialStamp((string)$row['password_hash'])];
+    }
+
+    /**
+     * A fingerprint of the account's current password, for its sessions to
+     * carry.
+     *
+     * A session remembers the stamp it signed in with, and the throttled
+     * account re-check (Auth::revalidateAccount()) ends it once the stamp no
+     * longer matches -- which is what makes changing a password, or an
+     * administrator resetting it, sign out whoever else was using the old one.
+     * Before this, every other session simply carried on: changing the
+     * password because someone else had it did not get rid of them.
+     *
+     * A digest of the stored hash, never the hash: the stamp lives in the
+     * session file, and a hash there could be attacked offline.
+     */
+    public static function credentialStamp(string $passwordHash): string
+    {
+        return substr(hash('sha256', 'cloudhub-session-credential|'.$passwordHash), 0, 32);
     }
 
     public function create(string $username, string $password, string $role): array

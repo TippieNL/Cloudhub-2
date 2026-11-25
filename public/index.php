@@ -18,6 +18,7 @@ use CloudHub\Services\AuditLog;
 use CloudHub\Services\TwoFactor;
 use CloudHub\Services\TwoFactorError;
 use CloudHub\Services\Sms\Sms;
+use CloudHub\Services\Mail\Mail;
 use CloudHub\Repositories\TwoFactorRepository;
 
 $fs = new FileService($config); $basePath = Http::basePath(); $assetBase = Http::assetBase(); $path = Http::requestPath($basePath); $method = $_SERVER['REQUEST_METHOD']??'GET';
@@ -548,7 +549,7 @@ function storage_report(FileService $fs, array $config, bool $force = false): ar
     $report = $fs->storageReport();
     $report['cached'] = false;
     if (!is_dir(dirname($cache)))@mkdir(dirname($cache), 0775, true);
-    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES));
+    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE));
     return $report;
 }
 /**
@@ -600,13 +601,14 @@ function db(): PDO {
     return \CloudHub\Helpers\Db::connection();
 }
 /**
-* SMS two-step verification, built on first use: only its own routes and a
-* sign-in that needs it pay for the SMS gateway's configuration.
+* Two-step verification, built on first use: only its own routes and a
+* sign-in that needs it pay for the SMS gateway's and mail server's
+* configuration.
 */
 function two_factor(): TwoFactor {
     static $service = null; global $config;
     return $service ??= new TwoFactor(db(), new TwoFactorRepository(db()), new LoginRateLimiter(db(), $config),
-        Sms::fromConfig($config, dirname(__DIR__)), $config);
+        Sms::fromConfig($config, dirname(__DIR__)), $config, null, Mail::fromConfig($config, dirname(__DIR__)));
 }
 /**
 * api_try() for the two-step routes. Their refusals carry a stable code of
@@ -690,7 +692,9 @@ function share_resolve(FileService $fs, string $token): array {
     $stmt = db()->prepare('SELECT token,file_path,created_at,expires_at FROM share_links WHERE token=?');
     $stmt->execute([$token]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$row)throw new RuntimeException('Share link not found or expired', 404);
+    // The column compares case-insensitively, so "AbC…" also found "abc…": a
+    // token is a credential and is honoured only as it was issued.
+    if (!$row || !hash_equals((string)$row['token'], $token))throw new RuntimeException('Share link not found or expired', 404);
     if ($row['expires_at'] && strtotime((string)$row['expires_at']) < time())throw new RuntimeException('Share link has expired', 410);
     $file = $fs->sanitize((string)$row['file_path']);
     if (!is_file($file))throw new RuntimeException('The shared file no longer exists', 404);
@@ -705,34 +709,56 @@ function share_resolve(FileService $fs, string $token): array {
  * anyone holding the old link -- a file nobody chose to share -- while
  * renaming or moving a shared file silently broke its link.
  *
- * mb_strlen() for the prefix because MySQL's SUBSTR() counts characters on a
- * utf8mb4 column. Failures are logged rather than thrown: the file operation
- * has already happened and must still report its own outcome.
+ * Failures are logged rather than thrown: the file operation has already
+ * happened and must still report its own outcome.
  */
 function shares_forget(string $relative): void {
     try {
-        $prefix = rtrim($relative, '/').'/';
-        $stmt = db()->prepare('DELETE FROM share_links WHERE file_path = ? OR SUBSTR(file_path, 1, ?) = ?');
-        $stmt->execute([$relative, mb_strlen($prefix), $prefix]);
+        $delete = db()->prepare('DELETE FROM share_links WHERE token = ?');
+        foreach (shares_matching($relative) as $row) $delete->execute([$row['token']]);
     } catch (Throwable $e) {
         error_log('['.Http::requestId().'] share cleanup failed: '.$e->getMessage());
     }
 }
 
 function shares_relocate(string $from, string $to): void {
+    if ($from === $to) return;
     try {
-        $pdo = db();
-        $pdo->prepare('UPDATE share_links SET file_path = ? WHERE file_path = ?')->execute([$to, $from]);
         $prefix = rtrim($from, '/').'/';
-        $rows = $pdo->prepare('SELECT token, file_path FROM share_links WHERE SUBSTR(file_path, 1, ?) = ?');
-        $rows->execute([mb_strlen($prefix), $prefix]);
-        $update = $pdo->prepare('UPDATE share_links SET file_path = ? WHERE token = ?');
-        foreach ($rows->fetchAll(PDO::FETCH_ASSOC) ?: [] as $row) {
-            $update->execute([rtrim($to, '/').'/'.substr((string)$row['file_path'], strlen($prefix)), (string)$row['token']]);
+        $update = db()->prepare('UPDATE share_links SET file_path = ? WHERE token = ?');
+        foreach (shares_matching($from) as $row) {
+            $moved = $row['file_path'] === $from ? $to : rtrim($to, '/').'/'.substr($row['file_path'], strlen($prefix));
+            $update->execute([$moved, $row['token']]);
         }
     } catch (Throwable $e) {
         error_log('['.Http::requestId().'] share relocation failed: '.$e->getMessage());
     }
+}
+
+/**
+ * The links at a path or beneath it, compared byte for byte.
+ *
+ * file_path compares under the column's utf8mb4_unicode_ci collation, where
+ * "/Photos" equals "/photos" and "Cafe" equals "Café" -- two different
+ * folders on the storage this runs on. Matched in SQL alone, moving /photos
+ * re-pointed the public link for /Photos/a.txt at /photos/a.txt, a file nobody
+ * had shared, which it then served; deleting /photos revoked /Photos's links.
+ * SQL narrows the candidates and PHP keeps only the exact ones, as
+ * FavoriteRepository::matching() does. mb_strlen() for SQL, because SUBSTR()
+ * counts characters on a utf8mb4 column; str_starts_with() compares bytes.
+ *
+ * @return list<array{token:string,file_path:string}>
+ */
+function shares_matching(string $relative): array {
+    $prefix = rtrim($relative, '/').'/';
+    $stmt = db()->prepare('SELECT token, file_path FROM share_links WHERE file_path = ? OR SUBSTR(file_path, 1, ?) = ?');
+    $stmt->execute([$relative, mb_strlen($prefix), $prefix]);
+    $rows = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $row) {
+        $path = (string)$row['file_path'];
+        if ($path === $relative || str_starts_with($path, $prefix)) $rows[] = ['token' => (string)$row['token'], 'file_path' => $path];
+    }
+    return $rows;
 }
 
 /**
@@ -787,13 +813,71 @@ function share_media_kind(string $file): string {
     return 'other';
 }
 
+/**
+ * A storage server as an administrator sees it, credentials masked.
+ *
+ * The config is free-form JSON typed into the admin form, so masking three
+ * exact keys let "passphrase", "token", "secret", "accessKey" and the like
+ * through in clear. Any key whose name says it is a credential is masked; the
+ * PUT route puts the stored value back when the mask is sent unchanged.
+ */
+const SERVER_MASK = '••••••••';
 function mask_server(array $s): array {
-    foreach (['password', 'privateKey', 'apiKey'] as $k)if (!empty($s['config'][$k]))$s['config'][$k] = '••••••••'; return $s;
+    foreach ((array)($s['config'] ?? []) as $k => $v) {
+        if (is_string($k) && preg_match('/pass|secret|token|key|credential|auth/i', $k) && $v !== null && $v !== '') {
+            $s['config'][$k] = SERVER_MASK;
+        }
+    }
+    return $s;
+}
+
+/**
+ * What a non-administrator may know of a storage server: that it exists.
+ *
+ * /api/servers/active is readable by every signed-in account, and it used to
+ * hand over each server's whole config -- host, username, and every
+ * credential mask_server() did not happen to name. The page it serves shows a
+ * name and a type, so that is what it gets.
+ */
+function server_summary(array $s): array {
+    return ['id' => (int)$s['id'], 'name' => (string)$s['name'], 'type' => (string)$s['type'],
+        'isActive' => (bool)$s['isActive'], 'isDefault' => (bool)$s['isDefault']];
+}
+
+/**
+ * The fields of a storage server as they may be written, validated.
+ *
+ * Unchecked, a name sent as a list was stored as the string "Array", and a
+ * type outside the column's ENUM reached MySQL and came back as a 500.
+ */
+const SERVER_TYPES = ['local', 'ftp', 'sftp', 'smb', 'http_api'];
+function server_fields(array $b, bool $creating): array {
+    $out = [];
+    if ($creating || array_key_exists('name', $b)) $out['name'] = Http::string($b, 'name', 1, 190);
+    if ($creating || array_key_exists('type', $b)) {
+        $type = Http::string($b, 'type', 1, 20);
+        if (!in_array($type, SERVER_TYPES, true)) Http::error(422, 'VALIDATION_FAILED', 'type must be one of '.implode(', ', SERVER_TYPES));
+        $out['type'] = $type;
+    }
+    if ($creating || array_key_exists('config', $b)) {
+        if (!is_array($b['config'] ?? null) || ($b['config'] !== [] && array_is_list($b['config']))) {
+            Http::error(422, 'VALIDATION_FAILED', 'config must be a JSON object');
+        }
+        $out['config'] = $b['config'];
+    }
+    foreach (['isActive', 'isDefault'] as $flag) {
+        if (!array_key_exists($flag, $b)) continue;
+        if (!is_bool($b[$flag])) Http::error(422, 'VALIDATION_FAILED', "$flag must be true or false");
+        $out[$flag] = $b[$flag];
+    }
+    return $out;
 }
 
 if ($path === '/api/auth/login' && $method === 'POST') api_try(function()use($config) {
     $b = Http::body(16384); $u = Http::string($b, 'username', 1, 100); $p = Http::string($b, 'password', 1, 4096);
-    $limiter = new LoginRateLimiter(db(), $config); $limiter->assertAllowed($u);
+    // The attempt's slots are taken before the password is checked, so a burst
+    // of parallel guesses counts itself; a wrong password keeps them.
+    $limiter = new LoginRateLimiter(db(), $config); $attempt = $limiter->beginAttempt($u);
     if (!Auth::login(db(), $u, $p)) {
         /*
          * The password was right, but the account wants its SMS code too: the
@@ -804,18 +888,20 @@ if ($path === '/api/auth/login' && $method === 'POST') api_try(function()use($co
          * (/api/auth/two-factor/send), so such a client never costs a message.
          */
         if (($pending = Auth::pendingSecondFactor()) !== null) {
+            $limiter->succeeded($attempt);
             $limiter->clearUserFailures($u);
             $twoFactor = two_factor()->beginLogin();
             AuditLog::write(db(), 'auth.login', 'second_factor', [], ['id' => (int)$pending['user'], 'username' => (string)$pending['username']]);
             Http::json(['success' => false,
                 'error' => ['code' => 'TWO_FACTOR_REQUIRED',
-                    'message' => 'This account uses two-step verification. Enter the code sent to your phone; if this app cannot ask for it, sign in from the web app.'],
+                    'message' => 'This account uses two-step verification. Enter the code we sent you; if this app cannot ask for it, sign in from the web app.'],
                 'requestId' => Http::requestId(),
                 'twoFactor' => $twoFactor,
                 'csrfToken' => $_SESSION['csrf']], 401);
         }
-        $limiter->recordFailure($u); AuditLog::write(db(), 'auth.login', 'failure', ['username' => $u]); throw new RuntimeException('Invalid username or password', 401);
+        AuditLog::write(db(), 'auth.login', 'failure', ['username' => $u]); throw new RuntimeException('Invalid username or password', 401);
     }
+    $limiter->succeeded($attempt);
     $limiter->clearUserFailures($u);
     AuditLog::write(db(), 'auth.login', 'success');
     return ['success' => true,
@@ -1162,6 +1248,9 @@ $relocate = function(callable $apply, string $verb)use($fs, $config): array {
         try {
             $source = $fs->existing($rel);
             $target = rtrim($destination, '/').'/'.basename($source);
+            // A folder of the user's own called ".trash", three levels down, is
+            // theirs -- but moved to the top it would become the real trash.
+            $fs->assertNotReserved($target);
 
             // Copying into the same folder is a legitimate way to duplicate
             // something; moving into it is a no-op worth reporting.
@@ -1482,7 +1571,7 @@ if ($path === '/api/duplicates/scan') {
         $payload = duplicate_scan_payload($finder->scan(DuplicateFinder::EVERYTHING));
 
         if (!is_dir(dirname($scanFile)))@mkdir(dirname($scanFile), 0775, true);
-        @file_put_contents($scanFile, json_encode($payload, JSON_UNESCAPED_SLASHES));
+        @file_put_contents($scanFile, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE));
         return $payload;
     });
 }
@@ -1507,7 +1596,7 @@ if ($path === '/api/duplicates' && $method === 'GET') api_try(function()use($fs,
     $finder = new DuplicateFinder($fs, dirname(__DIR__).'/storage/.cache/hashes.json');
     $report = $finder->scan($categories);
     if (!is_dir(dirname($cache)))@mkdir(dirname($cache), 0775, true);
-    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES));
+    @file_put_contents($cache, json_encode($report, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE));
 
     return $report+['cached' => false, 'scope' => $everything?'all':'media'];
 });
@@ -1783,6 +1872,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             $size = (int)($sizes[$i]??0);
             assert_upload_fits($fs, $config, $size);
             $dest = $target.'/'.$safe;
+            $fs->assertNotReserved($dest);
             if (file_exists($dest)) {
                 if ($conflict === 'reject' || ($conflict === 'overwrite' && (!$config['allow_overwrite'] || is_dir($dest)))) {
                     throw new RuntimeException('File already exists: '.$safe, 409);
@@ -1915,10 +2005,16 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
          * whenever any live link existed, so asking for an hour on a file
          * already shared for a month handed back the month-long token.
          */
-        $s = $pdo->prepare('SELECT token,expires_at FROM share_links
-            WHERE file_path=? AND expires_hours=? AND (expires_at IS NULL OR expires_at>UTC_TIMESTAMP()) LIMIT 1');
+        $s = $pdo->prepare('SELECT token,file_path,expires_at FROM share_links
+            WHERE file_path=? AND expires_hours=? AND (expires_at IS NULL OR expires_at>UTC_TIMESTAMP())');
         $s->execute([$rel, $hours]);
-        $r = $s->fetch(PDO::FETCH_ASSOC);
+        // Exactly this path: the column's collation also matches "/photos/a.txt"
+        // for "/Photos/a.txt", and reusing that row handed out a link to the
+        // other file. See shares_matching().
+        $r = null;
+        foreach ($s->fetchAll(PDO::FETCH_ASSOC) ?: [] as $candidate) {
+            if ((string)$candidate['file_path'] === $rel) { $r = $candidate; break; }
+        }
 
         if (!$r) {
             $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
@@ -2212,7 +2308,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
      * Every route here is administrator-only. The guard above has already
      * verified CSRF for the mutating methods.
      */
-    if ($path === '/api/users/me/password' && $method === 'POST') api_try(function() {
+    if ($path === '/api/users/me/password' && $method === 'POST') api_try(function()use($config) {
         Authorization::requireRead();
         $b = Http::body(16384);
         $current = Http::string($b, 'currentPassword', 1, 4096);
@@ -2220,14 +2316,27 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
 
         $id = (int)($_SESSION['user_id'] ?? 0);
         $users = new UserRepository(db());
-        // Knowing the current password is what stops a borrowed session from
-        // taking the account over.
+        /*
+         * Knowing the current password is what stops a borrowed session from
+         * taking the account over -- and the check is throttled as signing in
+         * is. Unthrottled, this route answered as many guesses at the current
+         * password as a borrowed session cared to send, which turned it into the
+         * one place the sign-in limits did not reach. The two-step settings
+         * already checked the password this way (TwoFactor::reauthenticate()).
+         */
+        $limiter = new LoginRateLimiter(db(), $config);
+        $username = (string)(Auth::user()['username'] ?? '');
+        $attempt = $limiter->beginAttempt($username);
         if ($id <= 0 || !$users->verifyPassword($id, $current)) {
             AuditLog::write(db(), 'user.password', 'failure');
             throw new RuntimeException('The current password is incorrect', 403);
         }
+        $limiter->succeeded($attempt);
 
         $users->update($id, ['password' => $next]);
+        // Every other session on the old password ends at its next account
+        // re-check (within a minute); this one carries on, under a new ID.
+        Auth::refreshCredential(db());
         AuditLog::write(db(), 'user.password', 'success');
         return ['success' => true, 'message' => 'Password changed'];
     });
@@ -2239,9 +2348,28 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
      * recovery code), with resend and cancel in between. The guard above has
      * verified CSRF for the POSTs; see TwoFactor for what each change asks.
      */
-    if ($path === '/api/users/me/two-factor' && $method === 'GET') two_factor_try(function() {
+    if ($path === '/api/users/me/two-factor' && $method === 'GET') two_factor_try(function() use ($config) {
         Authorization::requireRead();
-        return two_factor()->overview((int)Auth::user()['id']);
+        $overview = two_factor()->overview((int)Auth::user()['id']);
+        /*
+         * Why codes cannot be sent, for whoever can fix it. A gateway or mail
+         * server that is set up but refused was named only in PHP's error log
+         * -- hard to find on a phone running the server -- while this panel
+         * said nothing was set up, which an administrator who had set one up
+         * could not act on. Setting names only, never their values.
+         */
+        if (Authorization::isAdmin()) {
+            $smsProblem = Sms::problem($config);
+            $mailProblem = Mail::problem($config);
+            if ($smsProblem !== null) $overview['smsProblem'] = $smsProblem;
+            if ($mailProblem !== null) $overview['mailProblem'] = $mailProblem;
+            if (!$overview['smsAvailable'] && !$overview['emailAvailable'] && $smsProblem === null && $mailProblem === null) {
+                $overview['smsProblem'] = ($config['mail_driver'] ?? '') !== '' && $overview['schemaReady']
+                    ? 'users.two_factor_email is missing: run php database/migrate.php; emails are off'
+                    : 'Neither SMS_DRIVER nor MAIL_DRIVER is set in .env, so no codes can be sent';
+            }
+        }
+        return $overview;
     });
     if (str_starts_with($path, '/api/users/me/two-factor/') && $method === 'POST') two_factor_try(function() use ($path) {
         Authorization::requireRead();
@@ -2252,8 +2380,10 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
             $action = Http::string($b, 'action', 1, 20);
             $password = Http::string($b, 'currentPassword', 1, 4096);
             $phone = array_key_exists('phone', $b) ? Http::string($b, 'phone', 1, 40) : null;
+            $email = array_key_exists('email', $b) ? Http::string($b, 'email', 1, 254) : null;
             $how = array_key_exists('method', $b) ? Http::string($b, 'method', 1, 20) : 'sms';
-            return two_factor()->startAction($id, (string)$user['username'], $action, $password, $phone, $how);
+            // The new number for 'phone', the new address for 'email'.
+            return two_factor()->startAction($id, (string)$user['username'], $action, $password, $action === 'email' ? $email : $phone, $how);
         }
         if ($path === '/api/users/me/two-factor/resend') return two_factor()->resendAction($id);
         if ($path === '/api/users/me/two-factor/cancel') { two_factor()->cancelAction($id); return ['success' => true]; }
@@ -2290,7 +2420,7 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         $b = Http::body(16384);
         $password = Http::string($b, 'currentPassword', 1, 4096);
         $reset = two_factor()->adminReset((int)$self['id'], (string)$self['username'], $password, $id);
-        AuditLog::write(db(), 'two_factor.admin_reset', 'success', ['target' => $target['username'], 'phoneEnding' => $reset['phoneEnding']]);
+        AuditLog::write(db(), 'two_factor.admin_reset', 'success', ['target' => $target['username'], 'channel' => $reset['channel'], 'phoneEnding' => $reset['phoneEnding']]);
         return ['success' => true, 'message' => 'Two-step verification is off for '.$target['username']];
     });
 
@@ -2355,6 +2485,9 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
         }
 
         $updated = $users->update($id, $changes);
+        // A reset ends the account's sessions at their next re-check; an
+        // administrator resetting their own keeps the one they are using.
+        if ($id === $self && array_key_exists('password', $changes)) Auth::refreshCredential(db());
         AuditLog::write(db(), 'user.update', 'success', [
             'username' => $target['username'],
             'role' => $updated['role'],
@@ -2376,16 +2509,19 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
 
     if (str_starts_with($path, '/api/servers')) api_try(function()use($path, $method) {
         $repo = new ServerRepository();
-        if ($path === '/api/servers/active' && $method === 'GET')return array_map('mask_server', $repo->all(true));
+        if ($path === '/api/servers/active' && $method === 'GET')return array_map('server_summary', $repo->all(true));
         Authorization::requireAdmin();
         if ($path === '/api/servers' && $method === 'GET')return array_map('mask_server', $repo->all()); if ($path === '/api/servers' && $method === 'POST') {
-            $b = Http::body(); if (empty($b['name']) || empty($b['type'])||!isset($b['config']))throw new RuntimeException('name, type, and config are required', 400); return mask_server($repo->create(['name' => $b['name'], 'type' => $b['type'], 'config' => $b['config'], 'isActive' => $b['isActive']??true, 'isDefault' => $b['isDefault']??false]));
+            $fields = server_fields(Http::body(), true);
+            return mask_server($repo->create($fields + ['isActive' => true, 'isDefault' => false]));
         }if (preg_match('#^/api/servers/(\d+)(?:/(toggle|set-default))?$#', $path, $m)) {
             $id = (int)$m[1]; $s = $repo->get($id); if (!$s)throw new RuntimeException('Server not found', 404); if ($method === 'GET')return mask_server($s); if ($method === 'DELETE') {
                 $repo->delete($id); return ['success' => true,
                     'message' => 'Server deleted'];
             }if ($method === 'PUT') {
-                $b = Http::body(); if (isset($b['config']))foreach ($b['config'] as $k => $v)if ($v === '••••••••')$b['config'][$k] = $s['config'][$k]??$v; return mask_server($repo->update($id, $b));
+                $b = server_fields(Http::body(), false);
+                // A credential sent back still masked keeps the stored value.
+                if (isset($b['config']))foreach ($b['config'] as $k => $v)if ($v === SERVER_MASK)$b['config'][$k] = $s['config'][$k]??$v; return mask_server($repo->update($id, $b));
             }if (($m[2]??'') === 'toggle' && $method === 'POST')return mask_server($repo->update($id, ['isActive'=>!$s['isActive']])); if (($m[2]??'') === 'set-default' && $method === 'POST') {
                 $repo->setDefault($id); return ['success' => true,
                     'message' => $s['name'].' set as default'];
@@ -2436,7 +2572,19 @@ if ($path === '/api/files/upload' && $method === 'POST') api_try(function()use($
 * populating the $mediaFile payload, and rendering the app view.
 */
 if ($path === '/play' && $method === 'GET') {
-    Authorization::requireRead();
+    /*
+     * This is a page, so a signed-out visitor -- an expired session, a
+     * bookmarked player -- is shown one that says so and links to signing
+     * in, rather than a JSON error object. Still 401, and nothing about the
+     * requested file is looked up before the session is.
+     */
+    if (Auth::user() === null) {
+        http_response_code(401);
+        $mediaFile = null;
+        $signedOut = true;
+        require dirname(__DIR__) . '/views/pages/play.php';
+        exit;
+    }
 
     $relPath = (string)($_GET['path'] ?? '');
     $mediaFile = null;

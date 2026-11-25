@@ -6,12 +6,20 @@ namespace CloudHub\Services;
 use CloudHub\Helpers\Http;
 use CloudHub\Repositories\TwoFactorRepository;
 use CloudHub\Repositories\UserRepository;
+use CloudHub\Services\Mail\MailException;
+use CloudHub\Services\Mail\MailSender;
 use CloudHub\Services\Sms\SmsException;
 use CloudHub\Services\Sms\SmsSender;
 use PDO;
 
 /**
- * SMS two-step verification.
+ * Two-step verification by text message or by email.
+ *
+ * Each account's codes go to one place its owner proved: a phone number
+ * (SMS_DRIVER) or an email address (MAIL_DRIVER). Everything below says
+ * "phone" where it was written for text messages; an email address follows
+ * exactly the same rules -- proven with a code sent to it, changed only with
+ * the current one (or a recovery code), never shown whole.
  *
  * Signing in. Auth::login() checks the password; for an account that has this
  * turned on it leaves the session waiting for a code instead of signing it in
@@ -56,7 +64,8 @@ final class TwoFactor
     /** Lower case and digits with the easily confused ones (0 o 1 i l) left out. */
     private const RECOVERY_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
-    public const ACTIONS = ['phone', 'disable', 'recovery'];
+    /** 'phone' and 'email' turn it on, or move codes to that number or address. */
+    public const ACTIONS = ['phone', 'email', 'disable', 'recovery'];
 
     /** @var \Closure(): int */
     private \Closure $clock;
@@ -68,6 +77,7 @@ final class TwoFactor
         private readonly ?SmsSender $sms,
         private readonly array $config,
         ?\Closure $clock = null,
+        private readonly ?MailSender $mail = null,
     ) {
         $this->clock = $clock ?? static fn(): int => time();
     }
@@ -83,18 +93,73 @@ final class TwoFactor
         return $this->sms !== null;
     }
 
+    /** Whether this server can send codes by email: a mail server, and a database with somewhere to keep the address. */
+    public function emailAvailable(): bool
+    {
+        return $this->mail !== null && $this->repo->emailReady();
+    }
+
+    /**
+     * Where an account's codes go: its phone, or its email address.
+     *
+     * @return array{channel: string, address: string}|null
+     */
+    private static function destinationOf(array $state): ?array
+    {
+        if ($state['phone'] !== null) return ['channel' => 'sms', 'address' => $state['phone']];
+        if (($state['email'] ?? null) !== null) return ['channel' => 'email', 'address' => $state['email']];
+        return null;
+    }
+
+    /** Whether a code can be sent there now. */
+    private function canSend(?array $to): bool
+    {
+        if ($to === null) return false;
+        return $to['channel'] === 'email' ? $this->mail !== null : $this->sms !== null;
+    }
+
+    /** What an answer may show of a destination: a number's last two digits, an address masked. */
+    private static function shown(array $to): string
+    {
+        return $to['channel'] === 'email' ? EmailAddress::mask($to['address']) : '••'.PhoneNumber::ending($to['address']);
+    }
+
+    /**
+     * Where the code went, for an answer. phoneEnding stays for the clients
+     * written before email existed -- installed Android apps among them --
+     * and is null for an address, which such a client then words generically.
+     */
+    private static function where(?array $to): array
+    {
+        return [
+            'channel' => $to['channel'] ?? null,
+            'destination' => $to !== null ? self::shown($to) : null,
+            'phoneEnding' => ($to['channel'] ?? null) === 'sms' ? PhoneNumber::ending($to['address']) : null,
+        ];
+    }
+
+    /** What the audit trail keeps of a destination: a number's last two digits; of an address, only that it was one. */
+    private static function audited(array $to): array
+    {
+        return $to['channel'] === 'email' ? ['channel' => 'email'] : ['phoneEnding' => PhoneNumber::ending($to['address'])];
+    }
+
     /** What GET /api/users/me/two-factor answers: the account's settings, and what this server can do. */
     public function overview(int $userId): array
     {
         $ready = $this->repo->schemaReady();
         $state = $ready ? $this->repo->state($userId) : null;
         $enabled = (bool)($state['enabled'] ?? false);
+        $to = $enabled ? self::destinationOf($state) : null;
         return [
-            'available' => $ready && $this->sms !== null,
+            'available' => $ready && ($this->sms !== null || $this->emailAvailable()),
             'schemaReady' => $ready,
             'smsAvailable' => $this->sms !== null,
+            'emailAvailable' => $ready && $this->emailAvailable(),
             'enabled' => $enabled,
-            'phoneEnding' => $enabled && $state['phone'] !== null ? PhoneNumber::ending($state['phone']) : null,
+            // Whether a code can reach this account's phone or address right now.
+            'codeAvailable' => $this->canSend($to),
+            ...self::where($to),
             'enabledAt' => $enabled && $state['enabledAt'] !== null ? gmdate('c', $state['enabledAt']) : null,
             'recoveryCodesLeft' => $enabled ? $this->repo->recoveryCodesLeft($userId) : 0,
             'codeLength' => self::CODE_LENGTH,
@@ -136,12 +201,12 @@ final class TwoFactor
     {
         [$pending, $state, $challenge] = $this->pendingLogin();
         $userId = (int)$pending['user'];
-        if ($state['phone'] === null) throw TwoFactorError::smsNotConfigured();
+        $to = self::destinationOf($state) ?? throw TwoFactorError::smsNotConfigured();
         if ($challenge === null) {
             $_SESSION['two_factor_login']['challenge'] = $id = $this->repo->createChallenge($userId, 'login');
             $challenge = $this->repo->challenge($id) ?? throw TwoFactorError::signInExpired();
         }
-        return $this->deliver($challenge, $userId, $state['phone'], 'login', self::actor($pending));
+        return $this->deliver($challenge, $userId, $to, 'login', self::actor($pending));
     }
 
     /**
@@ -152,9 +217,9 @@ final class TwoFactor
      */
     public function verifyLogin(?string $code, ?string $recoveryCode): array
     {
-        [$pending, , $challenge] = $this->pendingLogin();
+        [$pending, $state, $challenge] = $this->pendingLogin();
         $userId = (int)$pending['user'];
-        $method = $recoveryCode !== null ? 'recovery' : 'sms';
+        $method = $recoveryCode !== null ? 'recovery' : (self::destinationOf($state)['channel'] ?? 'sms');
         try {
             $this->prove($userId, $challenge['id'] ?? null, $code, $recoveryCode, true);
         } catch (TwoFactorError $e) {
@@ -203,11 +268,15 @@ final class TwoFactor
     private function signInInfo(array $state, ?array $challenge): array
     {
         $now = $this->now();
+        $to = self::destinationOf($state);
         return [
-            'method' => 'sms',
-            'phoneEnding' => $state['phone'] !== null ? PhoneNumber::ending($state['phone']) : null,
+            'method' => $to['channel'] ?? 'sms',
+            ...self::where($to),
             'codeLength' => self::CODE_LENGTH,
-            'smsAvailable' => $this->sms !== null && $state['phone'] !== null,
+            // Whether a code can be sent at all, by text or by email. The name
+            // predates email and is kept: installed apps read it to decide
+            // between a code and a recovery code.
+            'smsAvailable' => $this->canSend($to),
             'codeSent' => ($challenge['sent_at'] ?? null) !== null,
             'resendIn' => isset($challenge['sent_at']) ? max(0, $challenge['sent_at'] + $this->resendSeconds() - $now) : 0,
             'expiresIn' => isset($challenge['expires_at']) ? max(0, $challenge['expires_at'] - $now) : null,
@@ -217,37 +286,47 @@ final class TwoFactor
     /* ---- changing it ----------------------------------------------------------- */
 
     /**
-     * Start a change: 'phone' turns it on or moves it to a new number,
-     * 'disable' turns it off, 'recovery' replaces the recovery codes.
+     * Start a change: 'phone' or 'email' turns it on or moves codes to that
+     * number or address, 'disable' turns it off, 'recovery' replaces the
+     * recovery codes. $addressInput is the new number or address.
      *
      * $method 'recovery' means the current phone will be answered with a
-     * recovery code, so no text is sent to it.
+     * recovery code, so no code is sent to it.
      */
-    public function startAction(int $userId, string $username, string $action, string $password, ?string $phoneInput, string $method = 'sms'): array
+    public function startAction(int $userId, string $username, string $action, string $password, ?string $addressInput, string $method = 'sms'): array
     {
         if (!in_array($action, self::ACTIONS, true)) throw TwoFactorError::unknownAction();
         if (!$this->repo->schemaReady()) throw TwoFactorError::notMigrated();
         $this->reauthenticate($userId, $username, $password);
         $state = $this->repo->state($userId) ?? throw TwoFactorError::noAction();
 
-        $phone = null;
+        $target = null;
         if ($action === 'phone') {
-            $phone = PhoneNumber::normalize((string)$phoneInput) ?? throw TwoFactorError::phoneInvalid();
+            $phone = PhoneNumber::normalize((string)$addressInput) ?? throw TwoFactorError::phoneInvalid();
             if ($state['enabled'] && $state['phone'] === $phone) throw TwoFactorError::samePhone();
             // A number nobody can text cannot be proven, so it cannot be set.
             if ($this->sms === null) throw TwoFactorError::smsNotConfigured();
+            $target = ['channel' => 'sms', 'address' => $phone];
+        } elseif ($action === 'email') {
+            if (!$this->repo->emailReady()) throw TwoFactorError::notMigrated();
+            $email = EmailAddress::normalize((string)$addressInput) ?? throw TwoFactorError::emailInvalid();
+            if ($state['enabled'] && $state['email'] === $email) throw TwoFactorError::sameEmail();
+            if ($this->mail === null) throw TwoFactorError::mailNotConfigured();
+            $target = ['channel' => 'email', 'address' => $email];
         } elseif (!$state['enabled']) {
             throw TwoFactorError::notEnabled();
         }
 
         $recent = $this->recentlyVerified();
-        $proveCurrent = $state['enabled'] && ($action !== 'phone' || !$recent);
+        $proveCurrent = $state['enabled'] && ($target === null || !$recent);
         $this->cancelAction($userId);
         $_SESSION['two_factor_action'] = [
             'user' => $userId,
             'action' => $action,
             'stage' => $proveCurrent ? 'current' : 'new',
-            'phone' => $phone,
+            // Where codes are to go once this is done: the number or address
+            // being proven, for 'phone' and 'email'.
+            'target' => $target,
             'method' => $proveCurrent && $method === 'recovery' ? 'recovery' : 'sms',
             // Whether the current phone counts as proven for this change: true
             // once it is, or when this session proved it a moment ago.
@@ -291,7 +370,7 @@ final class TwoFactor
         if ($current) {
             // The current phone, or a recovery code, has just been proven here.
             $_SESSION['two_factor_verified_at'] = $this->now();
-            if ($flow['action'] === 'phone') {
+            if ($flow['action'] === 'phone' || $flow['action'] === 'email') {
                 $_SESSION['two_factor_action']['stage'] = 'new';
                 $_SESSION['two_factor_action']['method'] = 'sms';
                 $_SESSION['two_factor_action']['currentProven'] = true;
@@ -323,8 +402,9 @@ final class TwoFactor
         $state = $this->repo->state($targetId) ?? throw new \RuntimeException('Account not found', 404);
         if (!$state['enabled']) throw TwoFactorError::notEnabled();
         $this->repo->disable($targetId);
-        if ($state['phone'] !== null) $this->notify($state['phone'], 'reset');
-        return ['phoneEnding' => $state['phone'] !== null ? PhoneNumber::ending($state['phone']) : null];
+        $to = self::destinationOf($state);
+        if ($to !== null) $this->notify($to, 'reset');
+        return self::where($to);
     }
 
     /** The change under way in this session for this account. */
@@ -365,19 +445,33 @@ final class TwoFactor
         }
     }
 
-    /** @return array{0: ?string, 1: string} where this stage's code goes, and what its message says it is for */
+    /** @return array{0: ?array, 1: string} where this stage's code goes, and what its message says it is for */
     private function stageTarget(array $flow, array $state): array
     {
-        if ($flow['stage'] === 'new') return [$flow['phone'], 'new-phone'];
-        return [$state['phone'], $flow['action'] === 'phone' ? 'change' : $flow['action']];
+        if ($flow['stage'] === 'new') {
+            $to = self::flowTarget($flow);
+            return [$to, ($to['channel'] ?? 'sms') === 'email' ? 'new-email' : 'new-phone'];
+        }
+        $moving = $flow['action'] === 'phone' || $flow['action'] === 'email';
+        return [self::destinationOf($state), $moving ? 'change' : $flow['action']];
     }
 
-    private function stageInfo(array $flow, ?string $target): array
+    /**
+     * The number or address a change is moving codes to. A change begun before
+     * email existed kept only its number, under 'phone'.
+     */
+    private static function flowTarget(array $flow): ?array
+    {
+        if (is_array($flow['target'] ?? null)) return $flow['target'];
+        return isset($flow['phone']) && is_string($flow['phone']) ? ['channel' => 'sms', 'address' => $flow['phone']] : null;
+    }
+
+    private function stageInfo(array $flow, ?array $target): array
     {
         return [
             'action' => $flow['action'],
             'stage' => $flow['stage'],
-            'phoneEnding' => $target !== null ? PhoneNumber::ending($target) : null,
+            ...self::where($target),
             'codeLength' => self::CODE_LENGTH,
             'recoveryAllowed' => $flow['stage'] === 'current',
             'sent' => false,
@@ -390,25 +484,32 @@ final class TwoFactor
     private function apply(int $userId, array $flow): array
     {
         $before = $this->repo->state($userId) ?? throw TwoFactorError::noAction();
-        if ($flow['action'] === 'phone') {
+        if ($flow['action'] === 'phone' || $flow['action'] === 'email') {
             // Turned on in another session since this change began, without
             // this one proving that phone: start again, which will ask for it.
             if ($before['enabled'] && empty($flow['currentProven'])) throw TwoFactorError::noAction();
-            $phone = (string)$flow['phone'];
-            $turnedOn = $this->repo->enable($userId, $phone);
-            // This session has just proven the phone the account now uses.
+            $to = self::flowTarget($flow) ?? throw TwoFactorError::noAction();
+            $turnedOn = $to['channel'] === 'email'
+                ? $this->repo->enableEmail($userId, $to['address'])
+                : $this->repo->enable($userId, $to['address']);
+            // This session has just proven the phone or address the account now uses.
             $_SESSION['two_factor_verified_at'] = $this->now();
             $codes = $turnedOn ? $this->issueRecoveryCodes($userId) : null;
-            AuditLog::write($this->db, $turnedOn ? 'two_factor.enable' : 'two_factor.phone_change', 'success',
-                ['phoneEnding' => PhoneNumber::ending($phone)]);
-            if (!$turnedOn && $before['phone'] !== null && $before['phone'] !== $phone) $this->notify($before['phone'], 'phone-changed');
-            return ['enabled' => true, 'phoneEnding' => PhoneNumber::ending($phone), 'recoveryCodes' => $codes,
+            $event = $turnedOn ? 'two_factor.enable' : ($to['channel'] === 'email' ? 'two_factor.email_change' : 'two_factor.phone_change');
+            AuditLog::write($this->db, $event, 'success', self::audited($to));
+            // The old phone or address is told, so a move nobody asked for does not go unnoticed.
+            $old = self::destinationOf($before);
+            if (!$turnedOn && $old !== null && $old !== $to) {
+                $this->notify($old, $old['channel'] === 'sms' && $to['channel'] === 'sms' ? 'phone-changed' : 'moved');
+            }
+            return ['enabled' => true, ...self::where($to), 'recoveryCodes' => $codes,
                 'recoveryCodesLeft' => $this->repo->recoveryCodesLeft($userId)];
         }
         if ($flow['action'] === 'disable') {
             $this->repo->disable($userId);
             AuditLog::write($this->db, 'two_factor.disable', 'success');
-            if ($before['phone'] !== null) $this->notify($before['phone'], 'disabled');
+            $old = self::destinationOf($before);
+            if ($old !== null) $this->notify($old, 'disabled');
             return ['enabled' => false];
         }
         $codes = $this->issueRecoveryCodes($userId);
@@ -429,12 +530,14 @@ final class TwoFactor
      */
     private function reauthenticate(int $userId, string $username, string $password): void
     {
-        $this->limiter->assertAllowed($username);
+        // Slots taken before the check, so parallel guesses count each other;
+        // a wrong password keeps them (LoginRateLimiter::beginAttempt()).
+        $attempt = $this->limiter->beginAttempt($username);
         if (!(new UserRepository($this->db))->verifyPassword($userId, $password)) {
-            $this->limiter->recordFailure($username);
             AuditLog::write($this->db, 'two_factor.reauth', 'failure');
             throw TwoFactorError::wrongPassword();
         }
+        $this->limiter->succeeded($attempt);
     }
 
     /* ---- the codes ------------------------------------------------------------ */
@@ -521,27 +624,35 @@ final class TwoFactor
     }
 
     /**
-     * Put a fresh code on the challenge and text it to $phone.
+     * Put a fresh code on the challenge and send it to $to: a text to a phone,
+     * or an email to an address.
      *
      * The hourly limits are taken first; then the challenge's cooldown is a
-     * compare-and-set, so a double-click sends one message. A gateway that
-     * refused the number sent nothing and gives the hourly slots back; an
-     * outage keeps them -- a timeout can come after the gateway took the
-     * message -- and the code stays valid in case it arrives.
+     * compare-and-set, so a double-click sends one message. A gateway or mail
+     * server that refused the number or address sent nothing and gives the
+     * hourly slots back; an outage keeps them -- a timeout can come after the
+     * message was taken -- and the code stays valid in case it arrives. The
+     * limits count messages of either kind: one account, one destination and
+     * one client address share them.
+     *
+     * @param array{channel: string, address: string} $to
      */
-    private function deliver(array $challenge, int $userId, string $phone, string $purpose, ?array $actor = null): array
+    private function deliver(array $challenge, int $userId, array $to, string $purpose, ?array $actor = null): array
     {
-        if ($this->sms === null) throw TwoFactorError::smsNotConfigured();
+        $email = $to['channel'] === 'email';
+        $sender = $email ? $this->mail : $this->sms;
+        if ($sender === null) throw $email ? TwoFactorError::mailNotConfigured() : TwoFactorError::smsNotConfigured();
+        $event = $email ? 'two_factor.email' : 'two_factor.sms';
         $ip = $this->limiter->clientIp();
         $perHour = $this->setting('two_factor_sms_per_hour', 5, 1, 100);
         $slots = [];
-        foreach ([['sms_user', (string)$userId, $perHour], ['sms_phone', $phone, $perHour],
+        foreach ([['sms_user', (string)$userId, $perHour], ['sms_phone', $to['address'], $perHour],
                   ['sms_ip', $ip, $this->setting('two_factor_sms_ip_per_hour', 20, 1, 1000)]] as [$scope, $value, $max]) {
             $slot = $this->limiter->claim($scope, $value, $max, 3600);
             if ($slot === null) {
                 $this->releaseSlots($slots);
-                AuditLog::write($this->db, 'two_factor.sms', 'blocked', ['purpose' => $purpose, 'limit' => $scope], $actor);
-                throw TwoFactorError::smsLimit($this->limiter->retryAfter($scope, $value, $max, 3600));
+                AuditLog::write($this->db, $event, 'blocked', ['purpose' => $purpose, 'limit' => $scope], $actor);
+                throw TwoFactorError::smsLimit($this->limiter->retryAfter($scope, $value, $max, 3600), $to['channel']);
             }
             $slots[] = $slot;
         }
@@ -554,16 +665,16 @@ final class TwoFactor
         }
 
         try {
-            $this->sms->send($phone, $this->message($purpose, $code));
-        } catch (SmsException $e) {
-            if ($e->kind !== SmsException::UNAVAILABLE) $this->releaseSlots($slots);
+            if ($email) $this->mail->send($to['address'], $this->emailSubject($purpose, $code), $this->emailBody($purpose, $code));
+            else $this->sms->send($to['address'], $this->message($purpose, $code));
+        } catch (SmsException|MailException $e) {
+            if (!in_array($e->kind, [SmsException::UNAVAILABLE, MailException::UNAVAILABLE], true)) $this->releaseSlots($slots);
             error_log('['.Http::requestId().'] two-step code not sent: '.$e->getMessage());
-            AuditLog::write($this->db, 'two_factor.sms', 'failure', ['purpose' => $purpose, 'provider' => $this->sms->name(), 'kind' => $e->kind], $actor);
-            throw TwoFactorError::fromSms($e, $this->resendSeconds());
+            AuditLog::write($this->db, $event, 'failure', ['purpose' => $purpose, 'provider' => $sender->name(), 'kind' => $e->kind], $actor);
+            throw $e instanceof MailException ? TwoFactorError::fromMail($e, $this->resendSeconds()) : TwoFactorError::fromSms($e, $this->resendSeconds());
         }
-        AuditLog::write($this->db, 'two_factor.sms', 'success',
-            ['purpose' => $purpose, 'provider' => $this->sms->name(), 'phoneEnding' => PhoneNumber::ending($phone)], $actor);
-        return ['sent' => true, 'phoneEnding' => PhoneNumber::ending($phone), 'expiresIn' => $this->ttl(),
+        AuditLog::write($this->db, $event, 'success', ['purpose' => $purpose, 'provider' => $sender->name()] + self::audited($to), $actor);
+        return ['sent' => true, ...self::where($to), 'expiresIn' => $this->ttl(),
             'resendIn' => $this->resendSeconds(), 'codeLength' => self::CODE_LENGTH];
     }
 
@@ -573,35 +684,70 @@ final class TwoFactor
         if ($challenge !== null && $challenge['user_id'] === $userId) $this->repo->consume($id);
     }
 
-    /** Text the old number about a change it did not have to approve. Best effort. */
-    private function notify(string $phone, string $what): void
+    /**
+     * Tell the old phone or address about a change it did not have to
+     * approve, by the means it is reached by. Best effort.
+     *
+     * @param array{channel: string, address: string} $to
+     */
+    private function notify(array $to, string $what): void
     {
-        if ($this->sms === null) return;
         $app = $this->appName();
         $text = match ($what) {
             'phone-changed' => "The phone number for your $app sign-in codes was just changed. If you didn't do this, contact your administrator.",
+            'moved' => "Your $app sign-in codes now go to a different phone number or email address. If you didn't do this, contact your administrator.",
             'disabled' => "Two-step verification was turned off for your $app account. If you didn't do this, contact your administrator.",
             default => "An administrator turned off two-step verification for your $app account. If you didn't ask for this, contact them.",
         };
         try {
-            $this->sms->send($phone, $text);
-        } catch (SmsException $e) {
+            if ($to['channel'] === 'email') {
+                $this->mail?->send($to['address'], $app.': two-step verification changed', $text);
+            } else {
+                $this->sms?->send($to['address'], $text);
+            }
+        } catch (SmsException|MailException $e) {
             error_log('['.Http::requestId().'] two-step notice not sent: '.$e->getMessage());
         }
+    }
+
+    /** What a code is for, in words; spelled out, so a code nobody asked for stands out. */
+    private static function purposeText(string $purpose): string
+    {
+        return match ($purpose) {
+            'login' => 'sign-in code',
+            'disable' => 'code to turn off two-step verification',
+            'recovery' => 'code to create new recovery codes',
+            'change' => 'code to change where your two-step verification codes go',
+            'new-phone' => 'code to confirm this number for two-step verification',
+            'new-email' => 'code to confirm this email address for two-step verification',
+            default => throw new \InvalidArgumentException('Unknown message purpose'),
+        };
+    }
+
+    /** The subject of a code email: the code first, so it can be read from the notification. */
+    public function emailSubject(string $purpose, string $code): string
+    {
+        return $code.' is your '.$this->appName().' '.self::purposeText($purpose);
+    }
+
+    /** The body of a code email. */
+    public function emailBody(string $purpose, string $code): string
+    {
+        $minutes = intdiv($this->ttl() + 59, 60);
+        $app = $this->appName();
+        $unasked = $purpose === 'login'
+            ? "If you are not signing in to $app right now, someone has your password: change it, and tell your administrator."
+            : "If you did not ask for this, someone may be using your $app account: change your password, and tell your administrator.";
+        return $code.' is your '.$app.' '.self::purposeText($purpose).".\n\n"
+            .'It expires in '.$minutes.' minute'.($minutes === 1 ? '' : 's').". Don't share it with anyone.\n\n"
+            .$unasked."\n";
     }
 
     /** The text of a code message; what it is for is spelled out, so a code nobody asked for stands out. */
     public function message(string $purpose, string $code): string
     {
         $minutes = intdiv($this->ttl() + 59, 60);
-        $what = match ($purpose) {
-            'login' => 'sign-in code',
-            'disable' => 'code to turn off two-step verification',
-            'recovery' => 'code to create new recovery codes',
-            'change' => 'code to change your two-step verification number',
-            'new-phone' => 'code to confirm this number for two-step verification',
-            default => throw new \InvalidArgumentException('Unknown message purpose'),
-        };
+        $what = self::purposeText($purpose);
         $text = $code.' is your '.$this->appName().' '.$what.'. It expires in '.$minutes.' minute'.($minutes === 1 ? '' : 's')
             .". Don't share it with anyone.";
         // An origin-bound line lets Android Chrome offer the code to the

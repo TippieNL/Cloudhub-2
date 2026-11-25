@@ -21,7 +21,11 @@ $checks=[
  // at once told a stopwatch which names exist (3 ms against 192 ms, measured).
  'unknown usernames cost a hash'=>str_contains($a,'if(!$user){self::hashPassword($password);return false;}'),
  'generic login error'=>str_contains($i,'Invalid username or password'),
- 'limiter enforced'=>str_contains($i,'assertAllowed'),
+ // Slots are claimed before the password is checked, so parallel guesses
+ // count each other; count-then-record let a burst through all at once.
+ 'limiter enforced'=>str_contains($i,'$attempt = $limiter->beginAttempt($u);'),
+ 'password change is throttled'=>str_contains((string)strstr($i,"'/api/users/me/password' && \$method === 'POST'"),'beginAttempt($username)'),
+ 'limiter claims before checking'=>str_contains($l,"\$this->claim('user',\$this->normaliseUser(\$username)"),
  'no bootstrap admin hash'=>!str_contains($s,"SELECT 'admin'"),
  'login attempts schema'=>str_contains($s,'CREATE TABLE IF NOT EXISTS login_attempts'),
 ];

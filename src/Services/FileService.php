@@ -87,7 +87,25 @@ final class FileService {
   if($realParent===false||!is_dir($realParent))throw new RuntimeException('Destination parent directory not found',404);
   $realParent=str_replace('\\','/',$realParent);$this->assertContained($realParent);
   if($this->pathContainsSymlink($parent))throw new RuntimeException('Symlink destinations are not allowed',403);
+  self::assertUtf8Name(basename($candidate));
   return rtrim($realParent,'/').'/'.basename($candidate);
+ }
+
+ /**
+  * Refuse a destination that would land on one of CloudHub's own directories.
+  *
+  * sanitize() refuses a reserved name in a path the client sends, but upload,
+  * multipart upload, move and copy build their destination themselves, as an
+  * existing folder plus a name -- and that never went through it. A file named
+  * ".trash" uploaded to the root of a fresh install, before anything had been
+  * deleted, took the trash's place: every delete after it failed with a 500,
+  * and the file itself was hidden from every listing and refused by every
+  * route, so nobody could remove it. ".versions" did the same to overwrites.
+  */
+ public function assertNotReserved(string $full): void {
+  $full=rtrim(str_replace('\\','/',$full),'/');
+  if(dirname($full)===$this->root&&self::isReservedRootName(basename($full)))
+   throw new RuntimeException('"'.basename($full).'" is a name CloudHub keeps for itself at the top level; rename it first',403);
  }
 
  public function relative(string $full): string {
@@ -166,7 +184,24 @@ final class FileService {
   $n=basename(str_replace('\\','/',$name));
   if($n===''||$n==='.'||$n==='..'||preg_match('/[\x00-\x1F\x7F]/u',$n))throw new RuntimeException('Invalid filename',400);
   if(strlen($n)>255)throw new RuntimeException('Filename is too long',400);
+  self::assertUtf8Name($n);
   return $n;
+ }
+
+ /**
+  * Refuse to create a name that is not valid UTF-8.
+  *
+  * Linux stores any bytes, and a multipart filename or a WebDAV path such as
+  * "caf%E9.txt" (Latin-1) arrives as exactly those bytes. The control-character
+  * check above runs in /u mode, where invalid UTF-8 is a non-match rather than
+  * a refusal, so the name was written -- and every JSON answer that then named
+  * it failed to encode: the folder's listing and any search that reached it
+  * answered 500 for everyone. A name like that can still exist (copied on to
+  * the disk directly) and is still served by path; it simply cannot be made
+  * through CloudHub, and Http::json() no longer lets one take a listing down.
+  */
+ private static function assertUtf8Name(string $name): void {
+  if(preg_match('//u',$name)!==1)throw new RuntimeException('File and folder names must be valid UTF-8 text',400);
  }
 
  public function deleteTree(string $path): void {

@@ -616,8 +616,27 @@ class TwoFactorTextTest {
     @Test
     fun `when it cannot be turned on, the summary says why`() {
         assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = false)).contains("migrate.php"))
-        assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = true, smsAvailable = false)).contains("no text-message service"))
+        assertEquals("Not available: this server has no text-message or email service set up. An administrator can configure one.",
+            TwoFactorText.summary(TwoFactorOverview(schemaReady = true, smsAvailable = false)))
         assertTrue(TwoFactorText.summary(TwoFactorOverview(available = true, schemaReady = true, smsAvailable = true)).startsWith("Off."))
+    }
+
+    @Test
+    fun `an administrator is told which server setting keeps codes off`() {
+        val refused = TwoFactorOverview(schemaReady = true, mailProblem = "MAIL_HOST is missing; emails are off")
+        assertEquals("Not available: this server cannot send codes. Server setting: MAIL_HOST is missing; emails are off.",
+            TwoFactorText.summary(refused))
+        // Both problems are named, and one that works says nothing.
+        val both = refused.copy(smsProblem = "SMS_WEBHOOK_URL is refused; texts are off")
+        assertTrue(TwoFactorText.summary(both).contains("Server setting: SMS_WEBHOOK_URL is refused; texts are off. Server setting: MAIL_HOST"))
+        val emailOnly = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true, smsProblem = "SMS_DRIVER is unknown")
+        assertEquals("Off. Turn it on to be asked, after your password, for a code sent to your email. Server setting: SMS_DRIVER is unknown.",
+            TwoFactorText.summary(emailOnly))
+        // Servers send these to administrators only; everyone else gets the overview without them.
+        val parsed = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString(TwoFactorOverview.serializer(),
+            """{"available":false,"schemaReady":true,"smsAvailable":false,"emailAvailable":false,"enabled":false,"mailProblem":"MAIL_FROM must be an email address"}""")
+        assertEquals("MAIL_FROM must be an email address", parsed.mailProblem)
+        assertEquals(null, parsed.smsProblem)
     }
 
     @Test
@@ -664,5 +683,102 @@ class ApiErrorDetailsTest {
         assertEquals("M", e.message)
         assertNull(e.attemptsLeft)
         assertNull(e.retryAfter)
+    }
+}
+
+/** Codes by email: what the sign-in step and Settings say, and what Settings sends. */
+class EmailCodeStepTest {
+
+    private val dispatcher = StandardTestDispatcher()
+    private var now = 2_000_000L
+
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
+    @After fun tearDown() = Dispatchers.resetMain()
+
+    private val byEmail = SecondStep(method = "email", channel = "email", destination = "k•••@example.com")
+
+    @Test
+    fun `the prompt names the masked address and the spam folder`() {
+        val step = CodeStep(channel = "email", destination = "k•••@example.com")
+        assertTrue(step.prompt.contains("k•••@example.com"))
+        assertTrue(step.prompt.contains("spam"))
+        assertEquals("an emailed code", step.codeKind)
+        // A text keeps its own words.
+        assertTrue(CodeStep(phoneEnding = "78").prompt.contains("ending in 78"))
+        assertEquals("a texted code", CodeStep(phoneEnding = "78").codeKind)
+    }
+
+    @Test
+    fun `signing in to an email account emails the code and says where it went`() = runTest(dispatcher) {
+        val fake = FakeSecondStep()
+        fake.send = { CodeSent(sent = true, channel = "email", destination = "k•••@example.com", expiresIn = 300, resendIn = 60) }
+        val model = SignInViewModel({ _, _ -> LoginResult(success = false, csrfToken = "t", twoFactor = byEmail) },
+            io = dispatcher, secondStep = fake, clock = { now })
+        model.submit("kevin", "right-password")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val step = assertIs<SignInUiState.Code>(model.state.value).step
+        assertEquals(1, fake.sends)
+        assertTrue(step.byEmail)
+        assertTrue(step.prompt.contains("k•••@example.com"))
+        assertNull(step.phoneEnding)
+    }
+
+    @Test
+    fun `with no way to email, the step says email and asks for a recovery code`() = runTest(dispatcher) {
+        val fake = FakeSecondStep()
+        val model = SignInViewModel({ _, _ -> LoginResult(success = false, csrfToken = "t", twoFactor = byEmail.copy(smsAvailable = false)) },
+            io = dispatcher, secondStep = fake, clock = { now })
+        model.submit("kevin", "right-password")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val step = assertIs<SignInUiState.Code>(model.state.value).step
+        assertTrue(step.recovery)
+        assertEquals(0, fake.sends)
+        assertTrue(step.notice!!.contains("cannot send email"))
+    }
+
+    @Test
+    fun `Settings says email when that is where codes go`() {
+        val on = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true, enabled = true,
+            channel = "email", destination = "k•••@example.com", codeAvailable = true, recoveryCodesLeft = 10)
+        assertEquals("Signing in asks for a code emailed to k•••@example.com. 10 recovery codes left.", TwoFactorText.summary(on))
+        assertTrue(TwoFactorText.summary(on.copy(codeAvailable = false)).contains("cannot send email right now"))
+        val off = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true)
+        assertTrue(TwoFactorText.summary(off).contains("a code sent to your email"))
+        assertTrue(TwoFactorText.summary(off.copy(smsAvailable = true)).contains("by email or text message"))
+        assertTrue(TwoFactorText.startIntro(TwoFactorAction.TURN_OFF, on).contains("email a code to k•••@example.com"))
+    }
+
+    @Test
+    fun `turning it on by email sends the address as email and confirms it`() = runTest(dispatcher) {
+        val fake = FakeTwoFactor()
+        fake.overview = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true)
+        fake.start = { TwoFactorStage(action = "email", stage = "new", channel = "email", destination = "k•••@example.com", sent = true, resendIn = 60) }
+        fake.confirm = {
+            TwoFactorStage(done = true, enabled = true, channel = "email", destination = "k•••@example.com",
+                recoveryCodes = List(10) { i -> "code-$i" }, recoveryCodesLeft = 10)
+        }
+        val model = TwoFactorModel(fake, io = dispatcher, clock = { now })
+        model.open()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        model.begin(TwoFactorAction.TURN_ON_EMAIL)
+        model.submitStart("pw-123456789012", "   ")
+        assertEquals("Enter the email address to send codes to.", model.state.value.message!!.text)
+        assertEquals(0, fake.started.size)
+
+        model.submitStart("pw-123456789012", " kevin@example.com ")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf<Any?>("email", "pw-123456789012", "kevin@example.com", false), fake.started.single())
+        val code = assertIs<TwoFactorStep.Code>(model.state.value.step)
+        assertTrue(code.prompt.contains("k•••@example.com"))
+
+        model.confirm("")
+        assertEquals("Enter the code from the email.", model.state.value.message!!.text)
+        model.confirm("123456")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertIs<TwoFactorStep.Codes>(model.state.value.step)
+        assertTrue(model.state.value.message!!.text.contains("a code emailed to k•••@example.com"))
     }
 }

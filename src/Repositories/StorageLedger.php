@@ -93,15 +93,47 @@ final class StorageLedger
     /** The delete itself, which reports failure so a caller in a transaction can abort. */
     private function deleteRows(string $path): void
     {
+        $ids = array_column($this->matching($path), 'id');
+        // Every element is an int from matching(), so nothing else can reach the statement.
+        if ($ids) $this->db->exec('DELETE FROM file_metadata WHERE id IN ('.implode(',', array_map('intval', $ids)).')');
+    }
+
+    /**
+     * Rows at a path or beneath it, compared byte for byte.
+     *
+     * On MySQL file_path compares under utf8mb4_unicode_ci, where "/Photos"
+     * equals "/photos" and "Cafe" equals "Café" -- different folders on the
+     * storage this runs on. Matched in SQL alone, uploading "/a.txt" deleted
+     * the row of "/A.txt", whose bytes then counted against nobody's quota, and
+     * moving "/photos" rewrote the rows of "/Photos". SQL narrows the
+     * candidates and PHP keeps only exact matches, as FavoriteRepository does.
+     *
+     * mb_strlen, not strlen, for SQL: the column is utf8mb4 and MySQL's
+     * SUBSTR() counts characters, so a byte length overshoots for any
+     * non-ASCII name -- "/Fotos N/" is 10 bytes but 9 characters, and every
+     * row beneath an accented folder used to survive its deletion.
+     *
+     * @return list<array{id:int,file_path:string,original_name:string,size:int,mime_type:?string,uploaded_by:?int}>
+     */
+    private function matching(string $path): array
+    {
         $prefix = rtrim($path, '/').'/';
-        // mb_strlen, not strlen: the column is utf8mb4 and MySQL's SUBSTR()
-        // counts characters, so a byte length overshoots for any non-ASCII
-        // name. "/Fotos N/" is 10 bytes but 9 characters, so the comparison
-        // took "/Fotos N/a" and matched nothing -- every row beneath an
-        // accented, CJK or emoji folder survived its deletion and kept
-        // counting against the owner's quota.
-        $stmt = $this->db->prepare('DELETE FROM file_metadata WHERE file_path = ? OR SUBSTR(file_path, 1, ?) = ?');
+        $stmt = $this->db->prepare(
+            'SELECT id, file_path, original_name, size, mime_type, uploaded_by FROM file_metadata
+             WHERE file_path = ? OR SUBSTR(file_path, 1, ?) = ?');
         $stmt->execute([$path, mb_strlen($prefix), $prefix]);
+        $rows = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $r) {
+            $p = (string)$r['file_path'];
+            if ($p !== $path && !str_starts_with($p, $prefix)) continue;
+            $rows[] = [
+                'id' => (int)$r['id'], 'file_path' => $p, 'original_name' => (string)$r['original_name'],
+                'size' => (int)$r['size'],
+                'mime_type' => $r['mime_type'] === null ? null : (string)$r['mime_type'],
+                'uploaded_by' => $r['uploaded_by'] === null ? null : (int)$r['uploaded_by'],
+            ];
+        }
+        return $rows;
     }
 
     /**
@@ -123,23 +155,13 @@ final class StorageLedger
             // descendants renamed and the rest pointing at a folder that no
             // longer exists.
             $this->transactionally(function() use ($from, $to): void {
-            $stmt = $this->db->prepare('UPDATE file_metadata SET file_path = ? WHERE file_path = ?');
-            $stmt->execute([$to, $from]);
-
+            // strlen for PHP's substr(), which counts bytes; matching() uses
+            // mb_strlen for SQL's SUBSTR(), which counts characters.
             $prefix = rtrim($from, '/').'/';
-            // mb_strlen for SQL, strlen for PHP: MySQL's SUBSTR() counts
-            // characters on a utf8mb4 column while PHP's substr() counts
-            // bytes, so the two lengths are genuinely different numbers and
-            // each has to match the function it is passed to. Using the byte
-            // length in the query left every descendant of an accented, CJK
-            // or emoji folder pointing at the old path after a move.
-            $stmt = $this->db->prepare('SELECT id, file_path FROM file_metadata WHERE SUBSTR(file_path, 1, ?) = ?');
-            $stmt->execute([mb_strlen($prefix), $prefix]);
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-
             $update = $this->db->prepare('UPDATE file_metadata SET file_path = ? WHERE id = ?');
-            foreach ($rows as $row) {
-                $update->execute([rtrim($to, '/').'/'.substr((string)$row['file_path'], strlen($prefix)), (int)$row['id']]);
+            foreach ($this->matching($from) as $row) {
+                $moved = $row['file_path'] === $from ? $to : rtrim($to, '/').'/'.substr($row['file_path'], strlen($prefix));
+                $update->execute([$moved, $row['id']]);
             }
             });
         } catch (Throwable $e) {
@@ -160,18 +182,13 @@ final class StorageLedger
     public function rowsUnder(string $path): array
     {
         try {
-            $prefix = rtrim($path, '/').'/';
-            $stmt = $this->db->prepare(
-                'SELECT file_path, original_name, size, mime_type, uploaded_by FROM file_metadata
-                 WHERE file_path = ? OR SUBSTR(file_path, 1, ?) = ?');
-            $stmt->execute([$path, mb_strlen($prefix), $prefix]);
             return array_map(static fn(array $r): array => [
-                'path' => (string)$r['file_path'],
-                'name' => (string)$r['original_name'],
-                'size' => (int)$r['size'],
-                'mime' => $r['mime_type'] === null ? null : (string)$r['mime_type'],
-                'userId' => $r['uploaded_by'] === null ? null : (int)$r['uploaded_by'],
-            ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
+                'path' => $r['file_path'],
+                'name' => $r['original_name'],
+                'size' => $r['size'],
+                'mime' => $r['mime_type'],
+                'userId' => $r['uploaded_by'],
+            ], $this->matching($path));
         } catch (Throwable $e) {
             error_log('[ledger] rowsUnder failed: '.$e->getMessage());
             return [];

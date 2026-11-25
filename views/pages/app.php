@@ -31,7 +31,7 @@
         <?php /* The second step for an account with SMS two-step verification, shown once its password was right. */ ?>
         <form id="two-factor-form" class="dialog" hidden novalidate>
             <h2>Two-step verification</h2>
-            <p id="two-factor-intro">Enter the code we sent to your phone.</p>
+            <p id="two-factor-intro">Enter the code we sent you.</p>
             <label id="two-factor-code-label">Verification code
                 <input id="two-factor-code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" spellcheck="false">
             </label>
@@ -256,13 +256,21 @@
                     <p id="tf-summary" class="muted">Loading…</p>
                     <div id="tf-actions" class="tf-actions">
                         <button id="tf-enable" type="button" class="primary-button" hidden>Turn on</button>
-                        <button id="tf-change" type="button" hidden>Change number</button>
+                        <button id="tf-change" type="button" hidden>Change where codes go</button>
                         <button id="tf-codes" type="button" hidden>New recovery codes</button>
                         <button id="tf-disable" type="button" class="danger-text" hidden>Turn off</button>
                     </div>
 
                     <form id="tf-start" class="tf-step" hidden novalidate>
                         <p id="tf-start-intro"></p>
+                        <fieldset id="tf-channel" class="tf-channel" hidden>
+                            <legend>Send codes by</legend>
+                            <label><input type="radio" name="tf-channel" value="email" checked> Email</label>
+                            <label><input type="radio" name="tf-channel" value="phone"> Text message</label>
+                        </fieldset>
+                        <label id="tf-email-label" class="share-field" hidden>Email address
+                            <input id="tf-email" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" spellcheck="false">
+                        </label>
                         <label id="tf-phone-label" class="share-field">Mobile number, with country code
                             <input id="tf-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+31 6 12345678" spellcheck="false">
                         </label>
@@ -270,7 +278,7 @@
                             <input id="tf-password" type="password" autocomplete="current-password">
                         </label>
                         <div class="tf-links">
-                            <button id="tf-start-recovery" type="button" class="link-button" hidden>No access to your phone? Use a recovery code</button>
+                            <button id="tf-start-recovery" type="button" class="link-button" hidden>No access to your phone or email? Use a recovery code</button>
                         </div>
                         <div class="modal-actions tf-buttons">
                             <button id="tf-start-cancel" type="button">Cancel</button>
@@ -280,7 +288,7 @@
 
                     <form id="tf-verify" class="tf-step" hidden novalidate>
                         <p id="tf-verify-intro"></p>
-                        <label id="tf-code-label" class="share-field">Code from the text message
+                        <label id="tf-code-label" class="share-field"><span id="tf-code-label-text">Code from the text message</span>
                             <input id="tf-code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" spellcheck="false">
                         </label>
                         <label id="tf-recovery-label" class="share-field" hidden>Recovery code
@@ -297,7 +305,7 @@
                     </form>
 
                     <div id="tf-codes-step" class="tf-step" hidden>
-                        <p><strong>Save your recovery codes.</strong> If you lose your phone, each one signs you in once in place of a texted code. They are not shown again.</p>
+                        <p><strong>Save your recovery codes.</strong> If you lose your phone or your email, each one signs you in once in place of a code. They are not shown again.</p>
                         <ol id="tf-code-list" class="recovery-codes"></ol>
                         <div class="modal-actions tf-buttons">
                             <button id="tf-codes-copy" type="button">Copy</button>
@@ -307,7 +315,7 @@
                     </div>
 
                     <div id="tf-message" class="status-message" role="status" aria-live="polite" hidden></div>
-                    <p class="muted tf-note">Codes come by text message. That protects your account from a stolen password, but not from someone who takes over your phone number, so keep your recovery codes somewhere safe.</p>
+                    <p class="muted tf-note">Codes come by text message or email. That protects your account from a stolen password, but not from someone who takes over your phone number or your mailbox, so keep your recovery codes somewhere safe.</p>
                 </section>
             </div>
         </div>

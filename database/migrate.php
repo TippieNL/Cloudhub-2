@@ -161,19 +161,29 @@ if (!$hadRole) {
 // nullable and appended, which MySQL and MariaDB add without rewriting rows.
 addColumn($pdo, 'users', 'two_factor_phone', 'VARCHAR(20) NULL');
 addColumn($pdo, 'users', 'two_factor_enabled_at', 'DATETIME NULL');
+// Email codes: where they go for an account that chose email over SMS.
+// Nullable and appended, like the two above. Until it exists, email cannot be
+// chosen; nothing else about two-step verification changes.
+addColumn($pdo, 'users', 'two_factor_email', 'VARCHAR(254) NULL');
 
 /*
  * Two-step verification throttles codes checked and text messages sent in
  * login_attempts, beside the password failures it already holds.
  *
  * Values are only appended to the ENUM, so every existing row keeps its
- * meaning. Until this runs, those inserts fail and every two-step request is
- * refused -- closed, not open -- while sign-in for everyone else is unchanged.
+ * meaning -- including values another build added: the email-only build of
+ * two-step verification replaced the text-message ones with email_user,
+ * email_ip and email_address, and its rows stay. Until this runs, those
+ * inserts fail and every two-step request is refused -- closed, not open --
+ * while sign-in for everyone else is unchanged.
  */
 $scopeType = $pdo->query("SELECT COLUMN_TYPE FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'login_attempts' AND COLUMN_NAME = 'scope'")->fetchColumn();
-if (is_string($scopeType) && !str_contains($scopeType, "'sms_phone'")) {
-    $pdo->exec("ALTER TABLE login_attempts MODIFY scope ENUM('user','ip','verify_user','verify_ip','sms_user','sms_ip','sms_phone') NOT NULL");
+$scopes = is_string($scopeType)
+    ? \CloudHub\Helpers\SchemaEnum::withAdded($scopeType, ['user', 'ip', 'verify_user', 'verify_ip', 'sms_user', 'sms_ip', 'sms_phone'])
+    : null;
+if ($scopes !== null) {
+    $pdo->exec('ALTER TABLE login_attempts MODIFY scope ENUM('.implode(',', array_map(static fn(string $v): string => $pdo->quote($v), $scopes)).') NOT NULL');
     echo "Extended login_attempts.scope for two-step verification\n";
 }
 

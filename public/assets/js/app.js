@@ -214,6 +214,16 @@ async function authPost(route, body = {}) {
     return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
 }
 
+/** Whether a code goes by email rather than by text: answers say so in `channel`. */
+function byEmail(d) {
+    return d?.channel === 'email';
+}
+
+/** Where a code went, in words: the masked address, or the number's last two digits. */
+function codeWhere(d) {
+    return byEmail(d) ? (d.destination || 'your email address') : `your phone number ending in ${d?.phoneEnding || '••'}`;
+}
+
 function showPasswordStep() {
     stopOtp(signInCode);
     signInCode.resend?.stop();
@@ -235,12 +245,13 @@ function showTwoFactorStep(info) {
     $('#login').style.display = 'flex';
     renderSignInCode();
     if (!info.smsAvailable) {
-        signInStatus('This server cannot send text messages right now. Use one of your recovery codes, or ask your administrator.');
+        signInStatus(`This server cannot send ${byEmail(info) ? 'email' : 'text messages'} right now. Use one of your recovery codes, or ask your administrator.`);
     } else if (info.codeSent) {
         // Back on this step after a reload: the code already sent still works.
         signInStatus('A code was already sent, and still works.');
         signInCode.resend.start(info.resendIn);
-        listenForOtp(signInCode, $('#two-factor-code'), $('#two-factor-form'));
+        // The browser can read a code out of a text message, never out of an email.
+        if (!byEmail(info)) listenForOtp(signInCode, $('#two-factor-code'), $('#two-factor-form'));
     } else {
         sendSignInCode();
     }
@@ -253,10 +264,10 @@ function renderSignInCode() {
     $('#two-factor-recovery-label').hidden = !recovery;
     $('#two-factor-resend').hidden = recovery || !info.smsAvailable;
     $('#two-factor-switch').hidden = recovery && !info.smsAvailable;
-    $('#two-factor-switch').textContent = recovery ? 'Use a texted code instead' : 'Use a recovery code instead';
+    $('#two-factor-switch').textContent = recovery ? `Use ${byEmail(info) ? 'an emailed' : 'a texted'} code instead` : 'Use a recovery code instead';
     $('#two-factor-intro').textContent = recovery
         ? 'Enter one of the recovery codes you saved when you turned on two-step verification. Each one works once.'
-        : `Enter the ${info.codeLength || 6}-digit code we sent to your phone number ending in ${info.phoneEnding || '••'}.`;
+        : `Enter the ${info.codeLength || 6}-digit code we sent to ${codeWhere(info)}.`;
     setTimeout(() => (recovery ? $('#two-factor-recovery') : $('#two-factor-code')).focus(), 0);
 }
 
@@ -281,9 +292,10 @@ async function sendSignInCode() {
     if (status === 401) return signInCodeExpired(data);
     if (ok) {
         const minutes = Math.max(1, Math.round((data.expiresIn || 300) / 60));
-        signInStatus(`Code sent. It works for ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+        signInStatus(`Code sent. It works for ${minutes} minute${minutes === 1 ? '' : 's'}.`
+            + (byEmail(data) ? ' If it does not arrive, look in your spam folder.' : ''));
         signInCode.resend.start(data.resendIn);
-        listenForOtp(signInCode, $('#two-factor-code'), $('#two-factor-form'));
+        if (!byEmail(data)) listenForOtp(signInCode, $('#two-factor-code'), $('#two-factor-form'));
         return;
     }
     signInStatus('');
@@ -317,7 +329,7 @@ $('#two-factor-form').addEventListener('submit', async e => {
     const error = $('#two-factor-error');
     const value = input.value.trim();
     if (!value) {
-        error.textContent = recovery ? 'Enter a recovery code.' : 'Enter the code from the text message.';
+        error.textContent = recovery ? 'Enter a recovery code.' : `Enter the code from the ${byEmail(signInCode.info) ? 'email' : 'text message'}.`;
         return;
     }
     const submit = $('#two-factor-submit');
@@ -329,7 +341,7 @@ $('#two-factor-form').addEventListener('submit', async e => {
         if (ok) {
             applySignIn(data);
             if (typeof data.recoveryCodesLeft === 'number') {
-                toast(`Signed in with a recovery code; ${data.recoveryCodesLeft} left. If your phone is gone, change the number under Security.`, 8000);
+                toast(`Signed in with a recovery code; ${data.recoveryCodesLeft} left. If your phone or email is gone, change where codes go under Security.`, 8000);
             }
             await route();
             refreshOfflineSet();
@@ -2481,7 +2493,7 @@ $('#selection-download').addEventListener('click', downloadSelected);
 
 async function servers() {
     const list = await (await api('/api/servers')).json();
-    $('#server-list').innerHTML = list.map(s => `<div class="server"><strong>${esc(s.name)}</strong> <small>${s.type}${s.isDefault ? ' · default' : ''}${s.isActive ? ' · active' : ' · inactive'}</small><div class="actions"><button data-toggle="${s.id}">Toggle</button><button data-default="${s.id}">Set default</button><button data-sdel="${s.id}">Delete</button></div></div>`).join('');
+    $('#server-list').innerHTML = list.map(s => `<div class="server"><strong>${esc(s.name)}</strong> <small>${esc(s.type)}${s.isDefault ? ' · default' : ''}${s.isActive ? ' · active' : ' · inactive'}</small><div class="actions"><button data-toggle="${s.id}">Toggle</button><button data-default="${s.id}">Set default</button><button data-sdel="${s.id}">Delete</button></div></div>`).join('');
     
     document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', async () => {
         await api(`/api/servers/${b.dataset.toggle}/toggle`, { method: 'POST' });
@@ -2745,24 +2757,64 @@ function renderSecurity() {
     $('#tf-badge').textContent = o.enabled ? 'On' : 'Off';
     $('#tf-badge').classList.toggle('on', !!o.enabled);
     let summary;
+    // codeAvailable is what a server with email support says; older ones only smsAvailable.
+    const canSend = o.codeAvailable ?? o.smsAvailable;
     if (o.enabled) {
         const left = o.recoveryCodesLeft;
-        summary = `Signing in asks for a code texted to your phone number ending in ${o.phoneEnding}. ${left} recovery code${left === 1 ? '' : 's'} left.`;
-        if (!o.smsAvailable) summary += ' This server cannot send text messages right now: sign in with a recovery code until it can.';
+        summary = `Signing in asks for a code sent to ${codeWhere(o)}. ${left} recovery code${left === 1 ? '' : 's'} left.`;
+        if (!canSend) summary += ` This server cannot send ${byEmail(o) ? 'email' : 'text messages'} right now: sign in with a recovery code until it can.`;
         else if (left <= 2) summary += ' Create new ones soon.';
     } else if (!o.schemaReady) {
         summary = 'Not available yet: the server’s database needs updating (php database/migrate.php).';
-    } else if (!o.smsAvailable) {
-        summary = 'Not available: no text-message service is set up on this server. An administrator can configure one.';
+    } else if (!o.available) {
+        // An administrator is told why below, so this does not claim that
+        // nothing is set up when a gateway is set up and refused.
+        summary = o.smsProblem || o.mailProblem
+            ? 'Not available: this server cannot send codes.'
+            : 'Not available: this server has no text-message or email service set up. An administrator can configure one.';
     } else {
-        summary = 'Off. Turn it on to be asked, after your password, for a code texted to your phone.';
+        const how = o.emailAvailable && o.smsAvailable ? 'by email or text message' : o.emailAvailable ? 'by email' : 'by text message';
+        summary = `Off. Turn it on to be asked, after your password, for a code sent ${how}.`;
     }
+    // Administrators are told which .env setting is at fault (never its value).
+    for (const problem of [o.smsProblem, o.mailProblem]) if (problem) summary += ` Server setting: ${problem}.`;
     $('#tf-summary').textContent = summary;
     $('#tf-enable').hidden = !!o.enabled || !o.available;
     $('#tf-change').hidden = !o.enabled;
-    $('#tf-change').disabled = !o.smsAvailable;
+    $('#tf-change').disabled = !o.smsAvailable && !o.emailAvailable;
     $('#tf-codes').hidden = !o.enabled;
     $('#tf-disable').hidden = !o.enabled;
+}
+
+/** Which way a new number or address is asked for: 'email' or 'phone'. */
+function securityChannel() {
+    return document.querySelector('input[name="tf-channel"]:checked')?.value === 'phone' ? 'phone' : 'email';
+}
+
+/** Show the field for the chosen way, and say what will happen. */
+function renderSecurityStart() {
+    const o = security.overview || {};
+    const action = security.flow?.action;
+    const where = codeWhere(o);
+    if (action === 'move') {
+        const email = securityChannel() === 'email';
+        $('#tf-start-intro').textContent = email
+            ? (o.enabled
+                ? 'Enter the email address to send codes to, and your password. We will email a code to it, and first send one to where codes go now unless you have just used it.'
+                : 'Enter the email address to send codes to, and your password. We will email a code to it to make sure it is yours.')
+            : (o.enabled
+                ? 'Enter your new mobile number and your password. We will text a code to the new number, and first send one to where codes go now unless you have just used it.'
+                : 'Enter the mobile number to send codes to, and your password. We will text a code to that number to make sure it is yours.');
+        $('#tf-email-label').hidden = !email;
+        $('#tf-phone-label').hidden = email;
+    } else {
+        $('#tf-start-intro').textContent = {
+            disable: `Enter your password. We will send a code to ${where} to confirm it is you.`,
+            recovery: `Enter your password. We will send a code to ${where}. Your current recovery codes then stop working.`
+        }[action] || '';
+        $('#tf-email-label').hidden = true;
+        $('#tf-phone-label').hidden = true;
+    }
 }
 
 function startSecurityChange(action) {
@@ -2770,30 +2822,37 @@ function startSecurityChange(action) {
     security.flow = { action };
     security.recovery = false;
     securityMessage(null);
-    const ending = o.phoneEnding || '••';
-    $('#tf-start-intro').textContent = {
-        phone: o.enabled
-            ? 'Enter your new mobile number and your password. We will text a code to the new number, and first to your current one unless you have just used it.'
-            : 'Enter the mobile number to send codes to, and your password. We will text a code to that number to make sure it is yours.',
-        disable: `Enter your password. We will text a code to your phone number ending in ${ending} to confirm it is you.`,
-        recovery: `Enter your password. We will text a code to your phone number ending in ${ending}. Your current recovery codes then stop working.`
-    }[action];
-    $('#tf-phone-label').hidden = action !== 'phone';
+    // Email when the server can send it, a text message otherwise; the choice
+    // is shown only where the server can do both.
+    const choose = action === 'move' && o.emailAvailable && o.smsAvailable;
+    $('#tf-channel').hidden = !choose;
+    const initial = !o.emailAvailable ? 'phone' : !o.smsAvailable ? 'email' : (byEmail(o) || !o.enabled ? 'email' : 'phone');
+    document.querySelectorAll('input[name="tf-channel"]').forEach(r => { r.checked = r.value === initial; });
     $('#tf-phone').value = '';
+    $('#tf-email').value = '';
     $('#tf-password').value = '';
-    // Phone gone: the current phone is answered with a recovery code, and nothing is texted to it.
+    renderSecurityStart();
+    // No access to where codes go now: the current phone or address is
+    // answered with a recovery code, and nothing is sent to it.
     $('#tf-start-recovery').hidden = !o.enabled;
     securityStep('#tf-start');
-    setTimeout(() => (action === 'phone' ? $('#tf-phone') : $('#tf-password')).focus(), 0);
+    setTimeout(() => (action !== 'move' ? $('#tf-password') : securityChannel() === 'email' ? $('#tf-email') : $('#tf-phone')).focus(), 0);
 }
 
 async function submitSecurityStart(method) {
     const flow = security.flow;
     if (!flow) return;
     const body = { action: flow.action, currentPassword: $('#tf-password').value, method };
-    if (flow.action === 'phone') {
-        body.phone = $('#tf-phone').value.trim();
-        if (!body.phone) return securityMessage('error', 'Enter your mobile number, starting with + and the country code.');
+    if (flow.action === 'move') {
+        if (securityChannel() === 'email') {
+            body.action = 'email';
+            body.email = $('#tf-email').value.trim();
+            if (!body.email) return securityMessage('error', 'Enter the email address to send codes to.');
+        } else {
+            body.action = 'phone';
+            body.phone = $('#tf-phone').value.trim();
+            if (!body.phone) return securityMessage('error', 'Enter your mobile number, starting with + and the country code.');
+        }
     }
     if (!body.currentPassword) return securityMessage('error', 'Enter your current password.');
     const button = method === 'recovery' ? $('#tf-start-recovery') : $('#tf-start-submit');
@@ -2824,7 +2883,7 @@ function showSecurityCode(d, recovery = false) {
     if (d.error) securityMessage('error', d.error.message);
     if (!security.recovery) {
         security.resend.start(d.sent ? d.resendIn : (d.error?.retryAfter || 0));
-        if (d.sent) listenForOtp(security, $('#tf-code'), $('#tf-verify'));
+        if (d.sent && !byEmail(d)) listenForOtp(security, $('#tf-code'), $('#tf-verify'));
     }
 }
 
@@ -2835,12 +2894,14 @@ function renderSecurityCode() {
     $('#tf-recovery-label').hidden = !recovery;
     $('#tf-resend').hidden = recovery;
     $('#tf-switch').hidden = !d.recoveryAllowed;
-    $('#tf-switch').textContent = recovery ? 'Use a texted code instead' : 'Use a recovery code instead';
+    $('#tf-switch').textContent = recovery ? `Use ${byEmail(d) ? 'an emailed' : 'a texted'} code instead` : 'Use a recovery code instead';
+    $('#tf-code-label-text').textContent = byEmail(d) ? 'Code from the email' : 'Code from the text message';
     $('#tf-verify-intro').textContent = recovery
-        ? 'Enter one of your recovery codes in place of a code from your current phone.'
+        ? 'Enter one of your recovery codes in place of a code sent to where codes go now.'
         : d.stage === 'current'
-            ? `Enter the code we sent to your current phone number, ending in ${d.phoneEnding}.`
-            : `Enter the code we sent to the number ending in ${d.phoneEnding}.`;
+            ? `Enter the code we sent to ${codeWhere(d)}, where codes go now.`
+            : `Enter the code we sent to ${codeWhere(d)}.`
+                + (byEmail(d) ? ' If it does not arrive, look in your spam folder.' : '');
     setTimeout(() => (recovery ? $('#tf-recovery') : $('#tf-code')).focus(), 0);
 }
 
@@ -2851,8 +2912,8 @@ async function resendSecurityCode() {
         const d = await (await api('/api/users/me/two-factor/resend', { method: 'POST' })).json();
         security.flow = { ...security.flow, ...d };
         security.resend.start(d.resendIn);
-        securityMessage('success', `A new code is on its way to the number ending in ${d.phoneEnding}.`);
-        listenForOtp(security, $('#tf-code'), $('#tf-verify'));
+        securityMessage('success', `A new code is on its way to ${codeWhere(security.flow)}.`);
+        if (!byEmail(security.flow)) listenForOtp(security, $('#tf-code'), $('#tf-verify'));
     } catch (e) {
         securityMessage('error', e.message);
         if (e.code === 'TWO_FACTOR_NO_PENDING_CHANGE') return backToSecurity(false);
@@ -2864,7 +2925,7 @@ async function submitSecurityCode() {
     const recovery = security.recovery;
     const input = recovery ? $('#tf-recovery') : $('#tf-code');
     const value = input.value.trim();
-    if (!value) return securityMessage('error', recovery ? 'Enter a recovery code.' : 'Enter the code from the text message.');
+    if (!value) return securityMessage('error', recovery ? 'Enter a recovery code.' : `Enter the code from the ${byEmail(security.flow) ? 'email' : 'text message'}.`);
     const submit = $('#tf-verify-submit');
     submit.disabled = true;
     submit.textContent = 'Verifying…';
@@ -2876,7 +2937,7 @@ async function submitSecurityCode() {
         if (!d.done) {
             // The current phone is proven; now the new number's own code.
             showSecurityCode(d);
-            if (!d.error) securityMessage('success', `Thanks. Now enter the code we sent to your new number ending in ${d.phoneEnding}.`);
+            if (!d.error) securityMessage('success', `Thanks. Now enter the code we sent to ${codeWhere(d)}.`);
             return;
         }
         const wasOn = !!security.overview?.enabled;
@@ -2885,11 +2946,11 @@ async function submitSecurityCode() {
         if (d.recoveryCodes) {
             showRecoveryCodes(d.recoveryCodes);
             securityMessage('success', wasOn ? 'New recovery codes are ready. The old ones no longer work.'
-                : 'Two-step verification is on. Signing in will now ask for a code texted to your phone.');
+                : `Two-step verification is on. Signing in will now ask for a code sent to ${codeWhere(d)}.`);
         } else {
             securityStep(null);
             securityMessage('success', d.enabled
-                ? `Done. Codes now go to your phone number ending in ${d.phoneEnding}.`
+                ? `Done. Codes now go to ${codeWhere(d)}.`
                 : 'Two-step verification is off. Signing in takes your password only.');
         }
     } catch (e) {
@@ -2918,8 +2979,12 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && !$('#security-overlay').hidden && $('#password-overlay').hidden
         && $('#confirm-overlay').hidden && $('#input-overlay').hidden) closeSecurity();
 });
-$('#tf-enable').addEventListener('click', () => startSecurityChange('phone'));
-$('#tf-change').addEventListener('click', () => startSecurityChange('phone'));
+$('#tf-enable').addEventListener('click', () => startSecurityChange('move'));
+$('#tf-change').addEventListener('click', () => startSecurityChange('move'));
+document.querySelectorAll('input[name="tf-channel"]').forEach(r => r.addEventListener('change', () => {
+    renderSecurityStart();
+    (securityChannel() === 'email' ? $('#tf-email') : $('#tf-phone')).focus();
+}));
 $('#tf-codes').addEventListener('click', () => startSecurityChange('recovery'));
 $('#tf-disable').addEventListener('click', () => startSecurityChange('disable'));
 $('#tf-start').addEventListener('submit', e => {
@@ -3351,7 +3416,7 @@ async function route() {
     } else if (p === '/browse') {
         $('#browse-page').hidden = false;
         const a = await (await api('/api/servers/active')).json();
-        $('#active-servers').innerHTML = a.map(s => `<div class="server">${esc(s.name)} · ${s.type}</div>`).join('');
+        $('#active-servers').innerHTML = a.map(s => `<div class="server">${esc(s.name)} · ${esc(s.type)}</div>`).join('');
     } else {
         S.page = '/';
         $('#files-page').hidden = false;

@@ -129,11 +129,61 @@ application internals plus common secret, backup, SQL, log and INI artefacts.
 For an internet-facing NAS, keep `storage/files` outside the web document root
 where practical and terminate traffic with HTTPS.
 
-## SMS two-step verification
+## Audit fixes (November 2026)
+
+Each of these was reproduced against a running server before it was fixed,
+and is covered by `tests/http/run.php` and `tests/phase50_audit_regressions_test.php`.
+
+- **Share links matched paths case- and accent-insensitively.** `file_path`
+  columns use `utf8mb4_unicode_ci`, where `/Photos` equals `/photos`. Moving the
+  folder `/photos` re-pointed the public link for `/Photos/a.txt` at
+  `/photos/a.txt` — a file nobody shared — and served it; sharing `/Photos/a.txt`
+  could hand back the existing link of `/photos/a.txt`; deleting one folder
+  revoked the other's links. Share links and the upload ledger now keep only
+  byte-exact matches, as favorites already did, and a share token is honoured
+  only exactly as issued. No schema change is needed.
+- **CloudHub's own top-level names could be taken.** Uploads (chunked and
+  multipart), move and copy build their destination from a folder and a name
+  without the reserved-name check client paths get, so a file called `.trash`
+  on a fresh install broke every delete, invisibly and irremovably. They are
+  refused at the top level (403); below it they remain ordinary names.
+- **Changing a password left other sessions signed in.** Sessions now carry a
+  digest of the password hash they signed in with; the once-a-minute account
+  re-check ends any whose password has since changed, as it does for a
+  disabled account. The changing session gets the new digest and a rotated ID.
+- **The current-password check on `/api/users/me/password` was unthrottled**,
+  an unlimited password oracle for a borrowed session. It now uses the sign-in
+  limits. The sign-in throttle itself counted and then recorded, so parallel
+  guesses all got through (9–10 checks against a limit of 5 with 8 workers);
+  attempts now claim their slot before the password is checked.
+- **Storage-server configs reached every account.** `/api/servers/active`
+  returned each server's whole config (host, username, and any credential not
+  named `password`, `privateKey` or `apiKey`) to viewers. It now returns name and
+  type only; administrators see every credential-like key masked, and server
+  input is validated.
+- **One non-UTF-8 file name took down its folder.** A Latin-1 name (as copied
+  from an old share) made the folder's listing and any search reaching it
+  answer 500 for everyone. Such names can no longer be created, and existing
+  ones are listed with U+FFFD and remain reachable over WebDAV.
+- **A gateway phone reached over Tailscale turned texts off.** Its `100.x`
+  address and `*.ts.net` name were not counted as local for a plain-HTTP
+  webhook, so the gateway was refused, logged once, and every account with
+  two-step verification could sign in only with a recovery code. They are
+  accepted now, and an administrator's Security panel names the refused
+  setting instead of saying no service is set up.
+- Smaller: a WebDAV PUT whose body ends before its `Content-Length` is refused
+  rather than replacing the file with a fragment; `tools/create-admin.php`
+  trims passwords as the API does (an account made with surrounding spaces could
+  never sign in); `/play` shows a sign-in page rather than JSON when signed out.
+
+## Two-step verification (SMS or email)
 
 An account can require, after its password, a six-digit code texted to its
-owner's phone. It is off until the owner turns it on; accounts that leave it
-off sign in exactly as before. README.md describes the feature and its setup.
+owner's phone -- or emailed to them, where the server can send email. It is off
+until the owner turns it on; accounts that leave it off sign in exactly as
+before. README.md describes the feature and its setup. What follows was
+written for texts; an email address is held to every rule a phone number is
+(see **Codes by email** for what differs).
 
 ### Where it is enforced
 
@@ -257,9 +307,12 @@ method), `auth.two_factor` failures, `two_factor.sms`, `two_factor.enable`,
 Credentials live in `.env` only and never reach a browser. Requests verify TLS,
 never follow redirects (which would carry the credentials and the code
 elsewhere) and give up after `SMS_TIMEOUT_SECONDS`. A webhook over plain HTTP
-is refused unless it is on this machine or a private network — which is where
-an SMS gateway app on an Android phone sits (`SMS_WEBHOOK_FORMAT=traccar` or
-`smsgate`). Such a phone sees every code it sends, as any SMS provider does;
+is refused unless it is on this machine, a private network, or a Tailscale
+network (`100.64.0.0/10`, `*.ts.net`; WireGuard-encrypted between devices) —
+which is where an SMS gateway app on an Android phone sits
+(`SMS_WEBHOOK_FORMAT=traccar` or `smsgate`). `100.64.0.0/10` is also the
+carrier-grade NAT range inside some ISPs; it is accepted because a gateway is
+only ever there when the operator wrote that address into `.env`. Such a phone sees every code it sends, as any SMS provider does;
 keep it on a network you control, and its API key or password in `.env`
 only. The development
 outbox (`SMS_DRIVER=log`) writes working codes to `logs/sms-outbox.log` and is
@@ -279,6 +332,34 @@ password-only one when two-step verification is turned on elsewhere — sends th
 app back to sign-in. Versions 4.2 and earlier cannot complete the step: they
 show the server's message and are never signed in.
 
+### Codes by email
+
+- **One place per account.** Codes go to the phone *or* the address its owner
+  proved with a code sent to it (`users.two_factor_email`); moving between
+  them follows the rules for changing the number, and the old place is told.
+- **Transport.** CloudHub speaks SMTP itself (`MAIL_DRIVER=smtp`): STARTTLS or
+  TLS from the first byte, TLS 1.2 or later, the certificate checked against
+  `MAIL_HOST`. Extra TLS options can add trust but never turn verification
+  off, and a server that does not offer STARTTLS when it was asked for is a
+  failure, not a quiet fall back to plain text. Plain SMTP is accepted only to
+  this machine, a private network or a Tailscale network.
+- **Injection.** Addresses are refused outright if they carry anything an SMTP
+  command or a header could be split on -- line breaks, brackets, commas,
+  quotes, spaces -- and the message body is dot-stuffed, so nothing a person
+  types can add a recipient, a header or a second message.
+- **Credentials** (`MAIL_USERNAME`, `MAIL_PASSWORD`) live in `.env` only. Use an
+  app password where the provider has them, never the mailbox's own password.
+- **Nothing identifying in logs.** Failures are logged by stage and SMTP reply
+  code only (servers quote the address in their error text, so it is dropped);
+  answers show an address masked (`k•••@example.com`); the audit trail records
+  `two_factor.email` and `two_factor.email_change` with no address at all.
+- **Limits.** Texts and emails share the hourly limits, per account, per
+  destination and per client address.
+- **Failing closed.** A mail server that refuses the address, is down or cannot
+  be configured sends nothing and signs nobody in: such an account then signs
+  in with a recovery code. A database `migrate.php` has not given the column
+  reads as "no address" -- never as "two-step verification is off".
+
 ### What SMS does not protect against
 
 SMS is the weakest common second factor. It stops someone who has only the
@@ -293,6 +374,12 @@ password. It does not stop:
 - **someone with the phone unlocked**, or a stolen session cookie (a second
   factor protects signing in, not a session that already exists);
 - an **administrator** or the server's operator, who can reset it.
+
+Email has its own weak spots, and is no stronger: whoever gets into the mailbox
+-- a reused or phished mailbox password, a session left signed in, the same
+phone with the mail app open -- receives the codes; a mailbox reached from the
+phone CloudHub is used on makes the two steps one device. Protect the mailbox
+with its own second factor.
 
 Keep recovery codes offline, and consider an authenticator app or passkeys in a
 future version for accounts that need more. SMS also costs money: the limits

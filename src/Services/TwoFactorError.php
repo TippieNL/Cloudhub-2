@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace CloudHub\Services;
 
+use CloudHub\Services\Mail\MailException;
 use CloudHub\Services\Sms\SmsException;
 
 /**
@@ -71,7 +72,7 @@ final class TwoFactorError extends \RuntimeException
 
     public static function malformedCode(int $length): self
     {
-        return new self('VALIDATION_FAILED', 'Enter the '.$length.'-digit code from the text message.', 422);
+        return new self('VALIDATION_FAILED', 'Enter the '.$length.'-digit code you were sent.', 422);
     }
 
     public static function recoveryWrong(): self
@@ -81,7 +82,7 @@ final class TwoFactorError extends \RuntimeException
 
     public static function recoveryNotAllowed(): self
     {
-        return new self('TWO_FACTOR_RECOVERY_NOT_ALLOWED', 'A new number can only be confirmed with the code sent to it.', 422);
+        return new self('TWO_FACTOR_RECOVERY_NOT_ALLOWED', 'A new number or email address can only be confirmed with the code sent to it.', 422);
     }
 
     public static function locked(int $retryAfter): self
@@ -96,9 +97,11 @@ final class TwoFactorError extends \RuntimeException
             ['retryAfter' => $retryAfter], $retryAfter);
     }
 
-    public static function smsLimit(int $retryAfter): self
+    /** The hourly limits count texts and emails alike; the code stays the same for both, which clients already know. */
+    public static function smsLimit(int $retryAfter, string $channel = 'sms'): self
     {
-        return new self('TWO_FACTOR_SMS_LIMIT', 'Too many text messages were sent. Try again in '.self::wait($retryAfter).', or use a recovery code.', 429,
+        $what = $channel === 'email' ? 'Too many emails were sent' : 'Too many text messages were sent';
+        return new self('TWO_FACTOR_SMS_LIMIT', $what.'. Try again in '.self::wait($retryAfter).', or use a recovery code.', 429,
             ['retryAfter' => $retryAfter], $retryAfter);
     }
 
@@ -115,6 +118,31 @@ final class TwoFactorError extends \RuntimeException
             default => new self('SMS_UNAVAILABLE', 'The text message could not be sent just now. If a code arrives anyway it will work; otherwise try again in '
                 .self::wait($retryAfter).', or use a recovery code.', 503, ['retryAfter' => $retryAfter], $retryAfter),
         };
+    }
+
+    public static function mailNotConfigured(): self
+    {
+        return new self('EMAIL_NOT_CONFIGURED', 'This server cannot send email, so no code can be sent. Use a recovery code, or ask your administrator.', 503);
+    }
+
+    public static function fromMail(MailException $e, int $retryAfter): self
+    {
+        return match ($e->kind) {
+            MailException::REJECTED => new self('EMAIL_REJECTED', 'The mail server refused that address. Check the address and try again.', 422),
+            MailException::NOT_CONFIGURED => self::mailNotConfigured(),
+            default => new self('EMAIL_UNAVAILABLE', 'The email could not be sent just now. If a code arrives anyway it will work; otherwise try again in '
+                .self::wait($retryAfter).', or use a recovery code.', 503, ['retryAfter' => $retryAfter], $retryAfter),
+        };
+    }
+
+    public static function emailInvalid(): self
+    {
+        return new self('VALIDATION_FAILED', 'Enter an email address, like name@example.com.', 422);
+    }
+
+    public static function sameEmail(): self
+    {
+        return new self('VALIDATION_FAILED', 'That is already the address codes are sent to.', 422);
     }
 
     public static function wrongPassword(): self
@@ -139,7 +167,7 @@ final class TwoFactorError extends \RuntimeException
 
     public static function unknownAction(): self
     {
-        return new self('VALIDATION_FAILED', 'action must be one of phone, disable, recovery', 422);
+        return new self('VALIDATION_FAILED', 'action must be one of phone, email, disable, recovery', 422);
     }
 
     public static function notMigrated(): self

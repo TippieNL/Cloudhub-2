@@ -164,8 +164,9 @@ class CloudHubApi(
     suspend fun twoFactor(): TwoFactorOverview = get("/api/users/me/two-factor") { decode(it) }
 
     /**
-     * Begin a change: "phone" turns it on or moves it to [phone], "disable"
-     * turns it off, "recovery" replaces the recovery codes. With
+     * Begin a change: "phone" or "email" turns it on or moves codes to [phone]
+     * -- the new number, or the new address -- "disable" turns it off,
+     * "recovery" replaces the recovery codes. With
      * [useRecoveryCode] the current phone is answered with a recovery code, so
      * nothing is texted to it -- for a phone that is lost.
      */
@@ -178,7 +179,7 @@ class CloudHubApi(
         val body = buildMap {
             put("action", action)
             put("currentPassword", currentPassword)
-            if (phone != null) put("phone", phone)
+            if (phone != null) put(if (action == "email") "email" else "phone", phone)
             put("method", if (useRecoveryCode) "recovery" else "sms")
         }
         return post("/api/users/me/two-factor/start", body) { decode(it) }
