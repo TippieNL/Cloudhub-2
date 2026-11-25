@@ -43,6 +43,9 @@ final class Mail
             self::fromName($config),
             max(2, min(30, (int)($config['mail_timeout_seconds'] ?? 10) ?: 10)),
             self::heloName($config),
+            // Added to the verified defaults: a bundle to check the server against
+            // where PHP's OpenSSL has none of its own.
+            self::caFile($config) !== '' ? ['cafile' => self::caFile($config)] : [],
         );
     }
 
@@ -77,7 +80,16 @@ final class Mail
         if (self::from($config) === null) {
             return 'MAIL_FROM must be an email address (or MAIL_USERNAME one, to send as); emails are off';
         }
+        $caFile = self::caFile($config);
+        if ($caFile !== '' && (!is_file($caFile) || !is_readable($caFile))) {
+            return 'MAIL_CA_FILE (or SMTP_CA_FILE) names a file that cannot be read; emails are off';
+        }
         return null;
+    }
+
+    private static function caFile(array $config): string
+    {
+        return trim((string)($config['mail_ca_file'] ?? ''));
     }
 
     /**

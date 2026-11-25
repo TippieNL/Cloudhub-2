@@ -20,3 +20,18 @@ SET @sql := IF(@has=0, 'ALTER TABLE users ADD COLUMN two_factor_email VARCHAR(25
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
+
+-- On login_attempts: the scopes codes are throttled under. The email-only
+-- build of two-step verification replaced the text-message ones (sms_user,
+-- sms_ip, sms_phone), which this build throttles texts and emails with, by
+-- its own (email_user, email_ip, email_address). Without them every code is
+-- refused with "needs a database update". Values are only added, so every
+-- row keeps its meaning; a database that has them already is left alone.
+SET @type := (SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA=@db AND TABLE_NAME='login_attempts' AND COLUMN_NAME='scope');
+SET @sql := IF(@type IS NOT NULL AND LOCATE('''sms_phone''', @type)=0 AND LOCATE('''email_address''', @type)>0,
+  'ALTER TABLE login_attempts MODIFY scope ENUM(''user'',''ip'',''verify_user'',''verify_ip'',''email_user'',''email_ip'',''email_address'',''sms_user'',''sms_ip'',''sms_phone'') NOT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

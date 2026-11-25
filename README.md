@@ -395,6 +395,15 @@ Check the settings with `php tools/test-mail.php you@gmail.com`, which sends
 one test email or says why it could not: the setting at fault, or the mail
 server's answer (`535` at `auth` is a wrong username or app password).
 
+On Android/KSWEB, PHP's OpenSSL usually has no CA certificates, so every
+certificate check fails: download `https://curl.se/ca/cacert.pem` and set
+`MAIL_CA_FILE` to its full path. A `.env` written for the email-only build of
+two-step verification (`SMTP_HOST`, `SMTP_PASSWORD`, `MAIL_FROM_ADDRESS`,
+`SMTP_CA_FILE`, …) works as it is: those names are read while the `MAIL_`
+ones are empty, `SMTP_HOST` standing for `MAIL_DRIVER=smtp`. Its database
+works too, once `php database/migrate.php` (or the SQL file below) has put the
+text-message throttle scopes back beside its email ones.
+
 Port 587 with STARTTLS is the default; `MAIL_ENCRYPTION=ssl` uses 465.
 `MAIL_FROM` and `MAIL_FROM_NAME` set the sender (by default the account in
 `MAIL_USERNAME`, and `SMS_APP_NAME`). Plain SMTP (`MAIL_ENCRYPTION=none`) is

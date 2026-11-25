@@ -24,6 +24,7 @@ spl_autoload_register(static function (string $class): void {
     if (is_file($file)) require $file;
 });
 
+use CloudHub\Helpers\SchemaEnum;
 use CloudHub\Repositories\TwoFactorRepository;
 use CloudHub\Services\Auth;
 use CloudHub\Services\EmailAddress;
@@ -37,6 +38,16 @@ use CloudHub\Services\Sms\SmsException;
 use CloudHub\Services\Sms\SmsSender;
 use CloudHub\Services\TwoFactor;
 use CloudHub\Services\TwoFactorError;
+
+/** config/config.php's env() and env_bool(), reading only what $configOf sets. */
+function env(string $key, mixed $default = null): mixed
+{
+    return array_key_exists($key, $GLOBALS['configTestEnv'] ?? []) ? $GLOBALS['configTestEnv'][$key] : $default;
+}
+function env_bool(string $key, bool $default = false): bool
+{
+    return filter_var(env($key, $default ? 'true' : 'false'), FILTER_VALIDATE_BOOLEAN);
+}
 
 $root = dirname(__DIR__);
 $scratch = sys_get_temp_dir().'/cloudhub-p51-'.bin2hex(random_bytes(5));
@@ -163,6 +174,47 @@ $checks['the development outbox only in development'] = Mail::fromConfig(['mail_
 $checks['an unknown driver is no mail server'] = Mail::fromConfig(['mail_driver' => 'pigeon'], $scratch) === null;
 $checks['the reasons name settings, never their values'] = !str_contains((string)Mail::problem($smtp(['mail_password' => ''])), 'cloudhub@example.com')
     && !str_contains((string)Mail::problem($smtp(['mail_encryption' => 'none'])), 'smtp.example.com');
+$checks['a CA file that cannot be read is refused, by the setting\'s name only'] =
+    ($p = (string)Mail::problem($smtp(['mail_ca_file' => $scratch.'/missing-ca.pem']))) !== '' && str_contains($p, 'MAIL_CA_FILE') && !str_contains($p, 'missing-ca')
+    && str_contains((string)Mail::problem($smtp(['mail_ca_file' => $scratch])), 'MAIL_CA_FILE');
+
+// config/config.php read with exactly the settings given -- through this
+// script's own env(), as config/bootstrap.php is not loaded here -- so neither
+// the repository's .env nor the environment fills anything in.
+$configOf = static function (array $env) use ($root): array {
+    $GLOBALS['configTestEnv'] = $env;
+    return require $root.'/config/config.php';
+};
+$legacy = $configOf(['SMTP_HOST' => 'smtp.gmail.com', 'SMTP_PORT' => '587', 'SMTP_ENCRYPTION' => 'tls', 'SMTP_USERNAME' => 'kevin@example.test',
+    'SMTP_PASSWORD' => 'abcdefghijklmnop', 'MAIL_FROM_ADDRESS' => 'kevin@example.test', 'MAIL_FROM_NAME' => 'CloudHub',
+    'SMTP_TIMEOUT_SECONDS' => '12', 'SMTP_CA_FILE' => '/storage/emulated/0/htdocs/cacert.pem',
+    'TWO_FACTOR_EMAIL_PER_HOUR' => '7', 'TWO_FACTOR_EMAIL_IP_PER_HOUR' => '9']);
+$checks['a .env written for the email-only build is read as it is: SMTP_HOST means smtp'] = ($legacy['mail_driver'] ?? null) === 'smtp'
+    && $legacy['mail_host'] === 'smtp.gmail.com' && $legacy['mail_port'] === 587 && $legacy['mail_encryption'] === 'tls'
+    && $legacy['mail_username'] === 'kevin@example.test' && $legacy['mail_password'] === 'abcdefghijklmnop'
+    && $legacy['mail_from'] === 'kevin@example.test' && $legacy['mail_timeout_seconds'] === 12
+    && $legacy['mail_ca_file'] === '/storage/emulated/0/htdocs/cacert.pem'
+    && $legacy['two_factor_sms_per_hour'] === 7 && $legacy['two_factor_sms_ip_per_hour'] === 9
+    && Mail::problem(['mail_ca_file' => ''] + $legacy) === null && Mail::fromConfig(['mail_ca_file' => ''] + $legacy, $scratch) instanceof SmtpMail;
+$both = $configOf(['MAIL_DRIVER' => 'smtp', 'MAIL_HOST' => 'mail.example.test', 'MAIL_USERNAME' => 'a@example.test', 'MAIL_PASSWORD' => 'new',
+    'SMTP_HOST' => 'smtp.gmail.com', 'SMTP_USERNAME' => 'b@example.test', 'SMTP_PASSWORD' => 'old']);
+$checks['where both are set, the MAIL_ names win'] = ($both['mail_host'] ?? null) === 'mail.example.test'
+    && $both['mail_username'] === 'a@example.test' && $both['mail_password'] === 'new';
+$checks['MAIL_DRIVER=none still turns email off'] = ($configOf(['MAIL_DRIVER' => 'none', 'SMTP_HOST' => 'smtp.gmail.com'])['mail_driver'] ?? null) === 'none';
+$none = $configOf([]);
+$checks['and with neither set, email stays off and the limits keep their defaults'] = ($none['mail_driver'] ?? null) === ''
+    && $none['two_factor_sms_per_hour'] === 5 && $none['two_factor_sms_ip_per_hour'] === 20 && $none['mail_timeout_seconds'] === 10;
+
+// The throttle scopes on a database the email-only build migrated: its own are
+// kept, so its rows still mean something, and the text-message ones come back.
+$needed = ['user', 'ip', 'verify_user', 'verify_ip', 'sms_user', 'sms_ip', 'sms_phone'];
+$checks['an ENUM the email-only build left keeps its values and gains the missing ones'] =
+    SchemaEnum::withAdded("enum('user','ip','verify_user','verify_ip','email_user','email_ip','email_address')", $needed)
+    === ['user', 'ip', 'verify_user', 'verify_ip', 'email_user', 'email_ip', 'email_address', 'sms_user', 'sms_ip', 'sms_phone'];
+$checks['one that has them all, or is no ENUM, is left alone'] =
+    SchemaEnum::withAdded("enum('user','ip','verify_user','verify_ip','sms_user','sms_ip','sms_phone')", $needed) === null
+    && SchemaEnum::withAdded('varchar(20)', $needed) === null && SchemaEnum::values("ENUM('it''s','b')") === ["it's", 'b'];
+
 $outbox = new LogMail($scratch.'/mail-outbox.log');
 $outbox->send('kevin@example.com', '123456 is your CloudHub sign-in code', "123456 is your code.\n\nIt expires.");
 $checks['the development outbox keeps the code and masks the address'] = str_contains((string)file_get_contents($scratch.'/mail-outbox.log'), 'to k•••@example.com: 123456 is your CloudHub sign-in code')
@@ -252,6 +304,16 @@ if (extension_loaded('openssl')) {
     $implicit = $startSmtp(['implicit', $crt, $key], $creds);
     $client($implicit, 'ssl', ['cafile' => $crt])->send('k@example.test', 's', 'b');
     $checks['TLS from the first byte, as on port 465'] = ($lastReceived()['encrypted'] ?? false) === true;
+
+    // MAIL_CA_FILE (or SMTP_CA_FILE): what a PHP with no CA store of its own,
+    // as on KSWEB, checks the server against.
+    $viaConfig = static fn(array $more = []): ?MailSender => Mail::fromConfig($more + ['mail_driver' => 'smtp', 'mail_host' => 'localhost',
+        'mail_port' => $starttls, 'mail_encryption' => 'tls', 'mail_username' => 'cloudhub@example.test', 'mail_password' => 'p4ss word',
+        'mail_timeout_seconds' => 3, 'app_env' => 'production'], $scratch);
+    $viaConfig(['mail_ca_file' => $crt])->send('k@example.test', 'checked against MAIL_CA_FILE', 'b');
+    $checks['MAIL_CA_FILE is the bundle the server\'s certificate is checked against'] = ($lastReceived()['encrypted'] ?? false) === true
+        && str_contains((string)$lastReceived()['data'], 'Subject: checked against MAIL_CA_FILE');
+    $checks['without it, the same server is refused'] = refusal(fn() => $viaConfig()->send('k@example.test', 's', 'b')) === 'MAIL:unavailable';
 }
 
 // --- two-step verification by email -------------------------------------------------
@@ -447,14 +509,17 @@ $checks['the SQL migration adds the address column as migrate.php does, only whe
     && str_contains($sql, "COLUMN_NAME='two_factor_email'") && str_contains($sql, "'ALTER TABLE users ADD COLUMN two_factor_email $defined'")
     && !preg_match('/ADD COLUMN IF NOT EXISTS|DELIMITER|CREATE PROCEDURE|\b(DROP|DELETE|TRUNCATE)\b/i', $statements)
     && !str_contains($statements, '"');
+$superset = "ENUM(''user'',''ip'',''verify_user'',''verify_ip'',''email_user'',''email_ip'',''email_address'',''sms_user'',''sms_ip'',''sms_phone'')";
+$checks['both SQL files give back the text-message scopes and keep the email-only build\'s'] = str_contains($sql, $superset)
+    && str_contains((string)file_get_contents($root.'/database/migrations/20261009_two_factor.sql'), $superset);
 
 $env = (string)file_get_contents($root.'/.env.example');
 $checks['.env.example documents the mail settings, with no secret in it'] = (bool)preg_match('/^MAIL_DRIVER=$/m', $env)
     && (bool)preg_match('/^MAIL_HOST=$/m', $env) && (bool)preg_match('/^MAIL_USERNAME=$/m', $env)
     && (bool)preg_match('/^MAIL_PASSWORD=$/m', $env) && (bool)preg_match('/^MAIL_ENCRYPTION=starttls$/m', $env);
 $config = (string)file_get_contents($root.'/config/config.php');
-preg_match_all("/env\\('(MAIL_[A-Z_]+)'/", $config, $keys);
-$checks['and every MAIL_ setting the server reads is in it'] = count($keys[1]) >= 9
+preg_match_all("/(?:env|\\\$firstEnv)\\('(MAIL_[A-Z_]+)'/", $config, $keys);
+$checks['and every MAIL_ setting the server reads is in it'] = count(array_unique($keys[1])) >= 10 && in_array('MAIL_CA_FILE', $keys[1], true)
     && array_filter($keys[1], static fn(string $k): bool => !preg_match('/^'.$k.'=/m', $env)) === [];
 // .env has no comments after a value: config/bootstrap.php keeps the comment
 // as part of it, so a copied example would carry it into a password.

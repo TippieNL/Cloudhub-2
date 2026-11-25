@@ -13,6 +13,19 @@ if ($normalisedRoot === 'storage' && is_dir(dirname(__DIR__) . '/storage/files')
 if (!str_starts_with($root, '/') && !preg_match('/^[A-Za-z]:[\\\\\/]/', $root)) $root = dirname(__DIR__) . '/' . $root;
 $root = rtrim(str_replace('\\','/', $root), '/');
 if (!is_dir($root)) mkdir($root, 0775, true);
+
+// The first of these settings that is set to something. The mail settings are
+// also read under the names the email-only build of two-step verification
+// used -- SMTP_HOST, SMTP_PASSWORD, MAIL_FROM_ADDRESS and so on -- whenever the
+// MAIL_ ones are empty, so a .env written for that build keeps working.
+$firstEnv = static function (string ...$keys): ?string {
+    foreach ($keys as $key) {
+        $value = env($key);
+        if ($value !== null && trim((string)$value) !== '') return (string)$value;
+    }
+    return null;
+};
+
 return [
  'app_env'=>(string)env('APP_ENV','production'), 'app_url'=>(string)env('APP_URL',''), 'root_dir'=>$root,
  'read_only'=>env_bool('READ_ONLY'), 'allow_delete'=>env_bool('ALLOW_DELETE',true), 'allow_overwrite'=>env_bool('ALLOW_OVERWRITE',true),
@@ -48,22 +61,26 @@ return [
  'sms_webhook_token'=>trim((string)env('SMS_WEBHOOK_TOKEN','')),
  'sms_webhook_format'=>strtolower(trim((string)env('SMS_WEBHOOK_FORMAT','cloudhub'))),
  // Email for two-step verification codes, instead of or beside SMS; see
- // .env.example. With no MAIL_DRIVER nobody can choose email.
- 'mail_driver'=>strtolower(trim((string)env('MAIL_DRIVER',''))),
- 'mail_host'=>trim((string)env('MAIL_HOST','')),
- 'mail_port'=>(int)env('MAIL_PORT',0),
- 'mail_encryption'=>strtolower(trim((string)env('MAIL_ENCRYPTION',''))),
- 'mail_username'=>trim((string)env('MAIL_USERNAME','')),
- 'mail_password'=>(string)env('MAIL_PASSWORD',''),
- 'mail_from'=>trim((string)env('MAIL_FROM','')),
+ // .env.example. With no MAIL_DRIVER nobody can choose email -- except that
+ // SMTP_HOST, from the email-only build, stands for MAIL_DRIVER=smtp.
+ 'mail_driver'=>strtolower(trim($firstEnv('MAIL_DRIVER') ?? ($firstEnv('SMTP_HOST') !== null ? 'smtp' : ''))),
+ 'mail_host'=>trim($firstEnv('MAIL_HOST', 'SMTP_HOST') ?? ''),
+ 'mail_port'=>(int)($firstEnv('MAIL_PORT', 'SMTP_PORT') ?? 0),
+ 'mail_encryption'=>strtolower(trim($firstEnv('MAIL_ENCRYPTION', 'SMTP_ENCRYPTION') ?? '')),
+ 'mail_username'=>trim($firstEnv('MAIL_USERNAME', 'SMTP_USERNAME') ?? ''),
+ 'mail_password'=>$firstEnv('MAIL_PASSWORD', 'SMTP_PASSWORD') ?? '',
+ 'mail_from'=>trim($firstEnv('MAIL_FROM', 'MAIL_FROM_ADDRESS') ?? ''),
  'mail_from_name'=>trim((string)env('MAIL_FROM_NAME','')),
- 'mail_timeout_seconds'=>(int)env('MAIL_TIMEOUT_SECONDS',10),
+ 'mail_timeout_seconds'=>(int)($firstEnv('MAIL_TIMEOUT_SECONDS', 'SMTP_TIMEOUT_SECONDS') ?? 10),
+ // A CA bundle, for a PHP whose OpenSSL has none (common on Android/KSWEB).
+ 'mail_ca_file'=>trim($firstEnv('MAIL_CA_FILE', 'SMTP_CA_FILE') ?? ''),
  'two_factor_secret'=>(string)env('TWO_FACTOR_SECRET',''),
  'two_factor_code_ttl_seconds'=>(int)env('TWO_FACTOR_CODE_TTL_SECONDS',300),
  'two_factor_max_attempts'=>(int)env('TWO_FACTOR_MAX_ATTEMPTS',5),
  'two_factor_resend_seconds'=>(int)env('TWO_FACTOR_RESEND_SECONDS',60),
- 'two_factor_sms_per_hour'=>(int)env('TWO_FACTOR_SMS_PER_HOUR',5),
- 'two_factor_sms_ip_per_hour'=>(int)env('TWO_FACTOR_SMS_IP_PER_HOUR',20),
+ // Texts and emails together; the email-only build's names count as well.
+ 'two_factor_sms_per_hour'=>(int)($firstEnv('TWO_FACTOR_SMS_PER_HOUR', 'TWO_FACTOR_EMAIL_PER_HOUR') ?? 5),
+ 'two_factor_sms_ip_per_hour'=>(int)($firstEnv('TWO_FACTOR_SMS_IP_PER_HOUR', 'TWO_FACTOR_EMAIL_IP_PER_HOUR') ?? 20),
  'two_factor_failures_per_hour'=>(int)env('TWO_FACTOR_FAILURES_PER_HOUR',10),
  'two_factor_ip_failures_per_hour'=>(int)env('TWO_FACTOR_IP_FAILURES_PER_HOUR',30),
 ];
