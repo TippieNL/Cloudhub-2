@@ -107,7 +107,11 @@ object TwoFactorText {
         if (channel == "email") destination ?: "your email address" else "your phone number ending in ${phoneEnding ?: "••"}"
 
     /** The line under the On/Off badge. */
-    fun summary(o: TwoFactorOverview): String = when {
+    fun summary(o: TwoFactorOverview): String = status(o) +
+        // Administrators are told which .env setting is at fault, as in the web app.
+        listOfNotNull(o.smsProblem, o.mailProblem).filter { it.isNotBlank() }.joinToString("") { " Server setting: $it." }
+
+    private fun status(o: TwoFactorOverview): String = when {
         o.enabled -> buildString {
             val left = o.recoveryCodesLeft
             val email = o.channel == "email"
@@ -120,7 +124,13 @@ object TwoFactorText {
             } else if (left <= 2) append(" Create new ones soon.")
         }
         !o.schemaReady -> "Not available yet: the server's database needs updating (php database/migrate.php)."
-        !o.smsAvailable && !o.emailAvailable -> "Not available: no text-message service is set up on this server. An administrator can configure one."
+        // Not "nothing is set up" when something is set up and refused: an
+        // administrator is told which setting below.
+        !o.smsAvailable && !o.emailAvailable -> if (!o.smsProblem.isNullOrBlank() || !o.mailProblem.isNullOrBlank()) {
+            "Not available: this server cannot send codes."
+        } else {
+            "Not available: this server has no text-message or email service set up. An administrator can configure one."
+        }
         o.smsAvailable && o.emailAvailable -> "Off. Turn it on to be asked, after your password, for a code sent by email or text message."
         o.emailAvailable -> "Off. Turn it on to be asked, after your password, for a code sent to your email."
         else -> "Off. Turn it on to be asked, after your password, for a code texted to your phone."

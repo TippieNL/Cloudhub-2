@@ -616,8 +616,27 @@ class TwoFactorTextTest {
     @Test
     fun `when it cannot be turned on, the summary says why`() {
         assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = false)).contains("migrate.php"))
-        assertTrue(TwoFactorText.summary(TwoFactorOverview(schemaReady = true, smsAvailable = false)).contains("no text-message service"))
+        assertEquals("Not available: this server has no text-message or email service set up. An administrator can configure one.",
+            TwoFactorText.summary(TwoFactorOverview(schemaReady = true, smsAvailable = false)))
         assertTrue(TwoFactorText.summary(TwoFactorOverview(available = true, schemaReady = true, smsAvailable = true)).startsWith("Off."))
+    }
+
+    @Test
+    fun `an administrator is told which server setting keeps codes off`() {
+        val refused = TwoFactorOverview(schemaReady = true, mailProblem = "MAIL_HOST is missing; emails are off")
+        assertEquals("Not available: this server cannot send codes. Server setting: MAIL_HOST is missing; emails are off.",
+            TwoFactorText.summary(refused))
+        // Both problems are named, and one that works says nothing.
+        val both = refused.copy(smsProblem = "SMS_WEBHOOK_URL is refused; texts are off")
+        assertTrue(TwoFactorText.summary(both).contains("Server setting: SMS_WEBHOOK_URL is refused; texts are off. Server setting: MAIL_HOST"))
+        val emailOnly = TwoFactorOverview(available = true, schemaReady = true, emailAvailable = true, smsProblem = "SMS_DRIVER is unknown")
+        assertEquals("Off. Turn it on to be asked, after your password, for a code sent to your email. Server setting: SMS_DRIVER is unknown.",
+            TwoFactorText.summary(emailOnly))
+        // Servers send these to administrators only; everyone else gets the overview without them.
+        val parsed = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString(TwoFactorOverview.serializer(),
+            """{"available":false,"schemaReady":true,"smsAvailable":false,"emailAvailable":false,"enabled":false,"mailProblem":"MAIL_FROM must be an email address"}""")
+        assertEquals("MAIL_FROM must be an email address", parsed.mailProblem)
+        assertEquals(null, parsed.smsProblem)
     }
 
     @Test

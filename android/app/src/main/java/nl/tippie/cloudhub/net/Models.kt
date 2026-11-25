@@ -128,6 +128,9 @@ data class TwoFactorOverview(
     val enabledAt: String? = null,
     val recoveryCodesLeft: Int = 0,
     val codeLength: Int = 6,
+    /** Administrators only: the .env setting that keeps texts or email off (never its value). */
+    val smsProblem: String? = null,
+    val mailProblem: String? = null,
 )
 
 /**

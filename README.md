@@ -514,8 +514,12 @@ web app or 4.3.
 
 Codes by email need no new app to sign in: 4.3 to 4.7 ask for "the code we
 sent" and take an emailed code like a texted one. Choosing email, and the
-email wording, are in the web app now and in the app's source for its next
-build.
+email wording, are in the web app and, from 4.8, in the app: **Settings** →
+**Two-step verification** → **Turn on** (**Turn on with email** where texts
+work too), or **Use email instead** while codes are texted. 4.8 also names,
+to an administrator, the server setting
+that keeps texts or email off. `dist/CloudHub-4.8.apk` is signed with a new
+key, so it installs only after 4.7 is uninstalled (see *Signing*).
 
 ## Installing as an app
 
